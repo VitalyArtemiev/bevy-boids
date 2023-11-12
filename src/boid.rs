@@ -6,7 +6,7 @@ use bevy::{
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy_spatial::kdtree::KDTree3;
 use bevy_spatial::SpatialAccess;
-use rand::{random, Rng};
+use rand::Rng;
 use crate::kinematics::*;
 use crate::terrain::Terrain;
 use crate::util::BundleDefault;
@@ -162,18 +162,26 @@ pub fn follow_target(mut query: Query<(&Transform, &Boid, &mut Velocity)>) {
 const INTERACTION_RADIUS: f32 = 3.0;
 const REPEL_COEF: f32 = 2000.0;
 const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 2000.0;
-type NNTree = KDTree3<SoftCollision>;
+pub type NNTree = KDTree3<SoftCollision>;
 
 
 pub fn avoid_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>, tree: Res<NNTree>){
     for (transform, mut vel) in &mut query {
         let this = transform.translation;
         let mut dir = Vec3::default();
-        for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
+
+        if let Some((other, _)) = tree.nearest_neighbour(this) {
+            let vec = other - this;
+            let len = vec.length();
+            //Don't need a branch - if len is large, effect is small
+            dir += vec.normalize() / len;
+        }
+        //Maybe don't need more than one? Should bench but this is slower at 10k
+        /*for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
             let vec = other - this;
             let rec = vec.length_recip();
             dir += vec.normalize() * rec;
-        }
+        }*/
         vel.push = (dir * REPEL_COEF).clamp_length_max(MAX_REPEL_ACCELERATION);
     }
 }

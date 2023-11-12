@@ -3,6 +3,7 @@ mod kinematics;
 mod formations;
 mod terrain;
 mod util;
+mod horse;
 
 use std::time::Duration;
 use bevy::{
@@ -41,8 +42,8 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for i in 1..50 {
-        for j in 1..50 {
+    for i in 1..100 {
+        for j in 1..100 {
             commands.spawn(BoidBundle::with_boid(Boid{ target: Vec3::from_array([(i - 10) as f32, 0.0, (j-10) as f32]) }, &mut meshes, &mut images, &mut materials));
         }
     }
