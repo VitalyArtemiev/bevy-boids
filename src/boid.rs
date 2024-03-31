@@ -3,6 +3,7 @@ use bevy::prelude::Bundle;
 use bevy::{
     prelude::*,
 };
+use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy_spatial::kdtree::KDTree3;
 use bevy_spatial::SpatialAccess;
@@ -48,6 +49,7 @@ fn uv_debug_texture() -> Image {
         TextureDimension::D2,
         &texture_data,
         TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
     )
 }
 
@@ -60,7 +62,7 @@ impl BundleDefault for BoidBundle {
             base_color_texture: Some(images.add(uv_debug_texture())),
             ..default()
         });
-        let capsule = meshes.add(shape::Capsule::default().into());
+        let capsule = meshes.add(Capsule3d::default());
 
         BoidBundle {
             boid: Default::default(),
@@ -88,7 +90,7 @@ impl BoidBundle {
             base_color_texture: Some(images.add(uv_debug_texture())),
             ..default()
         });
-        let capsule = meshes.add(shape::Capsule::default().into());
+        let capsule = meshes.add(Capsule3d::default());
 
         let mut rng = rand::thread_rng();
         let x = rng.gen_range(-10.0..10.0);
@@ -119,7 +121,7 @@ impl BoidBundle {
             base_color_texture: Some(images.add(uv_debug_texture())),
             ..default()
         });
-        let capsule = meshes.add(shape::Capsule::default().into());
+        let capsule = meshes.add(Capsule3d::default());
 
         let mut rng = rand::thread_rng();
         let x = rng.gen_range(-10.0..10.0);

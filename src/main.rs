@@ -4,11 +4,15 @@ mod formations;
 mod terrain;
 mod util;
 mod horse;
+mod player;
 
 use std::time::Duration;
 use bevy::{
     prelude::*,
 };
+use bevy::render::RenderPlugin;
+use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
+use bevy_rts_camera::{Ground, RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, SpatialAccess, TransformMode};
 use crate::boid::*;
 use crate::kinematics::*;
@@ -18,6 +22,7 @@ use crate::terrain::TerrainBundle;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .add_plugins(RtsCameraPlugin)
         .add_plugins(AutomaticUpdate::<(SoftCollision)>::new()
             .with_frequency(Duration::from_secs_f32(1.0))
             .with_transform(TransformMode::Transform))
@@ -42,9 +47,16 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for i in 1..100 {
-        for j in 1..100 {
-            commands.spawn(BoidBundle::with_boid(Boid{ target: Vec3::from_array([(i - 10) as f32, 0.0, (j-10) as f32]) }, &mut meshes, &mut images, &mut materials));
+    for i in 1..20 {
+        for j in 1..20 {
+            commands.spawn(BoidBundle::with_boid(
+                Boid{ 
+                    target: Vec3::from_array([(i - 10) as f32, 0.0, (j-10) as f32]) 
+                },
+                &mut meshes,
+                &mut images,
+                &mut materials
+            ));
         }
     }
 
@@ -55,15 +67,25 @@ fn setup(
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(8.0, 16.0, 8.0),
+        transform: Transform::from_xyz(10.0, 10.0, 0.0),
         ..default()
     });
 
     // ground plane
     commands.spawn(TerrainBundle::default(&mut meshes, &mut images, &mut materials));
 
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 6., 12.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
-        ..default()
-    });
+    commands.spawn((
+        Camera3dBundle::default(),
+        RtsCamera::default(),
+        RtsCameraControls {
+            key_up: KeyCode::KeyW,
+            key_down: KeyCode::KeyS,
+            key_left: KeyCode::KeyA,
+            key_right: KeyCode::KeyD,
+            button_rotate: MouseButton::Middle,
+            edge_pan_width: 0.00,
+            pan_speed: 15.0,
+            enabled: true,
+        },
+    ));
 }

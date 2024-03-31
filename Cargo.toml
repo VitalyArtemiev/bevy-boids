@@ -1,14 +1,16 @@
+cargo-features = ["edition2024"]
 [package]
 name = "bevy-boids"
 version = "0.1.0"
-edition = "2023"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.12.0", features = ["trace", "trace_tracy", "trace_tracy_memory"] }
-bevy_spatial = "0.7.0"
+bevy = { version = "0.13.1", features = ["dynamic_linking", "trace", "trace_tracy", "trace_tracy_memory"] }
+bevy_spatial = "0.8.0"
 #bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "main" }
+bevy_rts_camera = "0.4.0"
 rand = "0.8.5"
 derive_more = "0.99.17"
 lazy_static = "1.4.0"
@@ -17,6 +19,10 @@ serde = { version = "1.0.136", features = ["derive"] }
 [dev-dependencies]
 quickcheck = "1.0.3"
 #proptest may be better
+
+# Enable a small amount of optimization in debug mode
+[profile.dev]
+opt-level = 1
 
 # Enable max optimizations for dependencies, but not for our code:
 [profile.dev.package."*"]

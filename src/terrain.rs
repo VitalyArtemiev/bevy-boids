@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_rts_camera::Ground;
 use crate::util::BundleDefault;
 
 #[derive(Component, Default)]
@@ -8,6 +9,7 @@ pub struct Terrain {}
 pub struct TerrainBundle {
     pbr: PbrBundle,
     terrain: Terrain,
+    ground: Ground
 }
 
 impl BundleDefault for TerrainBundle {
@@ -15,11 +17,12 @@ impl BundleDefault for TerrainBundle {
         TerrainBundle {
             pbr: PbrBundle
             {
-                mesh: meshes.add(shape::Plane::from_size(50.0).into()),
-                material: materials.add(Color::SILVER.into()),
+                mesh: meshes.add(shape::Plane::from_size(50.0)),
+                material: materials.add(Color::SILVER),
                 ..default()
             },
             terrain: Default::default(),
+            ground: Ground,
         }
     }
 }
