@@ -16,8 +16,9 @@ use bevy_rts_camera::{Ground, RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, SpatialAccess, TransformMode};
 use crate::boid::*;
 use crate::kinematics::*;
+use crate::player::{draw_cursor, mouse_click_system, Player};
 use crate::util::*;
-use crate::terrain::TerrainBundle;
+use crate::terrain::{Terrain, TerrainBundle};
 
 fn main() {
     App::new()
@@ -27,7 +28,7 @@ fn main() {
             .with_frequency(Duration::from_secs_f32(1.0))
             .with_transform(TransformMode::Transform))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_step, avoid_collisions, bob))
+        .add_systems(Update, (move_step, avoid_collisions, bob, draw_cursor, mouse_click_system))
         .add_systems(FixedUpdate, (follow_target))
         .run();
 }
@@ -75,6 +76,7 @@ fn setup(
     commands.spawn(TerrainBundle::default(&mut meshes, &mut images, &mut materials));
 
     commands.spawn((
+        Player::default(),
         Camera3dBundle::default(),
         RtsCamera::default(),
         RtsCameraControls {
