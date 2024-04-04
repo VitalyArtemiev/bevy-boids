@@ -1,7 +1,5 @@
 use bevy::prelude::*;
 use bevy_rts_camera::Ground;
-use bevy_spatial::kdtree::KDTree3;
-use crate::kinematics::SoftCollision;
 use crate::util::BundleDefault;
 
 #[derive(Component, Default)]
@@ -13,9 +11,6 @@ pub struct TerrainBundle {
     terrain: Terrain,
     ground: Ground
 }
-
-pub type TerrainTree = KDTree3<Terrain>;
-
 
 impl BundleDefault for TerrainBundle {
     fn default(meshes: &mut ResMut<Assets<Mesh>>, images: &mut ResMut<Assets<Image>>, materials: &mut ResMut<Assets<StandardMaterial>>) -> Self {

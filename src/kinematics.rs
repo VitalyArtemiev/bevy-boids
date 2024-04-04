@@ -1,5 +1,6 @@
 use bevy::math::Vec3;
 use bevy::prelude::*;
+use bevy_spatial::kdtree::KDTree3;
 
 #[derive(Component,Default)]
 pub struct Velocity {
@@ -21,13 +22,22 @@ pub fn move_step(mut query: Query<(&mut Transform, &mut Velocity)>, time: Res<Ti
     for (mut transform, mut vel) in &mut query {
         let delta_t = time.delta_seconds();
         //search for HardCollision
-        vel.v = (vel.v + (vel.a + vel.push*100.0) * delta_t).clamp_length_max(MAX_VELOCITY);
+        vel.v = (vel.v + (vel.a + vel.push) * delta_t).clamp_length_max(MAX_VELOCITY);
         transform.translation += vel.v * delta_t;
     }
 }
 
-#[derive(Component)]
-pub struct SoftCollision {}
+pub type NNTree = KDTree3<TrackedByTree>;
 
-#[derive(Component)]
-pub struct HardCollision {}
+#[derive(Component, Default)]
+pub struct TrackedByTree;
+
+#[derive(Component, Default)]
+pub struct SoftCollision {
+    tracked: TrackedByTree
+}
+
+#[derive(Component, Default)]
+pub struct HardCollision {
+    tracked: TrackedByTree
+}

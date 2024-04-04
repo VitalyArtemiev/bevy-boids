@@ -10,25 +10,24 @@ use std::time::Duration;
 use bevy::{
     prelude::*,
 };
-use bevy::render::RenderPlugin;
-use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy_rts_camera::{Ground, RtsCamera, RtsCameraControls, RtsCameraPlugin};
-use bevy_spatial::{AutomaticUpdate, SpatialAccess, TransformMode};
+
+use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
+use bevy_spatial::{AutomaticUpdate, TransformMode};
 use crate::boid::*;
 use crate::kinematics::*;
 use crate::player::{draw_cursor, mouse_click_system, Player};
 use crate::util::*;
-use crate::terrain::{Terrain, TerrainBundle};
+use crate::terrain::{TerrainBundle};
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .add_plugins(RtsCameraPlugin)
-        .add_plugins(AutomaticUpdate::<(SoftCollision)>::new()
+        .add_plugins(AutomaticUpdate::<(TrackedByTree)>::new()
             .with_frequency(Duration::from_secs_f32(1.0))
             .with_transform(TransformMode::Transform))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_step, avoid_collisions, bob, draw_cursor, mouse_click_system))
+        .add_systems(Update, (avoid_collisions, move_step, bob, draw_cursor, mouse_click_system))
         .add_systems(FixedUpdate, (follow_target))
         .run();
 }

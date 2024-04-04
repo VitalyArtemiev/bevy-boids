@@ -17,12 +17,14 @@ pub struct Boid {
     pub(crate) target: Vec3,
 }
 
-#[derive(Bundle)]
+#[derive(Bundle, Default)]
 pub struct BoidBundle {
     boid: Boid,
     vel: Velocity,
     pbr: PbrBundle,
     bob: Bob,
+    collision: SoftCollision,
+    tracked: TrackedByTree,
 }
 
 fn uv_debug_texture() -> Image {
@@ -77,7 +79,7 @@ impl BundleDefault for BoidBundle {
                 ),
                 ..default()
             },
-            bob: Default::default(),
+            ..default()
         }
     }
 }
@@ -99,7 +101,6 @@ impl BoidBundle {
 
         BoidBundle {
             boid,
-            vel: Default::default(),
             pbr: PbrBundle {
                 mesh: capsule,
                 material: debug_material,
@@ -111,6 +112,7 @@ impl BoidBundle {
                 ..default()
             },
             bob: Bob { offset: bob_offset },
+            ..default()
         }
     }
     pub fn random(meshes: &mut ResMut<Assets<Mesh>>,
@@ -130,7 +132,6 @@ impl BoidBundle {
 
         BoidBundle {
             boid: Boid { target: Vec3::from_array([-x, 0.0, -z])},
-            vel: Default::default(),
             pbr: PbrBundle {
                 mesh: capsule,
                 material: debug_material,
@@ -142,6 +143,7 @@ impl BoidBundle {
                 ..default()
             },
             bob: Bob { offset: bob_offset },
+            ..default()
         }
     }
 }
@@ -155,36 +157,38 @@ pub fn follow_target(mut query: Query<(&Transform, &Boid, &mut Velocity)>) {
         let v = vel.v.length() * v_sign;
         //we always wanna be there in DECELERATION_TIME_SEC
         //a = (l-vt)/t2
-        let a = ((l - v * DECELERATION_TIME_SEC)/DECELERATION_TIME_SEC_SQUARED).clamp(-MAX_ACCELERATION, MAX_ACCELERATION);
+        let a = ((l - v * DECELERATION_TIME_SEC)/DECELERATION_TIME_SEC_SQUARED);
 
         vel.a = (dir.normalize() * a).clamp_length_max(MAX_ACCELERATION);
     }
 }
 
-const INTERACTION_RADIUS: f32 = 3.0;
-const REPEL_COEF: f32 = 2000.0;
-const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 2000.0;
-pub type NNTree = KDTree3<SoftCollision>;
-
+const INTERACTION_RADIUS: f32 = 1.0;
+const REPEL_COEF: f32 = 0.05;
+const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 0.5;
 
 pub fn avoid_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>, tree: Res<NNTree>){
     for (transform, mut vel) in &mut query {
         let this = transform.translation;
         let mut dir = Vec3::default();
-
+        
         if let Some((other, _)) = tree.nearest_neighbour(this) {
-            let vec = other - this;
-            let len = vec.length();
+            let vec = -other + this;
+            let len = vec.length() + 0.01;
             //Don't need a branch - if len is large, effect is small
             dir += vec.normalize() / len;
         }
         //Maybe don't need more than one? Should bench but this is slower at 10k
-        /*for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
-            let vec = other - this;
-            let rec = vec.length_recip();
-            dir += vec.normalize() * rec;
-        }*/
-        vel.push = (dir * REPEL_COEF).clamp_length_max(MAX_REPEL_ACCELERATION);
+        // for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
+        //     let vec = - other + this;
+        //     let len = vec.length() + 0.01;
+        //     dir += vec.normalize() / len;
+        // }
+        
+        let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
+
+        // vel.push = (dir).clamp_length_max(min_a);
+        vel.a += (dir).clamp_length_max(min_a);
     }
 }
 
@@ -196,7 +200,7 @@ pub struct Bob {
 const BOB_AMPLITUDE: f32 = 0.1;
 const BOB_FREQ_COEF: f32 = 0.3;
 
-pub fn bob(mut q_boids: Query<(&mut Transform,  &Velocity, &Bob), With<Boid>>, tree: Res<NNTree>, q_terrain: Query<(&Terrain)>, time: Res<Time>) {
+pub fn bob(mut q_boids: Query<(&mut Transform,  &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
     for (mut transform, vel, bob) in &mut q_boids {
         let freq = vel.v.length() * BOB_FREQ_COEF;
         let time_elapsed = time.elapsed_seconds();

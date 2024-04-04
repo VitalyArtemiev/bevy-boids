@@ -1,9 +1,10 @@
 use bevy::math::Vec3;
-use bevy::prelude::{Bundle, ButtonInput, Camera, Camera3d, Color, Component, Direction3d, Entity, Gizmos, GlobalTransform, KeyCode, MouseButton, Plane3d, Query, Res, Time, Transform, Vec2, Window, With};
+use bevy::pbr::{PointLight, PointLightBundle};
+use bevy::prelude::{Assets, BuildChildren, BuildChildrenTransformExt, Bundle, ButtonInput, Camera, Camera3d, Children, Color, Commands, Component, default, Direction3d, Entity, Gizmos, GlobalTransform, KeyCode, Mesh, MouseButton, PbrBundle, Plane3d, Query, Res, ResMut, StandardMaterial, Time, Transform, Vec2, Window, With};
 use bevy_rts_camera::{Ground, RtsCamera};
-use crate::boid::{Boid, NNTree};
-use crate::kinematics::Velocity;
-use crate::terrain::Terrain;
+use bevy_spatial::{SpatialAABBAccess, SpatialAccess};
+use crate::boid::{Bob, Boid};
+use crate::kinematics::{NNTree, SoftCollision, TrackedByTree, Velocity};
 
 #[derive(Component,Default)]
 pub struct Player {
@@ -12,6 +13,9 @@ pub struct Player {
     corner4: Vec3,
     selected: Vec<Entity>
 }
+
+#[derive(Component, Default)]
+pub struct Selected;
 
 
 fn get_intersection(cursor_position: &Vec2, camera: &Camera, camera_transform: &GlobalTransform, ground_transform: &GlobalTransform) -> Option<Vec3> {
@@ -55,8 +59,12 @@ pub fn draw_cursor(
 pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut Player)>, 
                           q_ground: Query<&GlobalTransform, With<Ground>>, 
                           mouse_button_input: Res<ButtonInput<MouseButton>>,
+                          keys: Res<ButtonInput<KeyCode>>,
                           windows: Query<&Window>,
-                          mut gizmos: Gizmos) {
+                          q_selected: Query<(Entity, &Children), With<Selected>>,
+                          tree: Res<NNTree>,
+                          mut gizmos: Gizmos,
+                          mut commands: Commands, ) {
     let (camera, camera_transform, mut player) = q_player.single_mut();
     let ground = q_ground.single();
     let Some(cursor_position) = windows.single().cursor_position() else {
@@ -71,9 +79,50 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
         player.corner1 = point;
     }
 
+
     if mouse_button_input.just_released(MouseButton::Left) {
         player.corner4 = point;
         player.selecting = false;
+
+        if !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]){
+            for (entity, children) in &q_selected {
+                commands.entity(entity).remove::<Selected>();
+                commands.entity(entity).remove_children(children);
+                for child in children {
+                    commands.entity(*child).despawn()
+                }
+                    
+                // commands.entity(entity).clear_children();
+            }
+        }
+
+        let up = Vec3 {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        };        
+        
+        for (_, entity) in tree.within(player.corner1 + up, player.corner4 - up) {
+            // commands.entity(entity.unwrap()).try_insert(SelectedBundle ::default());
+
+            commands.entity(entity.unwrap()).insert(Selected);
+            commands.spawn(PointLightBundle {
+                point_light: PointLight {
+                    intensity: 100.0,
+                    range: 100.,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::from_xyz(0., 1., 0.),
+                ..default()
+            }).set_parent(entity.unwrap());
+
+
+            // if let Ok(mut boid) = query.get_mut(entity.unwrap()) {
+            //     entity.
+            //     boid.
+            // }
+        }
     }
     
     if mouse_button_input.pressed(MouseButton::Left) {
@@ -81,11 +130,12 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
 
         let right = camera_transform.right();
         let up = ground.up() * 0.01;
-
-        let dif = player.corner4 - player.corner1;
         
+        let dif = player.corner4 - player.corner1;
+
         let dif_hor = dif.project_onto(right);
         let dif_vert = dif - dif_hor;
+        
         let corner1 = player.corner1 + up;
         let corner2 = corner1 + dif_hor;
         let corner3 = player.corner4 + up;
@@ -95,5 +145,24 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
         gizmos.line(corner2, corner3, Color::BLUE);
         gizmos.line(corner3, corner4, Color::BLUE);
         gizmos.line(corner4, corner1, Color::BLUE);
+
+        let pos_x = Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        
+        let dif_x = dif.project_onto(pos_x);
+        let dif_z = dif - dif_x;
+        let corner1 = player.corner1 + up;
+        let corner2 = corner1 + dif_x;
+        let corner3 = player.corner4 + up;
+        let corner4 = corner1 + dif_z;
+
+        gizmos.line(corner1, corner2, Color::WHITE);
+        gizmos.line(corner2, corner3, Color::WHITE);
+        gizmos.line(corner3, corner4, Color::WHITE);
+        gizmos.line(corner4, corner1, Color::WHITE);
+        
     }
 }
