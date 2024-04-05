@@ -158,7 +158,7 @@ pub fn follow_target(mut query: Query<(&Transform, &Boid, &mut Velocity)>) {
         //we always wanna be there in DECELERATION_TIME_SEC
         //a = (l-vt)/t2
         let a = ((l - v * DECELERATION_TIME_SEC)/DECELERATION_TIME_SEC_SQUARED);
-
+        vel.target_v = (l / DECELERATION_TIME_SEC).clamp(0., MAX_VELOCITY);
         vel.a = (dir.normalize() * a).clamp_length_max(MAX_ACCELERATION);
     }
 }
