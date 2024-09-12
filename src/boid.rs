@@ -203,7 +203,7 @@ const BOB_FREQ_MIN: f32 = 0.05;
 
 pub fn bob(mut q_boids: Query<(&mut Transform,  &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
     for (mut transform, vel, bob) in &mut q_boids {
-        let freq = vel.v.length() * BOB_FREQ_COEF + BOB_FREQ_MIN;
+        let freq = (vel.v.length() * BOB_FREQ_COEF).clamp(BOB_FREQ_MIN, BOB_FREQ_MIN * 4.);
         let time_elapsed = time.elapsed_seconds();
         transform.translation.y = BOB_AMPLITUDE * f32::sin(freq * (bob.offset + time_elapsed))
     }
