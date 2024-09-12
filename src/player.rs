@@ -1,6 +1,7 @@
+use bevy::asset::io::memory::Dir;
 use bevy::math::Vec3;
 use bevy::pbr::{PointLight, PointLightBundle};
-use bevy::prelude::{Assets, BuildChildren, BuildChildrenTransformExt, Bundle, ButtonInput, Camera, Camera3d, Children, Color, Commands, Component, default, Direction3d, Entity, Gizmos, GlobalTransform, KeyCode, Mesh, MouseButton, PbrBundle, Plane3d, Query, Res, ResMut, StandardMaterial, Time, Transform, Vec2, Window, With};
+use bevy::prelude::{Assets, BuildChildren, BuildChildrenTransformExt, Bundle, ButtonInput, Camera, Camera3d, Children, Color, Commands, Component, default, Entity, Gizmos, GlobalTransform, KeyCode, Mesh, MouseButton, PbrBundle, Plane3d, Query, Res, ResMut, StandardMaterial, Time, Transform, Vec2, Window, With, Dir3, InfinitePlane3d};
 use bevy_rts_camera::{Ground, RtsCamera};
 use bevy_spatial::{SpatialAABBAccess, SpatialAccess};
 use crate::boid::{Bob, Boid};
@@ -23,7 +24,7 @@ fn get_intersection(cursor_position: &Vec2, camera: &Camera, camera_transform: &
     let ray = camera.viewport_to_world(camera_transform, *cursor_position)?;
 
     // Calculate if and where the ray is hitting the ground plane.
-    let distance = ray.intersect_plane(ground_transform.translation(), Plane3d::new(ground_transform.up()))?;
+    let distance = ray.intersect_plane(ground_transform.translation(), InfinitePlane3d { normal: Dir3::Y })?;
 
     Some(ray.get_point(distance))
 }
@@ -49,7 +50,7 @@ pub fn draw_cursor(
     // Draw a circle just above the ground plane at that position.
     gizmos.circle(
         point + ground.up() * 0.01,
-        Direction3d::new_unchecked(ground.up()), // Up vector is already normalized.
+        Dir3::Y, // Up vector is already normalized.
         0.2,
         Color::WHITE,
     );
@@ -133,7 +134,7 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
 
         let dif = player.corner4 - player.corner1;
 
-        let dif_hor = dif.project_onto(right);
+        let dif_hor = dif.project_onto(right.as_vec3());
         let dif_vert = dif - dif_hor;
 
         let corner1 = player.corner1 + up;
@@ -141,10 +142,10 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
         let corner3 = player.corner4 + up;
         let corner4 = corner1 + dif_vert;
 
-        gizmos.line(corner1, corner2, Color::BLUE);
-        gizmos.line(corner2, corner3, Color::BLUE);
-        gizmos.line(corner3, corner4, Color::BLUE);
-        gizmos.line(corner4, corner1, Color::BLUE);
+        gizmos.line(corner1, corner2, Color::srgb(0., 0., 1.));
+        gizmos.line(corner2, corner3, Color::srgb(0., 0., 1.));
+        gizmos.line(corner3, corner4, Color::srgb(0., 0., 1.));
+        gizmos.line(corner4, corner1, Color::srgb(0., 0., 1.));
 
         let pos_x = Vec3 {
             x: 1.0,

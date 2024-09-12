@@ -158,7 +158,7 @@ pub fn follow_target(mut query: Query<(&Transform, &Boid, &mut Velocity)>) {
         //we always wanna be there in DECELERATION_TIME_SEC
         //a = (l-vt)/t2
         let a = ((l - v * DECELERATION_TIME_SEC)/DECELERATION_TIME_SEC_SQUARED);
-        vel.target_v = (l / DECELERATION_TIME_SEC).clamp(0., MAX_VELOCITY);
+        vel.target_v = 0.99 * (l / DECELERATION_TIME_SEC).clamp(0., MAX_VELOCITY);
         vel.a = (dir.normalize() * a).clamp_length_max(MAX_ACCELERATION);
     }
 }
@@ -198,11 +198,12 @@ pub struct Bob {
 }
 
 const BOB_AMPLITUDE: f32 = 0.1;
-const BOB_FREQ_COEF: f32 = 0.3;
+const BOB_FREQ_COEF: f32 = 0.18;
+const BOB_FREQ_MIN: f32 = 0.05;
 
 pub fn bob(mut q_boids: Query<(&mut Transform,  &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
     for (mut transform, vel, bob) in &mut q_boids {
-        let freq = vel.v.length() * BOB_FREQ_COEF;
+        let freq = vel.v.length() * BOB_FREQ_COEF + BOB_FREQ_MIN;
         let time_elapsed = time.elapsed_seconds();
         transform.translation.y = BOB_AMPLITUDE * f32::sin(freq * (bob.offset + time_elapsed))
     }

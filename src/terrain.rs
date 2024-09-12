@@ -17,8 +17,8 @@ impl BundleDefault for TerrainBundle {
         TerrainBundle {
             pbr: PbrBundle
             {
-                mesh: meshes.add(shape::Plane::from_size(50.0)),
-                material: materials.add(Color::SILVER),
+                mesh: meshes.add(Plane3d{ normal: Dir3::Y, half_size: Vec2::new(25., 25.)}),
+                material: materials.add(Color::WHITE),
                 ..default()
             },
             terrain: Default::default(),
