@@ -58,8 +58,8 @@ pub struct FormationMember {
 }
 
 pub fn form_up(
-    mut q_members: Query<(&mut FormationMember)>,
-    mut q_formations: Query<(&Formation)>,
+    mut q_members: Query<&mut FormationMember>,
+    mut q_formations: Query<&Formation>,
 ) {
 
     for member in &mut q_members {

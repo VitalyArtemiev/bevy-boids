@@ -41,7 +41,7 @@ fn main() {
             .with_frequency(Duration::from_secs_f32(1.0))
             .with_transform(TransformMode::Transform))
         .add_systems(Startup, setup)
-        .add_systems(Update, (avoid_collisions, move_step, bob, draw_cursor, mouse_click_system))
+        .add_systems(Update, (soft_collisions, move_step, bob, draw_cursor, mouse_click_system))
         .add_systems(FixedUpdate, (follow_target))
         .run();
 }

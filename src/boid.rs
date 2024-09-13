@@ -45,7 +45,7 @@ impl BoidBundle {
                 material,
                 transform: Transform::from_xyz(
                     x,
-                    0.0,
+                    0.5,
                     z,
                 ),
                 ..default()
@@ -68,7 +68,7 @@ impl BoidBundle {
                 material,
                 transform: Transform::from_xyz(
                     x,
-                    0.0,
+                    0.5,
                     z,
                 ),
                 ..default()
@@ -84,8 +84,34 @@ const INTERACTION_RADIUS: f32 = 1.0;
 const REPEL_COEF: f32 = 0.05;
 const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 0.5;
 
-pub fn avoid_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>, tree: Res<NNTree>){
+pub fn soft_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>, tree: Res<NNTree>){
     query.par_iter_mut().for_each(|(transform, mut vel)| {
+        let this = transform.translation;
+        let mut dir = Vec3::default();
+
+        if let Some((other, _)) = tree.nearest_neighbour(this) {
+            let vec = -other + this;
+            let len = vec.length().max(0.01);
+            //Don't need a branch - if len is large, effect is small
+            dir += vec.normalize() / len;
+        }
+        //Maybe don't need more than one? Should bench but this is slower at 10k
+        // for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
+        //     let vec = - other + this;
+        //     let len = vec.length() + 0.01;
+        //     dir += vec.normalize() / len;
+        // }
+
+        let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
+
+        // vel.push = (dir).clamp_length_max(min_a);
+        vel.a += (dir).clamp_length_max(min_a);
+    })
+}
+
+pub fn hard_collisions(mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>, q_walls: Query<(&Transform), With<HardCollision>>, tree: Res<NNTree>){
+    /// Find wall. Find all ents near wall. repel.
+    q_boids.par_iter_mut().for_each(|(transform, mut vel)| {
         let this = transform.translation;
         let mut dir = Vec3::default();
 
