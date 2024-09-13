@@ -3,14 +3,14 @@ use rand::Rng;
 use crate::boid::Boid;
 use crate::kinematics::Velocity;
 
-pub enum FormationType {
+pub enum FormationKind {
     Random(u32), // Total
     Square(u32, u32), // Total, Index 
     Rect(u32, u32), // Total, Index, Depth
     Circle(u32, u32), // Total, Index
     //Custom(u32, FormationFunction) //I dunno
 }
-pub type FormationFunction = fn(usize, FormationType) -> Vec2;
+pub type FormationFunction = fn(usize, FormationKind) -> Vec2;
 
 // pub fn random_formation(_: usize, ftype: FormationType) -> Vec2 {
 //     if let FormationType::Random(total) = ftype {
@@ -39,6 +39,7 @@ pub fn square(_: usize, total: usize) -> Vec2 {
 #[derive(Component)]
 
 pub struct Formation {
+    kind: FormationKind,
     width: f32,
     depth: f32,
 }
@@ -57,11 +58,11 @@ pub struct FormationMember {
 }
 
 pub fn form_up(
-    mut q_boids: Query<(&mut Boid, &FormationMember)>,
+    mut q_members: Query<(&mut FormationMember)>,
     mut q_formations: Query<(&Formation)>,
 ) {
 
-    for (mut boid, member) in &mut q_boids {
+    for member in &mut q_members {
         let _ = q_formations.get(member.formation);
     }
 }
