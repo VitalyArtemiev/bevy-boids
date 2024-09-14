@@ -1,11 +1,9 @@
-use bevy::asset::io::memory::Dir;
+use crate::kinematics::NNTree;
 use bevy::math::Vec3;
 use bevy::pbr::{PointLight, PointLightBundle};
-use bevy::prelude::{Assets, BuildChildren, BuildChildrenTransformExt, Bundle, ButtonInput, Camera, Camera3d, Children, Color, Commands, Component, default, Entity, Gizmos, GlobalTransform, KeyCode, Mesh, MouseButton, PbrBundle, Plane3d, Query, Res, ResMut, StandardMaterial, Time, Transform, Vec2, Window, With, Dir3, InfinitePlane3d};
-use bevy_rts_camera::{Ground, RtsCamera};
-use bevy_spatial::{SpatialAABBAccess, SpatialAccess};
-use crate::boid::{Bob, Boid};
-use crate::kinematics::{NNTree, SoftCollision, TrackedByTree, Velocity};
+use bevy::prelude::{default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, MouseButton, Query, Res, Transform, Vec2, Window, With};
+use bevy_rts_camera::Ground;
+use bevy_spatial::SpatialAABBAccess;
 
 #[derive(Component, Default)]
 pub struct Player {

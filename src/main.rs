@@ -7,24 +7,20 @@ mod horse;
 mod player;
 mod target;
 
-use std::time::Duration;
-use bevy::{
-    prelude::*,
-};
-use bevy::ecs::system::EntityCommands;
-use bevy::render::batching::NoAutomaticBatching;
-use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::RenderPlugin;
-use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
-use bevy_spatial::{AutomaticUpdate, TransformMode};
 use crate::boid::*;
 use crate::kinematics::*;
 use crate::player::{draw_cursor, mouse_click_system, Player};
 use crate::target::{follow_target, Target};
+use crate::terrain::TerrainBundle;
 use crate::util::*;
-use crate::terrain::{TerrainBundle};
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
+use bevy::render::RenderPlugin;
+use bevy::prelude::*;
+use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
+use bevy_spatial::{AutomaticUpdate, TransformMode};
+use std::time::Duration;
 
 fn main() {
     App::new()
@@ -35,7 +31,6 @@ fn main() {
             }),
             ..default()
         }))
-        // .add_plugins(DefaultPlugins.)
         .add_plugins(RtsCameraPlugin)
         .add_plugins(AutomaticUpdate::<(TrackedByTree)>::new()
             .with_frequency(Duration::from_secs_f32(1.0))

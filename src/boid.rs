@@ -1,18 +1,11 @@
-use bevy::pbr::PbrBundle;
-use bevy::prelude::Bundle;
-use bevy::{
-    prelude::*,
-};
-use bevy::render::batching::NoAutomaticBatching;
-use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy_spatial::kdtree::KDTree3;
-use bevy_spatial::SpatialAccess;
-use rand::Rng;
 use crate::kinematics::*;
 use crate::target::Target;
-use crate::terrain::Terrain;
-use crate::util::BundleDefault;
+use crate::terrain::Obstacle;
+use bevy::pbr::PbrBundle;
+use bevy::prelude::Bundle;
+use bevy::prelude::*;
+use bevy_spatial::SpatialAccess;
+use rand::Rng;
 
 #[derive(Component,Default)]
 pub struct Boid {
@@ -109,30 +102,20 @@ pub fn soft_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>
     })
 }
 
-pub fn hard_collisions(mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>, q_walls: Query<(&Transform), With<HardCollision>>, tree: Res<NNTree>){
-    /// Find wall. Find all ents near wall. repel.
-    q_boids.par_iter_mut().for_each(|(transform, mut vel)| {
-        let this = transform.translation;
-        let mut dir = Vec3::default();
+pub fn hard_collisions(mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>,
+                       q_walls: Query<(&Obstacle, &Transform), With<HardCollision>>, tree: Res<NNTree>){
+    /// Find wall. Find all ents near wall. Remove vel along normal.
+    q_walls.iter().for_each(|(obstacle,transform)|{
+        for (_other, entity) in tree.within_distance(transform.translation, 0.5) {
 
-        if let Some((other, _)) = tree.nearest_neighbour(this) {
-            let vec = -other + this;
-            let len = vec.length().max(0.01);
-            //Don't need a branch - if len is large, effect is small
-            dir += vec.normalize() / len;
+            if let Ok((_transform, mut velocity)) = q_boids.get_mut(entity.unwrap()) {
+                let p_v = velocity.v.project_onto(obstacle.normal);
+                velocity.v -= p_v;
+                let a_v =  velocity.a.project_onto(obstacle.normal);
+                velocity.a -= a_v;
+            }
         }
-        //Maybe don't need more than one? Should bench but this is slower at 10k
-        // for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
-        //     let vec = - other + this;
-        //     let len = vec.length() + 0.01;
-        //     dir += vec.normalize() / len;
-        // }
-
-        let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
-
-        // vel.push = (dir).clamp_length_max(min_a);
-        vel.a += (dir).clamp_length_max(min_a);
-    })
+    });
 }
 
 #[derive(Component,Default)]

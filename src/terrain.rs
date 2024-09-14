@@ -32,7 +32,7 @@ impl BundleDefault for TerrainBundle {
 
 #[derive(Component, Default)]
 pub struct Obstacle {
-    normal: Vec3,
+    pub(crate) normal: Vec3,
     hard_collision: HardCollision,
     tracked: TrackedByTree,
     pbr: PbrBundle

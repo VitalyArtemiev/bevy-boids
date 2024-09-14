@@ -1,7 +1,5 @@
 use bevy::prelude::*;
 use rand::Rng;
-use crate::boid::Boid;
-use crate::kinematics::Velocity;
 
 pub enum FormationKind {
     Random(u32), // Total
