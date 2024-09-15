@@ -11,16 +11,18 @@ use crate::boid::*;
 use crate::kinematics::*;
 use crate::player::{draw_cursor, mouse_click_system, Player};
 use crate::target::{follow_target, Target};
-use crate::terrain::TerrainBundle;
+use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
 use crate::util::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::render::RenderPlugin;
+use bevy::render::{mesh, RenderPlugin};
 use bevy::prelude::*;
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use std::time::Duration;
+use bevy::render::render_resource::TextureViewDimension::Cube;
+use rand::Rng;
 
 fn main() {
     App::new()
@@ -36,7 +38,7 @@ fn main() {
             .with_frequency(Duration::from_secs_f32(1.0))
             .with_transform(TransformMode::Transform))
         .add_systems(Startup, setup)
-        .add_systems(Update, (soft_collisions, move_step, bob, draw_cursor, mouse_click_system))
+        .add_systems(Update, (soft_collisions, move_step, bob, draw_cursor, mouse_click_system, hard_collisions.after(soft_collisions)))
         .add_systems(FixedUpdate, (follow_target))
         .run();
 }
@@ -88,13 +90,17 @@ fn setup(
         base_color_texture: Some(images.add(uv_debug_texture())),
         ..default()
     });
+    let black_mat = materials.add(StandardMaterial::from_color(Color::BLACK));
+
     let capsule = meshes.add(Capsule3d::default());
+    let cube = meshes.add(Cuboid::default());
+
 
     for i in 1..100 {
         for j in 1..100 {
             let mut ent = commands.spawn(BoidBundle::with_target(
-                Target { 
-                    pos: Vec3::from_array([(i - 10) as f32, 0.0, (j-10) as f32]),
+                Target {
+                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j-50) as f32]),
                     dir: Default::default(),
                 },
                 capsule.clone(),
@@ -103,6 +109,20 @@ fn setup(
 
             // commands.entity(ent).insert(NoAutomaticBatching{});
         }
+    }
+
+
+    for i in 1..100 {
+        let mut rng = rand::thread_rng();
+        let x = rng.gen_range(-100.0..100.0);
+        let z = rng.gen_range(-100.0..100.0);
+
+        let mut ent = commands.spawn(ObstacleBundle::new(
+            cube.clone(),
+            black_mat.clone(),
+            Vec3::from_array([1.0, 0.0, 0.0]),
+            Vec3::from_array([x as f32, 1.0, z as f32]),
+        )).id();
     }
 
     commands.spawn(PointLightBundle {
