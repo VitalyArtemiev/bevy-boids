@@ -21,6 +21,7 @@ use bevy::prelude::*;
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use std::time::Duration;
+use bevy::math::bounding::Aabb2d;
 use bevy::render::render_resource::TextureViewDimension::Cube;
 use rand::Rng;
 
@@ -142,7 +143,21 @@ fn setup(
     commands.spawn((
         Player::default(),
         Camera3dBundle::default(),
-        RtsCamera::default(),
+        RtsCamera {
+            bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
+            height_min: 2.0,
+            height_max: 150.0,
+            angle: 20.0f32.to_radians(),
+            target_angle: 20.0f32.to_radians(),
+            min_angle: 20.0f32.to_radians(),
+            dynamic_angle: true,
+            smoothness: 0.3,
+            focus: Transform::IDENTITY,
+            target_focus: Transform::IDENTITY,
+            zoom: 0.0,
+            target_zoom: 0.0,
+            snap: false,
+        },
         RtsCameraControls {
             key_up: KeyCode::KeyW,
             key_down: KeyCode::KeyS,

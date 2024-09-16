@@ -36,7 +36,7 @@ impl BoidBundle {
                 material,
                 transform: Transform::from_xyz(
                     x,
-                    0.5,
+                    1.0,
                     z,
                 ),
                 ..default()
@@ -53,7 +53,7 @@ impl BoidBundle {
         let bob_offset = rng.gen_range(-10.0..10.0);
 
         BoidBundle {
-            target: Target { pos: Vec3::from_array([-x, 0.0, -z]), dir: Default::default() },
+            target: Target { pos: Vec3::from_array([-x, 1.0, -z]), dir: Default::default() },
             pbr: PbrBundle {
                 mesh,
                 material,
@@ -126,7 +126,7 @@ pub struct Bob {
 }
 
 const BOB_AMPLITUDE: f32 = 0.1;
-const BOB_FREQ_COEF: f32 = 0.18;
+const BOB_FREQ_COEF: f32 = 0.15;
 const BOB_FREQ_MIN: f32 = 0.05;
 
 pub fn bob(mut q_boids: Query<(&mut Transform, &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
