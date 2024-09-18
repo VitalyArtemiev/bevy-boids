@@ -2,11 +2,11 @@ use bevy::prelude::*;
 use rand::Rng;
 
 pub enum FormationKind {
-    Random(u32), // Total
-    Square(u32, u32), // Total, Index 
-    Rect(u32, u32), // Total, Index, Depth
+    Random(u32),      // Total
+    Square(u32, u32), // Total, Index
+    Rect(u32, u32),   // Total, Index, Depth
     Circle(u32, u32), // Total, Index
-    //Custom(u32, FormationFunction) //I dunno
+                      //Custom(u32, FormationFunction) //I dunno
 }
 pub type FormationFunction = fn(usize, FormationKind) -> Vec2;
 
@@ -14,7 +14,7 @@ pub type FormationFunction = fn(usize, FormationKind) -> Vec2;
 //     if let FormationType::Random(total) = ftype {
 //         let mut rng = rand::thread_rng();
 //         let range = (total as f32).sqrt();
-// 
+//
 //         return Vec2 {
 //             x: rng.gen_range(-range..range),
 //             y: rng.gen_range(-range..range)
@@ -29,10 +29,9 @@ pub fn square(_: usize, total: usize) -> Vec2 {
 
     Vec2 {
         x: rng.gen_range(-range..range),
-        y: rng.gen_range(-range..range)
+        y: rng.gen_range(-range..range),
     }
 }
-
 
 #[derive(Component)]
 
@@ -41,11 +40,11 @@ pub struct Formation {
     width: f32,
     depth: f32,
 }
-// 
+//
 // impl Default for Formation {
 //     fn default() -> Self {
 //         Formation { width: 20, depth: 5 }
-//         
+//
 //     }
 // }
 
@@ -55,11 +54,7 @@ pub struct FormationMember {
     index_number: u32,
 }
 
-pub fn form_up(
-    mut q_members: Query<&mut FormationMember>,
-    mut q_formations: Query<&Formation>,
-) {
-
+pub fn form_up(mut q_members: Query<&mut FormationMember>, mut q_formations: Query<&Formation>) {
     for member in &mut q_members {
         let _ = q_formations.get(member.formation);
     }

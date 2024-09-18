@@ -22,8 +22,11 @@ pub struct BoidBundle {
 }
 
 impl BoidBundle {
-    pub fn with_target(target: Target, mesh: Handle<Mesh>,
-                       material: Handle<StandardMaterial>) -> Self {
+    pub fn with_target(
+        target: Target,
+        mesh: Handle<Mesh>,
+        material: Handle<StandardMaterial>,
+    ) -> Self {
         let mut rng = rand::thread_rng();
         let x = rng.gen_range(-10.0..10.0);
         let z = rng.gen_range(-10.0..10.0);
@@ -34,34 +37,28 @@ impl BoidBundle {
             pbr: PbrBundle {
                 mesh,
                 material,
-                transform: Transform::from_xyz(
-                    x,
-                    1.0,
-                    z,
-                ),
+                transform: Transform::from_xyz(x, 1.0, z),
                 ..default()
             },
             bob: Bob { offset: bob_offset },
             ..default()
         }
     }
-    pub fn random(mesh: Handle<Mesh>,
-                  material: Handle<StandardMaterial>) -> Self {
+    pub fn random(mesh: Handle<Mesh>, material: Handle<StandardMaterial>) -> Self {
         let mut rng = rand::thread_rng();
         let x = rng.gen_range(-10.0..10.0);
         let z = rng.gen_range(-10.0..10.0);
         let bob_offset = rng.gen_range(-10.0..10.0);
 
         BoidBundle {
-            target: Target { pos: Vec3::from_array([-x, 1.0, -z]), dir: Default::default() },
+            target: Target {
+                pos: Vec3::from_array([-x, 1.0, -z]),
+                dir: Default::default(),
+            },
             pbr: PbrBundle {
                 mesh,
                 material,
-                transform: Transform::from_xyz(
-                    x,
-                    0.5,
-                    z,
-                ),
+                transform: Transform::from_xyz(x, 0.5, z),
                 ..default()
             },
             bob: Bob { offset: bob_offset },
@@ -70,12 +67,14 @@ impl BoidBundle {
     }
 }
 
-
 const INTERACTION_RADIUS: f32 = 1.0;
 const REPEL_COEF: f32 = 0.05;
 const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 0.5;
 
-pub fn soft_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>, tree: Res<NNTree>) {
+pub fn soft_collisions(
+    mut query: Query<(&Transform, &mut Velocity), With<Boid>>,
+    tree: Res<NNTree>,
+) {
     //replace with iter_combinations_mut?
     query.par_iter_mut().for_each(|(transform, mut vel)| {
         let this = transform.translation;
@@ -103,11 +102,16 @@ pub fn soft_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>
 
 const OBSTACLE_INTERACTION_RADIUS: f32 = 0.5;
 
-pub fn hard_collisions(mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>,
-                       q_walls: Query<(&Obstacle, &Transform), With<HardCollision>>, tree: Res<NNTree>) {
+pub fn hard_collisions(
+    mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>,
+    q_walls: Query<(&Obstacle, &Transform), With<HardCollision>>,
+    tree: Res<NNTree>,
+) {
     /// Find wall. Find all ents near wall. Remove vel along normal.
     q_walls.iter().for_each(|(obstacle, transform)| {
-        for (_other, entity) in tree.within_distance(transform.translation, OBSTACLE_INTERACTION_RADIUS) {
+        for (_other, entity) in
+            tree.within_distance(transform.translation, OBSTACLE_INTERACTION_RADIUS)
+        {
             if let Ok((_transform, mut velocity)) = q_boids.get_mut(entity.unwrap()) {
                 let p_v = velocity.v.project_onto(obstacle.normal);
                 velocity.v -= p_v;

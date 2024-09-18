@@ -1,7 +1,12 @@
 use crate::kinematics::NNTree;
+use crate::util::within_rect;
 use bevy::math::Vec3;
 use bevy::pbr::{PointLight, PointLightBundle};
-use bevy::prelude::{default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, MouseButton, Query, Res, Transform, Vec2, Window, With};
+use bevy::prelude::{
+    default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3,
+    Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, MouseButton, Query, Res, Transform,
+    Vec2, Window, With,
+};
 use bevy_rts_camera::Ground;
 use bevy_spatial::SpatialAABBAccess;
 
@@ -9,24 +14,30 @@ use bevy_spatial::SpatialAABBAccess;
 pub struct Player {
     selecting: bool,
     corner1: Vec3,
-    corner4: Vec3,
+    corner3: Vec3,
     selected: Vec<Entity>,
 }
 
 #[derive(Component, Default)]
 pub struct Selected;
 
-
-fn get_intersection(cursor_position: &Vec2, camera: &Camera, camera_transform: &GlobalTransform, ground_transform: &GlobalTransform) -> Option<Vec3> {
+fn get_intersection(
+    cursor_position: &Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    ground_transform: &GlobalTransform,
+) -> Option<Vec3> {
     // Calculate a ray pointing from the camera into the world based on the cursor's position.
     let ray = camera.viewport_to_world(camera_transform, *cursor_position)?;
 
     // Calculate if and where the ray is hitting the ground plane.
-    let distance = ray.intersect_plane(ground_transform.translation(), InfinitePlane3d { normal: Dir3::Y })?;
+    let distance = ray.intersect_plane(
+        ground_transform.translation(),
+        InfinitePlane3d { normal: Dir3::Y },
+    )?;
 
     Some(ray.get_point(distance))
 }
-
 
 pub fn draw_cursor(
     camera_query: Query<(&Camera, &GlobalTransform), With<Player>>,
@@ -54,16 +65,17 @@ pub fn draw_cursor(
     );
 }
 
-
-pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut Player)>,
-                          q_ground: Query<&GlobalTransform, With<Ground>>,
-                          mouse_button_input: Res<ButtonInput<MouseButton>>,
-                          keys: Res<ButtonInput<KeyCode>>,
-                          windows: Query<&Window>,
-                          q_selected: Query<(Entity, &Children), With<Selected>>,
-                          tree: Res<NNTree>,
-                          mut gizmos: Gizmos,
-                          mut commands: Commands, ) {
+pub fn mouse_click_system(
+    mut q_player: Query<(&Camera, &GlobalTransform, &mut Player)>,
+    q_ground: Query<&GlobalTransform, With<Ground>>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    q_selected: Query<(Entity, &Children), With<Selected>>,
+    tree: Res<NNTree>,
+    mut gizmos: Gizmos,
+    mut commands: Commands,
+) {
     let (camera, camera_transform, mut player) = q_player.single_mut();
     let ground = q_ground.single();
     let Some(cursor_position) = windows.single().cursor_position() else {
@@ -78,9 +90,8 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
         player.corner1 = point;
     }
 
-
     if mouse_button_input.just_released(MouseButton::Left) {
-        player.corner4 = point;
+        player.corner3 = point;
         player.selecting = false;
 
         if !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
@@ -95,27 +106,35 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
             }
         }
 
-        let up = Vec3 {
-            x: 0.0,
-            y: 1.0,
-            z: 0.0,
-        };
 
-        for (_, entity) in tree.within(player.corner1 + up, player.corner4 - up) {
+        let right = camera_transform.right();
+        let dif = player.corner3 - player.corner1;
+
+        let dif_hor = dif.project_onto(right.as_vec3());
+        let dif_vert = dif - dif_hor;
+
+        let corner1 = player.corner1;
+        let corner2 = corner1 + dif_vert;
+        let corner3 = player.corner3;
+        let corner4 = corner1 + dif_hor;
+
+
+        for (_, entity) in within_rect(corner1, corner2, corner3, corner4, tree) {
             // commands.entity(entity.unwrap()).try_insert(SelectedBundle ::default());
 
             commands.entity(entity.unwrap()).insert(Selected);
-            commands.spawn(PointLightBundle {
-                point_light: PointLight {
-                    intensity: 1000.0,
-                    range: 100.,
-                    shadows_enabled: false,
+            commands
+                .spawn(PointLightBundle {
+                    point_light: PointLight {
+                        intensity: 1000.0,
+                        range: 0.2,
+                        shadows_enabled: false,
+                        ..default()
+                    },
+                    transform: Transform::from_xyz(0., 1.1, 0.),
                     ..default()
-                },
-                transform: Transform::from_xyz(0., 1.1, 0.),
-                ..default()
-            }).set_parent(entity.unwrap());
-
+                })
+                .set_parent(entity.unwrap());
 
             // if let Ok(mut boid) = query.get_mut(entity.unwrap()) {
             //     entity.
@@ -125,42 +144,34 @@ pub fn mouse_click_system(mut q_player: Query<(&Camera, &GlobalTransform, &mut P
     }
 
     if mouse_button_input.pressed(MouseButton::Left) {
-        player.corner4 = point;
+        player.corner3 = point;
 
         let right = camera_transform.right();
-        let up = ground.up() * 0.01;
-
-        let dif = player.corner4 - player.corner1;
+        let dif = player.corner3 - player.corner1;
 
         let dif_hor = dif.project_onto(right.as_vec3());
         let dif_vert = dif - dif_hor;
 
-        let corner1 = player.corner1 + up;
-        let corner2 = corner1 + dif_hor;
-        let corner3 = player.corner4 + up;
-        let corner4 = corner1 + dif_vert;
-
-        gizmos.line(corner1, corner2, Color::srgb(0., 0., 1.));
-        gizmos.line(corner2, corner3, Color::srgb(0., 0., 1.));
-        gizmos.line(corner3, corner4, Color::srgb(0., 0., 1.));
-        gizmos.line(corner4, corner1, Color::srgb(0., 0., 1.));
-
-        let pos_x = Vec3 {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-        };
-
-        let dif_x = dif.project_onto(pos_x);
-        let dif_z = dif - dif_x;
-        let corner1 = player.corner1 + up;
-        let corner2 = corner1 + dif_x;
-        let corner3 = player.corner4 + up;
-        let corner4 = corner1 + dif_z;
+        let corner1 = player.corner1;
+        let corner2 = corner1 + dif_vert;
+        let corner3 = player.corner3;
+        let corner4 = corner1 + dif_hor;
 
         gizmos.line(corner1, corner2, Color::WHITE);
         gizmos.line(corner2, corner3, Color::WHITE);
         gizmos.line(corner3, corner4, Color::WHITE);
         gizmos.line(corner4, corner1, Color::WHITE);
+
+        // let dif_x = dif.project_onto(Dir3::X.as_vec3());
+        // let dif_z = dif - dif_x;
+        // let corner1 = player.corner1 + up;
+        // let corner2 = corner1 + dif_x;
+        // let corner3 = player.corner3 + up;
+        // let corner4 = corner1 + dif_z;
+        //
+        // gizmos.line(corner1, corner2, Color::WHITE);
+        // gizmos.line(corner2, corner3, Color::WHITE);
+        // gizmos.line(corner3, corner4, Color::WHITE);
+        // gizmos.line(corner4, corner1, Color::WHITE);
     }
 }

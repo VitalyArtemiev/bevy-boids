@@ -1,9 +1,9 @@
-use bevy::prelude::*;
-use bevy_rts_camera::Ground;
 use crate::boid::{Bob, Boid};
 use crate::kinematics::{HardCollision, SoftCollision, TrackedByTree, Velocity};
 use crate::target::Target;
 use crate::util::BundleDefault;
+use bevy::prelude::*;
+use bevy_rts_camera::Ground;
 
 #[derive(Component, Default)]
 pub struct Terrain {}
@@ -12,17 +12,21 @@ pub struct Terrain {}
 pub struct TerrainBundle {
     pbr: PbrBundle,
     terrain: Terrain,
-    ground: Ground
+    ground: Ground,
 }
 
 impl BundleDefault for TerrainBundle {
-    fn default(meshes: &mut ResMut<Assets<Mesh>>, images: &mut ResMut<Assets<Image>>, materials: &mut ResMut<Assets<StandardMaterial>>) -> Self {
+    fn default(
+        meshes: &mut ResMut<Assets<Mesh>>,
+        images: &mut ResMut<Assets<Image>>,
+        materials: &mut ResMut<Assets<StandardMaterial>>,
+    ) -> Self {
         TerrainBundle {
-            pbr: PbrBundle
-            {
-                mesh: meshes.add(
-                    Plane3d{ normal: Dir3::Y, half_size: Vec2::new(2500., 2500.)}
-                ),
+            pbr: PbrBundle {
+                mesh: meshes.add(Plane3d {
+                    normal: Dir3::Y,
+                    half_size: Vec2::new(2500., 2500.),
+                }),
                 material: materials.add(Color::WHITE),
                 ..default()
             },
@@ -46,9 +50,14 @@ pub struct ObstacleBundle {
 }
 
 impl ObstacleBundle {
-    pub(crate) fn new(mesh: Handle<Mesh>, material: Handle<StandardMaterial>, normal: Vec3, pos: Vec3) -> Self {
-        ObstacleBundle{
-            obstacle: Obstacle{ normal },
+    pub(crate) fn new(
+        mesh: Handle<Mesh>,
+        material: Handle<StandardMaterial>,
+        normal: Vec3,
+        pos: Vec3,
+    ) -> Self {
+        ObstacleBundle {
+            obstacle: Obstacle { normal },
             hard_collision: Default::default(),
             tracked: Default::default(),
             pbr: PbrBundle {
@@ -60,4 +69,3 @@ impl ObstacleBundle {
         }
     }
 }
-
