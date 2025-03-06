@@ -1,14 +1,13 @@
 use crate::kinematics::NNTree;
 use crate::util::within_rect;
 use bevy::math::Vec3;
-use bevy::pbr::{PointLight, PointLightBundle};
+use bevy::pbr::PointLight;
 use bevy::prelude::{
     default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3,
     Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, MouseButton, Query, Res, Transform,
     Vec2, Window, With,
 };
 use bevy_rts_camera::Ground;
-use bevy_spatial::SpatialAABBAccess;
 
 #[derive(Component, Default)]
 pub struct Player {
@@ -123,16 +122,28 @@ pub fn mouse_click_system(
 
             commands.entity(entity.unwrap()).insert(Selected);
             commands
-                .spawn(PointLightBundle {
-                    point_light: PointLight {
+                // .spawn(PointLightBundle {
+                //     point_light: PointLight {
+                //         intensity: 1000.0,
+                //         range: 0.2,
+                //         shadows_enabled: false,
+                //         ..default()
+                //     },
+                //     transform: Transform::from_xyz(0., 1.1, 0.),
+                //     ..default()
+                // })
+                .spawn(
+                    PointLight {
+                        color: Default::default(),
                         intensity: 1000.0,
-                        range: 0.2,
+                        range: 5.0,
+                        radius: 5.0,
                         shadows_enabled: false,
-                        ..default()
+                        shadow_depth_bias: 0.0,
+                        shadow_normal_bias: 0.0,
+                        shadow_map_near_z: 0.0,
                     },
-                    transform: Transform::from_xyz(0., 1.1, 0.),
-                    ..default()
-                })
+                )
                 .set_parent(entity.unwrap());
 
             // if let Ok(mut boid) = query.get_mut(entity.unwrap()) {

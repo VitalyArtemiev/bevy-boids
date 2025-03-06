@@ -12,7 +12,7 @@ pub type FormationFunction = fn(usize, FormationKind) -> Vec2;
 
 // pub fn random_formation(_: usize, ftype: FormationType) -> Vec2 {
 //     if let FormationType::Random(total) = ftype {
-//         let mut rng = rand::thread_rng();
+//         let mut rng = rand::range();
 //         let range = (total as f32).sqrt();
 //
 //         return Vec2 {
@@ -24,7 +24,7 @@ pub type FormationFunction = fn(usize, FormationKind) -> Vec2;
 // }
 
 pub fn square(_: usize, total: usize) -> Vec2 {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let range = (total as f32).sqrt();
 
     Vec2 {

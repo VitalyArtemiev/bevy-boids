@@ -1,7 +1,6 @@
 use crate::kinematics::*;
 use crate::target::Target;
 use crate::terrain::Obstacle;
-use bevy::pbr::PbrBundle;
 use bevy::prelude::Bundle;
 use bevy::prelude::*;
 use bevy_spatial::SpatialAccess;
@@ -29,7 +28,7 @@ impl BoidBundle {
         mesh: Handle<Mesh>,
         material: Handle<StandardMaterial>,
     ) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let x = rng.random_range(-10.0..10.0);
         let z = rng.random_range(-10.0..10.0);
         let bob_offset = rng.random_range(-20.0..20.0);
@@ -44,7 +43,7 @@ impl BoidBundle {
         }
     }
     pub fn random(mesh: Handle<Mesh>, material: Handle<StandardMaterial>) -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let x = rng.random_range(-10.0..10.0);
         let z = rng.random_range(-10.0..10.0);
         let bob_offset = rng.random_range(-10.0..10.0);
@@ -103,7 +102,7 @@ pub fn hard_collisions(
     q_walls: Query<(&Obstacle, &Transform), With<HardCollision>>,
     tree: Res<NNTree>,
 ) {
-    /// Find wall. Find all ents near wall. Remove vel along normal.
+    // Find wall. Find all ents near wall. Remove vel along normal.
     q_walls.iter().for_each(|(obstacle, transform)| {
         for (_other, entity) in
             tree.within_distance(transform.translation, OBSTACLE_INTERACTION_RADIUS)
