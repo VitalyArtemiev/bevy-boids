@@ -9,8 +9,8 @@ mod util;
 
 use crate::boid::*;
 use crate::kinematics::*;
-use crate::player::{draw_cursor, mouse_click_system, Player};
-use crate::target::{follow_target, Target};
+use crate::player::{Player, draw_cursor, mouse_click_system};
+use crate::target::{Target, follow_target};
 use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
 use crate::util::*;
 use bevy::math::bounding::Aabb2d;
@@ -19,7 +19,7 @@ use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::TextureViewDimension::Cube;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::render::{mesh, RenderPlugin};
+use bevy::render::{RenderPlugin, mesh};
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use rand::Rng;
@@ -130,9 +130,9 @@ fn setup(
     }
 
     for i in 1..100 {
-        let mut rng = rand::thread_rng();
-        let x = rng.gen_range(-100.0..100.0);
-        let z = rng.gen_range(-100.0..100.0);
+        let mut rng = rand::rng();
+        let x = rng.random_range(-100.0..100.0);
+        let z = rng.random_range(-100.0..100.0);
 
         let mut ent = commands
             .spawn(ObstacleBundle::new(

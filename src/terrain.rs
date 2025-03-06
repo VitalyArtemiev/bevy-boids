@@ -10,7 +10,9 @@ pub struct Terrain {}
 
 #[derive(Bundle)]
 pub struct TerrainBundle {
-    pbr: PbrBundle,
+    transform: Transform,
+    mesh: Mesh3d,
+    material: MeshMaterial3d<StandardMaterial>,
     terrain: Terrain,
     ground: Ground,
 }
@@ -22,14 +24,12 @@ impl BundleDefault for TerrainBundle {
         materials: &mut ResMut<Assets<StandardMaterial>>,
     ) -> Self {
         TerrainBundle {
-            pbr: PbrBundle {
-                mesh: meshes.add(Plane3d {
-                    normal: Dir3::Y,
-                    half_size: Vec2::new(2500., 2500.),
-                }),
-                material: materials.add(Color::WHITE),
-                ..default()
-            },
+            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+            mesh: Mesh3d(meshes.add(Plane3d {
+                normal: Dir3::Y,
+                half_size: Vec2::new(2500., 2500.),
+            })),
+            material: MeshMaterial3d(materials.add(Color::WHITE)),
             terrain: Default::default(),
             ground: Ground,
         }
@@ -44,7 +44,9 @@ pub struct Obstacle {
 #[derive(Bundle, Default)]
 pub struct ObstacleBundle {
     obstacle: Obstacle,
-    pbr: PbrBundle,
+    mesh: Mesh3d,
+    material: MeshMaterial3d<StandardMaterial>,
+    transform: Transform,
     hard_collision: HardCollision,
     tracked: TrackedByTree,
 }
@@ -56,16 +58,20 @@ impl ObstacleBundle {
         normal: Vec3,
         pos: Vec3,
     ) -> Self {
+
         ObstacleBundle {
             obstacle: Obstacle { normal },
             hard_collision: Default::default(),
             tracked: Default::default(),
-            pbr: PbrBundle {
-                mesh,
-                material,
-                transform: Transform::from_xyz(pos.x, pos.y, pos.z),
-                ..default()
-            },
+            mesh: Mesh3d(mesh),
+            material: MeshMaterial3d(material),
+            transform: Transform::from_xyz(pos.x, pos.y, pos.z),
+            // pbr: PbrBundle {
+            //     mesh,
+            //     material,
+            //     transform: Transform::from_xyz(pos.x, pos.y, pos.z),
+            //     ..default()
+            // },
         }
     }
 }

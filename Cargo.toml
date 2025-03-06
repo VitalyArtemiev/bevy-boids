@@ -8,15 +8,19 @@ edition = "2024"
 
 [dependencies]
 #bevy = { version = "0.13.1", features = ["dynamic_linking", "trace", "trace_tracy", "trace_tracy_memory"] }
-bevy = { version = "0.14", features = ["trace", "trace_tracy", "trace_tracy_memory"] }
+bevy = { version = "0.15.3", features = [
+    "trace",
+    "trace_tracy",
+    "trace_tracy_memory",
+] }
 
 #bevy_spatial = "0.9.0"
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within" }
-bevy_rts_camera = "0.8.1"
-rand = "0.8.5"
-derive_more = { version = "1.0", features = ["full"] }
-lazy_static = "1.4.0"
-serde = { version = "1.0.136", features = ["derive"] }
+bevy_rts_camera = "0.9.1"
+rand = "0.9.0"
+derive_more = { version = "2.0.1", features = ["full"] }
+lazy_static = "1.5.0"
+serde = { version = "1.0.218", features = ["derive"] }
 
 [dev-dependencies]
 quickcheck = "1.0.3"

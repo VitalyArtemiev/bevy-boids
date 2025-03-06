@@ -22,7 +22,7 @@ const DECELERATION_DISTANCE: f32 =
 
 pub fn move_step(mut query: Query<(&mut Transform, &mut Velocity)>, time: Res<Time>) {
     for (mut transform, mut vel) in &mut query {
-        let delta_t = time.delta_seconds();
+        let delta_t = time.delta_secs();
         //search for HardCollision
         vel.v = (vel.v + vel.a * delta_t).clamp_length_max(vel.target_v + BROWNIAN_VELOCITY);
         vel.v = (vel.v + vel.push * delta_t).clamp_length_max(MAX_VELOCITY);

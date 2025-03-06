@@ -28,7 +28,7 @@ fn get_intersection(
     ground_transform: &GlobalTransform,
 ) -> Option<Vec3> {
     // Calculate a ray pointing from the camera into the world based on the cursor's position.
-    let ray = camera.viewport_to_world(camera_transform, *cursor_position)?;
+    let ray = camera.viewport_to_world(camera_transform, *cursor_position).unwrap();
 
     // Calculate if and where the ray is hitting the ground plane.
     let distance = ray.intersect_plane(
@@ -58,8 +58,7 @@ pub fn draw_cursor(
 
     // Draw a circle just above the ground plane at that position.
     gizmos.circle(
-        point + ground.up() * 0.01,
-        Dir3::Y, // Up vector is already normalized.
+        point + ground.up() * 0.01, // Up vector is already normalized.
         0.2,
         Color::WHITE,
     );

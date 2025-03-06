@@ -16,8 +16,8 @@ pub type FormationFunction = fn(usize, FormationKind) -> Vec2;
 //         let range = (total as f32).sqrt();
 //
 //         return Vec2 {
-//             x: rng.gen_range(-range..range),
-//             y: rng.gen_range(-range..range)
+//             x: rng.random_range(-range..range),
+//             y: rng.random_range(-range..range)
 //         }
 //     }
 //     Vec2::Default()
@@ -28,8 +28,8 @@ pub fn square(_: usize, total: usize) -> Vec2 {
     let range = (total as f32).sqrt();
 
     Vec2 {
-        x: rng.gen_range(-range..range),
-        y: rng.gen_range(-range..range),
+        x: rng.random_range(-range..range),
+        y: rng.random_range(-range..range),
     }
 }
 
