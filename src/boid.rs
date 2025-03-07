@@ -1,165 +1,64 @@
-use bevy::pbr::PbrBundle;
+use crate::kinematics::*;
+use crate::target::Target;
+use crate::terrain::Obstacle;
 use bevy::prelude::Bundle;
-use bevy::{
-    prelude::*,
-};
-use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy_spatial::kdtree::KDTree3;
+use bevy::prelude::*;
 use bevy_spatial::SpatialAccess;
 use rand::Rng;
-use crate::kinematics::*;
-use crate::terrain::Terrain;
-use crate::util::BundleDefault;
 
-#[derive(Component,Default)]
-pub struct Boid {
-    pub(crate) target: Vec3,
-}
+#[derive(Component, Default)]
+pub struct Boid {}
 
 #[derive(Bundle, Default)]
 pub struct BoidBundle {
     boid: Boid,
+    transform: Transform,
+    target: Target,
     vel: Velocity,
-    pbr: PbrBundle,
+    mesh: Mesh3d,
+    material: MeshMaterial3d<StandardMaterial>,
     bob: Bob,
     collision: SoftCollision,
     tracked: TrackedByTree,
 }
 
-fn uv_debug_texture() -> Image {
-    const TEXTURE_SIZE: usize = 8;
-
-    let mut palette: [u8; 32] = [
-        255, 102, 159, 255, 255, 159, 102, 255, 236, 255, 102, 255, 121, 255, 102, 255, 102, 255,
-        198, 255, 102, 198, 255, 255, 121, 102, 255, 255, 236, 102, 255, 255,
-    ];
-
-    let mut texture_data = [0; TEXTURE_SIZE * TEXTURE_SIZE * 4];
-    for y in 0..TEXTURE_SIZE {
-        let offset = TEXTURE_SIZE * y * 4;
-        texture_data[offset..(offset + TEXTURE_SIZE * 4)].copy_from_slice(&palette);
-        palette.rotate_right(4);
-    }
-
-    Image::new_fill(
-        Extent3d {
-            width: TEXTURE_SIZE as u32,
-            height: TEXTURE_SIZE as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &texture_data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
-impl BundleDefault for BoidBundle {
-    fn default(meshes: &mut ResMut<Assets<Mesh>>,
-               images: &mut ResMut<Assets<Image>>,
-               materials: &mut ResMut<Assets<StandardMaterial>>) -> Self {
-
-        let debug_material = materials.add(StandardMaterial {
-            base_color_texture: Some(images.add(uv_debug_texture())),
-            ..default()
-        });
-        let capsule = meshes.add(Capsule3d::default());
-
-        BoidBundle {
-            boid: Default::default(),
-            vel: Default::default(),
-            pbr: PbrBundle {
-                mesh: capsule,
-                material: debug_material,
-                transform: Transform::from_xyz(
-                    -10.0,
-                    0.0,
-                    0.0,
-                ),
-                ..default()
-            },
-            ..default()
-        }
-    }
-}
-
 impl BoidBundle {
-    pub fn with_boid(boid: Boid, meshes: &mut ResMut<Assets<Mesh>>,
-                     images: &mut ResMut<Assets<Image>>,
-                     materials: &mut ResMut<Assets<StandardMaterial>>) -> Self {
-        let debug_material = materials.add(StandardMaterial {
-            base_color_texture: Some(images.add(uv_debug_texture())),
-            ..default()
-        });
-        let capsule = meshes.add(Capsule3d::default());
-
-        let mut rng = rand::thread_rng();
-        let x = rng.gen_range(-10.0..10.0);
-        let z = rng.gen_range(-10.0..10.0);
-        let bob_offset = rng.gen_range(-20.0..20.0);
+    pub fn with_target(
+        target: Target,
+        mesh: Handle<Mesh>,
+        material: Handle<StandardMaterial>,
+    ) -> Self {
+        let mut rng = rand::rng();
+        let x = rng.random_range(-10.0..10.0);
+        let z = rng.random_range(-10.0..10.0);
+        let bob_offset = rng.random_range(-20.0..20.0);
 
         BoidBundle {
-            boid,
-            pbr: PbrBundle {
-                mesh: capsule,
-                material: debug_material,
-                transform: Transform::from_xyz(
-                    x,
-                    0.0,
-                    z,
-                ),
-                ..default()
-            },
+            transform: Transform::from_xyz(x, 0.5, z),
+            target,
+            mesh: Mesh3d(mesh),
+            material: MeshMaterial3d(material),
             bob: Bob { offset: bob_offset },
             ..default()
         }
     }
-    pub fn random(meshes: &mut ResMut<Assets<Mesh>>,
-                         images: &mut ResMut<Assets<Image>>,
-                         materials: &mut ResMut<Assets<StandardMaterial>>) -> Self {
-
-        let debug_material = materials.add(StandardMaterial {
-            base_color_texture: Some(images.add(uv_debug_texture())),
-            ..default()
-        });
-        let capsule = meshes.add(Capsule3d::default());
-
-        let mut rng = rand::thread_rng();
-        let x = rng.gen_range(-10.0..10.0);
-        let z = rng.gen_range(-10.0..10.0);
-        let bob_offset = rng.gen_range(-10.0..10.0);
+    pub fn random(mesh: Handle<Mesh>, material: Handle<StandardMaterial>) -> Self {
+        let mut rng = rand::rng();
+        let x = rng.random_range(-10.0..10.0);
+        let z = rng.random_range(-10.0..10.0);
+        let bob_offset = rng.random_range(-10.0..10.0);
 
         BoidBundle {
-            boid: Boid { target: Vec3::from_array([-x, 0.0, -z])},
-            pbr: PbrBundle {
-                mesh: capsule,
-                material: debug_material,
-                transform: Transform::from_xyz(
-                    x,
-                    0.0,
-                    z,
-                ),
-                ..default()
+            transform: Transform::from_xyz(x, 0.5, z),
+            target: Target {
+                pos: Vec3::from_array([-x, 1.0, -z]),
+                dir: Default::default(),
             },
+            mesh: Mesh3d(mesh),
+            material: MeshMaterial3d(material),
             bob: Bob { offset: bob_offset },
             ..default()
         }
-    }
-}
-
-///Add force in target direction
-pub fn follow_target(mut query: Query<(&Transform, &Boid, &mut Velocity)>) {
-    for (transform, boid, mut vel) in &mut query {
-        let dir: Vec3 = boid.target - transform.translation;
-        let v_sign = dir.dot(vel.v).signum();
-        let l = dir.length();
-        let v = vel.v.length() * v_sign;
-        //we always wanna be there in DECELERATION_TIME_SEC
-        //a = (l-vt)/t2
-        let a = ((l - v * DECELERATION_TIME_SEC)/DECELERATION_TIME_SEC_SQUARED);
-        vel.target_v = 0.99 * (l / DECELERATION_TIME_SEC).clamp(0., MAX_VELOCITY);
-        vel.a = (dir.normalize() * a).clamp_length_max(MAX_ACCELERATION);
     }
 }
 
@@ -167,14 +66,18 @@ const INTERACTION_RADIUS: f32 = 1.0;
 const REPEL_COEF: f32 = 0.05;
 const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 0.5;
 
-pub fn avoid_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>>, tree: Res<NNTree>){
-    for (transform, mut vel) in &mut query {
+pub fn soft_collisions(
+    mut query: Query<(&Transform, &mut Velocity), With<Boid>>,
+    tree: Res<NNTree>,
+) {
+    //replace with iter_combinations_mut?
+    query.par_iter_mut().for_each(|(transform, mut vel)| {
         let this = transform.translation;
         let mut dir = Vec3::default();
-        
+
         if let Some((other, _)) = tree.nearest_neighbour(this) {
             let vec = -other + this;
-            let len = vec.length() + 0.01;
+            let len = vec.length().max(0.01);
             //Don't need a branch - if len is large, effect is small
             dir += vec.normalize() / len;
         }
@@ -184,27 +87,51 @@ pub fn avoid_collisions(mut query: Query<(&Transform, &mut Velocity), With<Boid>
         //     let len = vec.length() + 0.01;
         //     dir += vec.normalize() / len;
         // }
-        
+
         let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
 
         // vel.push = (dir).clamp_length_max(min_a);
         vel.a += (dir).clamp_length_max(min_a);
-    }
+    })
 }
 
-#[derive(Component,Default)]
+const OBSTACLE_INTERACTION_RADIUS: f32 = 0.5;
+
+pub fn hard_collisions(
+    mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>,
+    q_walls: Query<(&Obstacle, &Transform), With<HardCollision>>,
+    tree: Res<NNTree>,
+) {
+    // Find wall. Find all ents near wall. Remove vel along normal.
+    q_walls.iter().for_each(|(obstacle, transform)| {
+        for (_other, entity) in
+            tree.within_distance(transform.translation, OBSTACLE_INTERACTION_RADIUS)
+        {
+            if let Ok((_transform, mut velocity)) = q_boids.get_mut(entity.unwrap()) {
+                let p_v = velocity.v.project_onto(obstacle.normal);
+                velocity.v -= p_v;
+                let m_a = velocity.a.length();
+                let p_a = velocity.a.project_onto(obstacle.normal);
+                velocity.a -= p_a;
+                velocity.a = velocity.a.normalize() * m_a;
+            }
+        }
+    });
+}
+
+#[derive(Component, Default)]
 pub struct Bob {
     pub offset: f32,
 }
 
 const BOB_AMPLITUDE: f32 = 0.1;
-const BOB_FREQ_COEF: f32 = 0.18;
+const BOB_FREQ_COEF: f32 = 0.15;
 const BOB_FREQ_MIN: f32 = 0.05;
 
-pub fn bob(mut q_boids: Query<(&mut Transform,  &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
+pub fn bob(mut q_boids: Query<(&mut Transform, &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
     for (mut transform, vel, bob) in &mut q_boids {
         let freq = (vel.v.length() * BOB_FREQ_COEF).clamp(BOB_FREQ_MIN, BOB_FREQ_MIN * 4.);
-        let time_elapsed = time.elapsed_seconds();
+        let time_elapsed = time.elapsed_secs();
         transform.translation.y = BOB_AMPLITUDE * f32::sin(freq * (bob.offset + time_elapsed))
     }
 }
