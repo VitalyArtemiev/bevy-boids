@@ -5,6 +5,7 @@ use bevy::prelude::Bundle;
 use bevy::prelude::*;
 use bevy_spatial::SpatialAccess;
 use rand::Rng;
+use crate::resources::Materials;
 
 #[derive(Component, Default)]
 pub struct Boid {}
@@ -27,6 +28,7 @@ impl BoidBundle {
         target: Target,
         mesh: Handle<Mesh>,
         material: Handle<StandardMaterial>,
+        mats: ResMut<Materials>
     ) -> Self {
         let mut rng = rand::rng();
         let x = rng.random_range(-10.0..10.0);

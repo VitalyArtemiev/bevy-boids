@@ -6,6 +6,7 @@ mod player;
 mod target;
 mod terrain;
 mod util;
+mod resources;
 
 use crate::boid::*;
 use crate::kinematics::*;
@@ -24,9 +25,13 @@ use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use rand::Rng;
 use std::time::Duration;
+use crate::resources::{Materials, Meshes};
 
 fn main() {
     App::new()
+        .init_resource::<Materials>()
+        .init_resource::<Meshes>()
+        .init_resource::<Player>()
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -102,15 +107,18 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut mesh_list: ResMut<Meshes>,
+    mut mat_list: ResMut<Materials>,
 ) {
-    let debug_material = materials.add(StandardMaterial {
+    mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
+    mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
+    mat_list.debug_material = materials.add(StandardMaterial {
         base_color_texture: Some(images.add(uv_debug_texture())),
         ..default()
     });
-    let black_mat = materials.add(StandardMaterial::from_color(Color::BLACK));
 
-    let capsule = meshes.add(Capsule3d::default());
-    let cube = meshes.add(Cuboid::default());
+    mesh_list.cube = meshes.add(Cuboid::default());
+    mesh_list.capsule = meshes.add(Capsule3d::default());
 
     for i in 1..100 {
         for j in 1..100 {
@@ -120,8 +128,8 @@ fn setup(
                         pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
                         dir: Default::default(),
                     },
-                    capsule.clone(),
-                    debug_material.clone(),
+                    mesh_list.capsule.clone(),
+                    mat_list.debug_material.clone(),
                 ))
                 .id();
 
@@ -136,8 +144,8 @@ fn setup(
 
         let mut ent = commands
             .spawn(ObstacleBundle::new(
-                cube.clone(),
-                black_mat.clone(),
+                mesh_list.cube.clone(),
+                mat_list.black.clone(),
                 Vec3::from_array([1.0, 0.0, 0.0]),
                 Vec3::from_array([x as f32, 1.0, z as f32]),
             ))
@@ -163,8 +171,7 @@ fn setup(
     ));
 
     commands.spawn((
-        Player::default(),
-        Camera3dBundle::default(),
+        Camera3d::default(),
         RtsCamera {
             bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
             height_min: 2.0,

@@ -1,24 +1,34 @@
-use crate::kinematics::NNTree;
+use crate::kinematics::{NNTree, Velocity};
 use crate::util::within_rect;
 use bevy::math::Vec3;
-use bevy::pbr::PointLight;
-use bevy::prelude::{
-    default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3,
-    Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, MouseButton, Query, Res, Transform,
-    Vec2, Window, With,
-};
+use bevy::pbr::{MeshMaterial3d, PointLight, StandardMaterial};
+use bevy::prelude::{default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, Mesh3d, MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With};
 use bevy_rts_camera::Ground;
+use crate::target::Target;
 
-#[derive(Component, Default)]
+#[derive(Resource, Default)]
 pub struct Player {
     selecting: bool,
     corner1: Vec3,
     corner3: Vec3,
-    selected: Vec<Entity>,
 }
 
-#[derive(Component, Default)]
-pub struct Selected;
+#[derive(Component)]
+pub struct Selected{
+    transform: Transform,
+    mesh: Mesh3d,
+    material: MeshMaterial3d<StandardMaterial>,
+}
+
+impl Default for Selected {
+    fn default() -> Self {
+        Selected {
+            transform: Transform::from_xyz(0.0, 1.0, 0.0),
+            mesh: Default::default(),
+            material: Default::default(),
+        }
+    }
+}
 
 fn get_intersection(
     cursor_position: &Vec2,
@@ -39,7 +49,7 @@ fn get_intersection(
 }
 
 pub fn draw_cursor(
-    camera_query: Query<(&Camera, &GlobalTransform), With<Player>>,
+    camera_query: Query<(&Camera, &GlobalTransform), /*With<Player>*/>,
     ground_query: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
@@ -64,7 +74,8 @@ pub fn draw_cursor(
 }
 
 pub fn mouse_click_system(
-    mut q_player: Query<(&Camera, &GlobalTransform, &mut Player)>,
+    mut player: ResMut<Player>,
+    mut q_camera: Query<(&Camera, &GlobalTransform)>,
     q_ground: Query<&GlobalTransform, With<Ground>>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -74,7 +85,7 @@ pub fn mouse_click_system(
     mut gizmos: Gizmos,
     mut commands: Commands,
 ) {
-    let (camera, camera_transform, mut player) = q_player.single_mut();
+    let (camera, camera_transform) = q_camera.single_mut();
     let ground = q_ground.single();
     let Some(cursor_position) = windows.single().cursor_position() else {
         return;
@@ -118,9 +129,8 @@ pub fn mouse_click_system(
 
 
         for (_, entity) in within_rect(corner1, corner2, corner3, corner4, tree) {
-            // commands.entity(entity.unwrap()).try_insert(SelectedBundle ::default());
+            commands.entity(entity.unwrap()).insert(Selected::default());
 
-            commands.entity(entity.unwrap()).insert(Selected);
             commands
                 // .spawn(PointLightBundle {
                 //     point_light: PointLight {
