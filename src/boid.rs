@@ -28,7 +28,6 @@ impl BoidBundle {
         target: Target,
         mesh: Handle<Mesh>,
         material: Handle<StandardMaterial>,
-        mats: ResMut<Materials>
     ) -> Self {
         let mut rng = rand::rng();
         let x = rng.random_range(-10.0..10.0);

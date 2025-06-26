@@ -45,7 +45,7 @@ fn main() {
         )
         .add_plugins(RtsCameraPlugin)
         .add_plugins(
-            AutomaticUpdate::<(TrackedByTree)>::new()
+            AutomaticUpdate::<TrackedByTree>::new()
                 .with_frequency(Duration::from_secs_f32(1.0))
                 .with_transform(TransformMode::Transform),
         )
@@ -123,14 +123,10 @@ fn setup(
     for i in 1..100 {
         for j in 1..100 {
             let mut ent = commands
-                .spawn(BoidBundle::with_target(
-                    Target {
-                        pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
-                        dir: Default::default(),
-                    },
-                    mesh_list.capsule.clone(),
-                    mat_list.debug_material.clone(),
-                ))
+                .spawn(BoidBundle::with_target(Target {
+                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
+                    dir: Default::default(),
+                }, mesh_list.capsule.clone(), mat_list.debug_material.clone(), ))
                 .id();
 
             // commands.entity(ent).insert(NoAutomaticBatching{});
@@ -152,16 +148,14 @@ fn setup(
             .id();
     }
 
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            intensity: 9000.0,
-            range: 100.,
-            shadows_enabled: true,
-            ..default()
-        },
-        transform: Transform::from_xyz(10.0, 10.0, 0.0),
+    commands.spawn((PointLight{
+        color: Default::default(),
+        intensity: 9000.0,
+        range: 100.0,
+        shadows_enabled: true,
         ..default()
-    });
+    }, Transform::from_xyz(10.0, 10.0, 0.0)));
+
 
     // ground plane
     commands.spawn(TerrainBundle::default(

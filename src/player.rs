@@ -1,8 +1,9 @@
+use bevy::ecs::query::QuerySingleError;
 use crate::kinematics::{NNTree, Velocity};
 use crate::util::within_rect;
 use bevy::math::Vec3;
 use bevy::pbr::{MeshMaterial3d, PointLight, StandardMaterial};
-use bevy::prelude::{default, BuildChildren, ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, Mesh3d, MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With};
+use bevy::prelude::{ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, Mesh3d, MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With};
 use bevy_rts_camera::Ground;
 use crate::target::Target;
 
@@ -54,23 +55,27 @@ pub fn draw_cursor(
     windows: Query<&Window>,
     mut gizmos: Gizmos,
 ) {
-    let (camera, camera_transform) = camera_query.single();
-    let ground = ground_query.single();
+    match camera_query.single() {
+        Ok((camera, camera_transform)) => {
+            let ground = ground_query.single().unwrap();
 
-    let Some(cursor_position) = windows.single().cursor_position() else {
-        return;
-    };
+            let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
+                return;
+            };
 
-    let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
-        return;
-    };
+            let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
+                return;
+            };
 
-    // Draw a circle just above the ground plane at that position.
-    gizmos.circle(
-        point + ground.up() * 0.01, // Up vector is already normalized.
-        0.2,
-        Color::WHITE,
-    );
+            // Draw a circle just above the ground plane at that position.
+            gizmos.circle(
+                point + ground.up() * 0.01, // Up vector is already normalized.
+                0.2,
+                Color::WHITE,
+            );
+        }
+        _ => {}
+    }
 }
 
 pub fn mouse_click_system(
@@ -85,9 +90,9 @@ pub fn mouse_click_system(
     mut gizmos: Gizmos,
     mut commands: Commands,
 ) {
-    let (camera, camera_transform) = q_camera.single_mut();
-    let ground = q_ground.single();
-    let Some(cursor_position) = windows.single().cursor_position() else {
+    let (camera, camera_transform) = q_camera.single_mut().unwrap();
+    let ground = q_ground.single().unwrap();
+    let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
         return;
     };
     let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
@@ -149,6 +154,7 @@ pub fn mouse_click_system(
                         range: 5.0,
                         radius: 5.0,
                         shadows_enabled: false,
+                        affects_lightmapped_mesh_diffuse: false,
                         shadow_depth_bias: 0.0,
                         shadow_normal_bias: 0.0,
                         shadow_map_near_z: 0.0,
