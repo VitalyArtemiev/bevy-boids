@@ -68,19 +68,23 @@ const REPEL_COEF: f32 = 0.05;
 const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 0.5;
 
 pub fn soft_collisions(
-    mut query: Query<(&Transform, &mut Velocity), With<Boid>>,
+    mut query: Query<(Entity, &Transform, &mut Velocity), With<Boid>>,
     tree: Res<NNTree>,
 ) {
     //replace with iter_combinations_mut?
-    query.par_iter_mut().for_each(|(transform, mut vel)| {
+    query.par_iter_mut().for_each(|(entity, transform, mut vel)| {
         let this = transform.translation;
         let mut dir = Vec3::default();
 
-        if let Some((other, _)) = tree.nearest_neighbour(this) {
+        // Skip the self-match: `this` is in the tree, so the nearest neighbour is the boid itself
+        for (other, other_entity) in tree.k_nearest_neighbour(this, 2) {
+            if other_entity == Some(entity) {
+                continue;
+            }
             let vec = -other + this;
             let len = vec.length().max(0.01);
             //Don't need a branch - if len is large, effect is small
-            dir += vec.normalize() / len;
+            dir += vec.normalize_or_zero() / len;
         }
         //Maybe don't need more than one? Should bench but this is slower at 10k
         // for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
@@ -114,7 +118,7 @@ pub fn hard_collisions(
                 let m_a = velocity.a.length();
                 let p_a = velocity.a.project_onto(obstacle.normal);
                 velocity.a -= p_a;
-                velocity.a = velocity.a.normalize() * m_a;
+                velocity.a = velocity.a.normalize_or_zero() * m_a;
             }
         }
     });

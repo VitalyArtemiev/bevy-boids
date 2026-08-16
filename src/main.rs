@@ -16,7 +16,7 @@ use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
 use crate::util::*;
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
-use bevy::render::render_asset::RenderAssetUsages;
+use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::TextureViewDimension::Cube;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
@@ -36,10 +36,10 @@ fn main() {
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
                 .set(RenderPlugin {
-                    render_creation: RenderCreation::Automatic(WgpuSettings {
+                    render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                         backends: Some(Backends::VULKAN),
                         ..default()
-                    }),
+                    })),
                     ..default()
                 }),
         )
@@ -152,7 +152,7 @@ fn setup(
         color: Default::default(),
         intensity: 9000.0,
         range: 100.0,
-        shadows_enabled: true,
+        shadow_maps_enabled: true,
         ..default()
     }, Transform::from_xyz(10.0, 10.0, 0.0)));
 
@@ -194,6 +194,7 @@ fn setup(
             button_drag: Option::from(MouseButton::Right),
             lock_on_drag: false,
             edge_pan_width: 0.00,
+            edge_pan_restrict_to_viewport: false,
             pan_speed: 15.0,
             zoom_sensitivity: 0.5,
             enabled: true,

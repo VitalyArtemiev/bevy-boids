@@ -2,8 +2,9 @@ use bevy::ecs::query::QuerySingleError;
 use crate::kinematics::{NNTree, Velocity};
 use crate::util::within_rect;
 use bevy::math::Vec3;
-use bevy::pbr::{MeshMaterial3d, PointLight, StandardMaterial};
-use bevy::prelude::{ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, Mesh3d, MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With};
+use bevy::light::PointLight;
+use bevy::pbr::{MeshMaterial3d, StandardMaterial};
+use bevy::prelude::{ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, Mesh3d, MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With};
 use bevy_rts_camera::Ground;
 use crate::target::Target;
 
@@ -111,7 +112,7 @@ pub fn mouse_click_system(
         if !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
             for (entity, children) in &q_selected {
                 commands.entity(entity).remove::<Selected>();
-                commands.entity(entity).remove_children(children);
+                commands.entity(entity).detach_children(children);
                 for child in children {
                     commands.entity(*child).despawn()
                 }
@@ -147,20 +148,21 @@ pub fn mouse_click_system(
                 //     transform: Transform::from_xyz(0., 1.1, 0.),
                 //     ..default()
                 // })
-                .spawn(
+                .spawn((
                     PointLight {
                         color: Default::default(),
                         intensity: 1000.0,
                         range: 5.0,
                         radius: 5.0,
-                        shadows_enabled: false,
+                        shadow_maps_enabled: false,
+                        contact_shadows_enabled: false,
                         affects_lightmapped_mesh_diffuse: false,
                         shadow_depth_bias: 0.0,
                         shadow_normal_bias: 0.0,
                         shadow_map_near_z: 0.0,
                     },
-                )
-                .set_parent(entity.unwrap());
+                    ChildOf(entity.unwrap()),
+                ));
 
             // if let Ok(mut boid) = query.get_mut(entity.unwrap()) {
             //     entity.

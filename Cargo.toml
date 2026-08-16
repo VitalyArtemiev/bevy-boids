@@ -1,4 +1,3 @@
-cargo-features = ["edition2024"]
 [package]
 name = "bevy-boids"
 version = "0.1.0"
@@ -7,8 +6,8 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-#bevy = { version = "0.16.1", features = ["dynamic_linking", "trace", "trace_tracy", "trace_tracy_memory"] }
-bevy = { version = "0.16.1", features = [
+#bevy = { version = "0.19", features = ["dynamic_linking", "trace", "trace_tracy", "trace_tracy_memory"] }
+bevy = { version = "0.19", features = [
     "trace",
     "trace_tracy",
     "trace_tracy_memory",
@@ -16,7 +15,7 @@ bevy = { version = "0.16.1", features = [
 
 #bevy_spatial = "0.11.0"
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within" }
-bevy_rts_camera = "0.10.0"
+bevy_rts_camera = "0.14.0"
 rand = "0.9.1"
 derive_more = { version = "2.0.1", features = ["full"] }
 lazy_static = "1.5.0"
