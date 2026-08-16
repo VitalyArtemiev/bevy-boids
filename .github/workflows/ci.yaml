@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # For `cargo check --target wasm32-unknown-unknown` below
+          target: wasm32-unknown-unknown
       - name: Install cranelift codegen backend
         # Required even for `cargo check` (profile.dev uses codegen-backend = "cranelift")
         run: rustup component add rustc-codegen-cranelift-preview
