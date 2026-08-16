@@ -27,10 +27,16 @@ jobs:
       - name: Install cranelift codegen backend
         # Required even for `cargo check` (profile.dev uses codegen-backend = "cranelift")
         run: rustup component add rustc-codegen-cranelift-preview
-      - name: Install linkers
+      - name: Install linkers and Linux system libs
         # .cargo/config.toml sets `linker = "clang"` + mold for local dev speed;
         # `cargo check` links build scripts/proc macros with it, so CI needs them too.
-        run: sudo apt-get update && sudo apt-get install -y clang lld mold
+        # Bevy 0.17+ enables Wayland by default and audio is a default feature,
+        # so native builds need wayland/alsa/udev system libraries
+        # (see bevy docs/linux_dependencies.md).
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          clang lld mold pkg-config
+          libwayland-dev libxkbcommon-dev libasound2-dev libudev-dev
       - uses: Swatinem/rust-cache@v2
       - name: Check native
         run: cargo check
@@ -54,10 +60,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           target: wasm32-unknown-unknown
-      - name: Install linkers
-        # `cargo install wasm-bindgen-cli` is a host build without --target,
-        # so it links with the clang/mold configured in .cargo/config.toml.
-        run: sudo apt-get update && sudo apt-get install -y clang lld mold
+      - name: Install linkers and Linux system libs
+        # Host-side builds (build scripts, wasm-bindgen-cli install) link with
+        # the clang/mold configured in .cargo/config.toml; wayland/alsa/udev
+        # are required by Bevy's default Linux features.
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          clang lld mold pkg-config
+          libwayland-dev libxkbcommon-dev libasound2-dev libudev-dev
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm
