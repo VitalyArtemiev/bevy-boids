@@ -33,20 +33,35 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 quickcheck = "1.0.3"
 #proptest may be better
 
-# Enable a small amount of optimization in debug mode
+# Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1
+# Nightly: fast codegen for our crate; deps below stay on LLVM for runtime speed.
+codegen-backend = "cranelift"
 
-# Enable max optimizations for dependencies, but not for our code:
+# Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
+codegen-backend = "llvm"
 
 # Enable link-time optimizations for release
-[profile.release]
+[profile.fast]
+inherits = "release"
 lto = "thin"
 
-#lto = true
-#opt-level = 3
-#codegen-units = 1
-#incremental = false
-#debug = false
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
+incremental = false
+debug = false
+
+# Size-optimized profile for web deployment. Build with:
+#   cargo build --profile wasm-release --target wasm32-unknown-unknown
+[profile.wasm-release]
+inherits = "release"
+# Optimize for size (also try "z", sometimes it is better).
+opt-level = "s"
+# Strip symbols AND debuginfo: on wasm, "debuginfo" alone leaves the ~22MB
+# "name" section behind. We lose panic backtrace symbolication, fine for web.
+strip = "symbols"

@@ -18,7 +18,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cranelift codegen backend
+        # Required even for `cargo check` (profile.dev uses codegen-backend = "cranelift")
+        run: rustup component add rustc-codegen-cranelift-preview
       - uses: Swatinem/rust-cache@v2
       - name: Check native
         run: cargo check
@@ -39,7 +42,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           target: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -49,9 +52,9 @@ jobs:
       - name: Install wasm-bindgen-cli
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Build release wasm
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: cargo build --profile wasm-release --target wasm32-unknown-unknown
       - name: Run wasm-bindgen
-        run: wasm-bindgen --target web --out-dir dist target/wasm32-unknown-unknown/release/bevy_boids.wasm
+        run: wasm-bindgen --target web --out-dir dist target/wasm32-unknown-unknown/wasm-release/bevy-boids.wasm
       - name: Assemble site
         run: |
           cp assets/index.html dist/index.html
