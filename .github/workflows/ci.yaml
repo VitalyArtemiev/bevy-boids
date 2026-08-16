@@ -7,6 +7,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pin the toolchain unambiguously: .cargo/config.toml uses nightly-only
+  # flags (-Zthreads, unstable codegen-backend). rust-toolchain.toml also
+  # pins nightly; this env var is a redundant guarantee for every rustup
+  # shim invocation in any directory.
+  RUSTUP_TOOLCHAIN: nightly
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,6 +27,10 @@ jobs:
       - name: Install cranelift codegen backend
         # Required even for `cargo check` (profile.dev uses codegen-backend = "cranelift")
         run: rustup component add rustc-codegen-cranelift-preview
+      - name: Install linkers
+        # .cargo/config.toml sets `linker = "clang"` + mold for local dev speed;
+        # `cargo check` links build scripts/proc macros with it, so CI needs them too.
+        run: sudo apt-get update && sudo apt-get install -y clang lld mold
       - uses: Swatinem/rust-cache@v2
       - name: Check native
         run: cargo check
@@ -45,6 +54,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           target: wasm32-unknown-unknown
+      - name: Install linkers
+        # `cargo install wasm-bindgen-cli` is a host build without --target,
+        # so it links with the clang/mold configured in .cargo/config.toml.
+        run: sudo apt-get update && sudo apt-get install -y clang lld mold
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm
