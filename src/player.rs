@@ -1,12 +1,19 @@
-use bevy::ecs::query::QuerySingleError;
-use crate::kinematics::{NNTree, Velocity};
+use crate::kinematics::NNTree;
 use crate::util::within_rect;
-use bevy::math::Vec3;
-use bevy::light::PointLight;
-use bevy::pbr::{MeshMaterial3d, StandardMaterial};
-use bevy::prelude::{ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity, Gizmos, GlobalTransform, InfinitePlane3d, KeyCode, Mesh3d, MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With};
+use std::f32::consts::FRAC_PI_2;
+use bevy::color::palettes::basic::YELLOW;
+use bevy::ecs::component::{Mutable, StorageType};
+use bevy::ecs::lifecycle::{ComponentHook, HookContext};
+use bevy::ecs::world::DeferredWorld;
+use bevy::gizmos::GizmoAsset;
+use bevy::gizmos::config::GizmoLineConfig;
+use bevy::math::{Isometry3d, Quat, Vec3};
+use bevy::prelude::{
+    Assets, ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, FromWorld,
+    Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MouseButton, Query, Res,
+    ResMut, Resource,     Transform, Vec2, Window, With, World, default, info, warn,
+};
 use bevy_rts_camera::Ground;
-use crate::target::Target;
 
 #[derive(Resource, Default)]
 pub struct Player {
@@ -15,20 +22,70 @@ pub struct Player {
     corner3: Vec3,
 }
 
-#[derive(Component)]
-pub struct Selected{
-    transform: Transform,
-    mesh: Mesh3d,
-    material: MeshMaterial3d<StandardMaterial>,
+pub struct Selected;
+
+/// Shared gizmo asset for selection rings.
+#[derive(Resource)]
+pub struct SelectionGizmo(pub Handle<GizmoAsset>);
+
+impl FromWorld for SelectionGizmo {
+    fn from_world(world: &mut World) -> Self {
+        let mut gizmo = GizmoAsset::default();
+        gizmo
+            .circle(
+                Isometry3d::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+                0.5,
+                Color::srgb(1.0, 0.9, 0.0),
+            )
+            .resolution(32);
+        let handle = world.resource_mut::<Assets<GizmoAsset>>().add(gizmo);
+        Self(handle)
+    }
 }
 
-impl Default for Selected {
-    fn default() -> Self {
-        Selected {
-            transform: Transform::from_xyz(0.0, 1.0, 0.0),
-            mesh: Default::default(),
-            material: Default::default(),
-        }
+/// Marker on the child entity that visualizes a selection.
+#[derive(Component, Default)]
+pub struct SelectionIndicator;
+
+fn on_selected_insert(mut world: DeferredWorld, ctx: HookContext) {
+    let Some(gizmo) = world.get_resource::<SelectionGizmo>() else {
+        warn!("Selected inserted before SelectionGizmo resource exists");
+        return;
+    };
+    let handle = gizmo.0.clone();
+    world.commands().entity(ctx.entity).with_children(|parent| {
+        parent.spawn((
+            SelectionIndicator,
+            Gizmo {
+                handle,
+                line_config: GizmoLineConfig {
+                    width: 3.0,
+                    ..default()
+                },
+                depth_bias: -1.0,
+            },
+            Transform::from_xyz(0.0, 0.05, 0.0),
+        ));
+    });
+}
+
+fn on_selected_remove(mut world: DeferredWorld, ctx: HookContext) {
+    world
+        .commands()
+        .entity(ctx.entity)
+        .despawn_related::<Children>();
+}
+
+impl Component for Selected {
+    const STORAGE_TYPE: StorageType = StorageType::Table;
+    type Mutability = Mutable;
+
+    fn on_insert() -> Option<ComponentHook> {
+        Some(on_selected_insert)
+    }
+
+    fn on_remove() -> Option<ComponentHook> {
+        Some(on_selected_remove)
     }
 }
 
@@ -94,30 +151,33 @@ pub fn mouse_click_system(
     let (camera, camera_transform) = q_camera.single_mut().unwrap();
     let ground = q_ground.single().unwrap();
     let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
+        info!("[sel] no cursor position");
         return;
     };
     let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
+        info!("[sel] ray missed ground, cursor={:?}", cursor_position);
         return;
     };
 
     if mouse_button_input.just_pressed(MouseButton::Left) {
+        info!("[sel] PRESS cursor={:?} point={:?}", cursor_position, point);
         player.selecting = true;
         player.corner1 = point;
     }
 
     if mouse_button_input.just_released(MouseButton::Left) {
+        info!(
+            "[sel] RELEASE cursor={:?} point={:?} corner1={:?} selecting={}",
+            cursor_position, point, player.corner1, player.selecting
+        );
+    }
+    if mouse_button_input.just_released(MouseButton::Left) && player.selecting {
         player.corner3 = point;
         player.selecting = false;
 
         if !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
-            for (entity, children) in &q_selected {
+            for (entity, _) in &q_selected {
                 commands.entity(entity).remove::<Selected>();
-                commands.entity(entity).detach_children(children);
-                for child in children {
-                    commands.entity(*child).despawn()
-                }
-
-                // commands.entity(entity).clear_children();
             }
         }
 
@@ -135,39 +195,7 @@ pub fn mouse_click_system(
 
 
         for (_, entity) in within_rect(corner1, corner2, corner3, corner4, tree) {
-            commands.entity(entity.unwrap()).insert(Selected::default());
-
-            commands
-                // .spawn(PointLightBundle {
-                //     point_light: PointLight {
-                //         intensity: 1000.0,
-                //         range: 0.2,
-                //         shadows_enabled: false,
-                //         ..default()
-                //     },
-                //     transform: Transform::from_xyz(0., 1.1, 0.),
-                //     ..default()
-                // })
-                .spawn((
-                    PointLight {
-                        color: Default::default(),
-                        intensity: 1000.0,
-                        range: 5.0,
-                        radius: 5.0,
-                        shadow_maps_enabled: false,
-                        contact_shadows_enabled: false,
-                        affects_lightmapped_mesh_diffuse: false,
-                        shadow_depth_bias: 0.0,
-                        shadow_normal_bias: 0.0,
-                        shadow_map_near_z: 0.0,
-                    },
-                    ChildOf(entity.unwrap()),
-                ));
-
-            // if let Ok(mut boid) = query.get_mut(entity.unwrap()) {
-            //     entity.
-            //     boid.
-            // }
+            commands.entity(entity.unwrap()).insert(Selected);
         }
     }
 

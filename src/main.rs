@@ -10,7 +10,7 @@ mod resources;
 
 use crate::boid::*;
 use crate::kinematics::*;
-use crate::player::{Player, draw_cursor, mouse_click_system};
+use crate::player::{Player, SelectionGizmo, draw_cursor, mouse_click_system};
 use crate::target::{Target, follow_target};
 use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
 use crate::util::*;
@@ -44,6 +44,7 @@ fn main() {
                 }),
         )
         .add_plugins(RtsCameraPlugin)
+        .init_resource::<SelectionGizmo>()
         .add_plugins(
             AutomaticUpdate::<TrackedByTree>::new()
                 .with_frequency(Duration::from_secs_f32(1.0))
