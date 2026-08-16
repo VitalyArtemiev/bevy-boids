@@ -17,10 +17,9 @@ use crate::util::*;
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
 use bevy::asset::RenderAssetUsages;
-use bevy::render::render_resource::TextureViewDimension::Cube;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::render::{RenderPlugin, mesh};
+use bevy::render::RenderPlugin;
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use rand::Rng;
@@ -28,6 +27,13 @@ use std::time::Duration;
 use crate::resources::{Materials, Meshes};
 
 fn main() {
+    let mut wgpu_settings = WgpuSettings::default();
+    // Browsers have no Vulkan; let wgpu pick (WebGL2/WebGPU) on wasm
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        wgpu_settings.backends = Some(Backends::VULKAN);
+    }
+
     App::new()
         .init_resource::<Materials>()
         .init_resource::<Meshes>()
@@ -36,10 +42,7 @@ fn main() {
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
                 .set(RenderPlugin {
-                    render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
-                        backends: Some(Backends::VULKAN),
-                        ..default()
-                    })),
+                    render_creation: RenderCreation::Automatic(Box::new(wgpu_settings)),
                     ..default()
                 }),
         )
