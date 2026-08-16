@@ -80,7 +80,9 @@ jobs:
       - name: Build release wasm
         run: cargo build --profile wasm-release --target wasm32-unknown-unknown
       - name: Run wasm-bindgen
-        run: wasm-bindgen --target web --out-dir dist target/wasm32-unknown-unknown/wasm-release/bevy-boids.wasm
+        # --out-name pins the output basename (default derives from the input
+        # wasm filename); index.html imports ./bevy_boids.js
+        run: wasm-bindgen --target web --out-dir dist --out-name bevy_boids target/wasm32-unknown-unknown/wasm-release/bevy-boids.wasm
       - name: Assemble site
         run: |
           cp assets/index.html dist/index.html
