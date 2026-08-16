@@ -171,9 +171,14 @@ pub fn mouse_click_system(
             cursor_position, point, player.corner1, player.selecting
         );
     }
+
     if mouse_button_input.just_released(MouseButton::Left) && player.selecting {
-        player.corner3 = point;
         player.selecting = false;
+        if player.corner1 == point {
+            return;
+        }
+
+        player.corner3 = point;
 
         if !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
             for (entity, _) in &q_selected {
