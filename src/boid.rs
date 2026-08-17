@@ -1,11 +1,11 @@
 use crate::kinematics::*;
+use crate::resources::Materials;
 use crate::target::Target;
 use crate::terrain::Obstacle;
 use bevy::prelude::Bundle;
 use bevy::prelude::*;
 use bevy_spatial::SpatialAccess;
 use rand::Rng;
-use crate::resources::Materials;
 
 #[derive(Component, Default)]
 pub struct Boid {}
@@ -72,35 +72,37 @@ pub fn soft_collisions(
     tree: Res<NNTree>,
 ) {
     //replace with iter_combinations_mut?
-    query.par_iter_mut().for_each(|(entity, transform, mut vel)| {
-        let this = transform.translation;
-        let mut dir = Vec3::default();
+    query
+        .par_iter_mut()
+        .for_each(|(entity, transform, mut vel)| {
+            let this = transform.translation;
+            let mut dir = Vec3::default();
 
-        // Skip the self-match: `this` is in the tree, so the nearest neighbour is the boid itself
-        for (other, other_entity) in tree.k_nearest_neighbour(this, 2) {
-            if other_entity == Some(entity) {
-                continue;
+            // Skip the self-match: `this` is in the tree, so the nearest neighbour is the boid itself
+            for (other, other_entity) in tree.k_nearest_neighbour(this, 2) {
+                if other_entity == Some(entity) {
+                    continue;
+                }
+                let vec = -other + this;
+                let len = vec.length().max(0.01);
+                //Don't need a branch - if len is large, effect is small
+                dir += vec.normalize_or_zero() / len;
             }
-            let vec = -other + this;
-            let len = vec.length().max(0.01);
-            //Don't need a branch - if len is large, effect is small
-            dir += vec.normalize_or_zero() / len;
-        }
-        //Maybe don't need more than one? Should bench but this is slower at 10k
-        // for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
-        //     let vec = - other + this;
-        //     let len = vec.length() + 0.01;
-        //     dir += vec.normalize() / len;
-        // }
+            //Maybe don't need more than one? Should bench but this is slower at 10k
+            // for (other, _) in tree.within_distance(this, INTERACTION_RADIUS) {
+            //     let vec = - other + this;
+            //     let len = vec.length() + 0.01;
+            //     dir += vec.normalize() / len;
+            // }
 
-        let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
+            let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
 
-        // vel.push = (dir).clamp_length_max(min_a);
-        vel.a += (dir).clamp_length_max(min_a);
-    })
+            // vel.push = (dir).clamp_length_max(min_a);
+            vel.a += (dir).clamp_length_max(min_a);
+        })
 }
 
-const OBSTACLE_INTERACTION_RADIUS: f32 = 0.5;
+const OBSTACLE_INTERACTION_RADIUS: f32 = 1.5;
 
 pub fn hard_collisions(
     mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>,

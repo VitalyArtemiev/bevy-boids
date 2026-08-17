@@ -3,28 +3,34 @@ mod formations;
 mod horse;
 mod kinematics;
 mod player;
+mod resources;
 mod target;
 mod terrain;
 mod util;
-mod resources;
 
 use crate::boid::*;
+use crate::formations::{
+    FormationSim, assign_slots, move_formations, propagate_formation_targets,
+};
 use crate::kinematics::*;
-use crate::player::{Player, SelectionGizmo, draw_cursor, mouse_click_system};
+use crate::player::{
+    FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
+    mouse_click_system, quick_group_system,
+};
+use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
 use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
 use crate::util::*;
+use bevy::asset::RenderAssetUsages;
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
-use bevy::asset::RenderAssetUsages;
+use bevy::render::RenderPlugin;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::render::RenderPlugin;
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use rand::Rng;
 use std::time::Duration;
-use crate::resources::{Materials, Meshes};
 
 fn main() {
     let mut wgpu_settings = WgpuSettings::default();
@@ -38,6 +44,7 @@ fn main() {
         .init_resource::<Materials>()
         .init_resource::<Meshes>()
         .init_resource::<Player>()
+        .init_resource::<FormationSim>()
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -48,6 +55,7 @@ fn main() {
         )
         .add_plugins(RtsCameraPlugin)
         .init_resource::<SelectionGizmo>()
+        .init_resource::<FormationSelectionGizmo>()
         .add_plugins(
             AutomaticUpdate::<TrackedByTree>::new()
                 .with_frequency(Duration::from_secs_f32(1.0))
@@ -62,10 +70,14 @@ fn main() {
                 bob,
                 draw_cursor,
                 mouse_click_system,
+                quick_group_system,
+                frontage_position_system,
+                assign_slots,
                 hard_collisions.after(soft_collisions),
+                propagate_formation_targets,
             ),
         )
-        .add_systems(FixedUpdate, (follow_target))
+        .add_systems(FixedUpdate, (follow_target, move_formations))
         .run();
 }
 
@@ -127,10 +139,14 @@ fn setup(
     for i in 1..100 {
         for j in 1..100 {
             let mut ent = commands
-                .spawn(BoidBundle::with_target(Target {
-                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
-                    dir: Default::default(),
-                }, mesh_list.capsule.clone(), mat_list.debug_material.clone(), ))
+                .spawn(BoidBundle::with_target(
+                    Target {
+                        pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
+                        dir: Default::default(),
+                    },
+                    mesh_list.capsule.clone(),
+                    mat_list.debug_material.clone(),
+                ))
                 .id();
 
             // commands.entity(ent).insert(NoAutomaticBatching{});
@@ -152,14 +168,16 @@ fn setup(
             .id();
     }
 
-    commands.spawn((PointLight{
-        color: Default::default(),
-        intensity: 9000.0,
-        range: 100.0,
-        shadow_maps_enabled: true,
-        ..default()
-    }, Transform::from_xyz(10.0, 10.0, 0.0)));
-
+    commands.spawn((
+        PointLight {
+            color: Default::default(),
+            intensity: 9000.0,
+            range: 100.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(10.0, 10.0, 0.0),
+    ));
 
     // ground plane
     commands.spawn(TerrainBundle::default(
@@ -173,7 +191,7 @@ fn setup(
         RtsCamera {
             bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
             height_min: 2.0,
-            height_max: 150.0,
+            height_max: 300.0,
             angle: 20.0f32.to_radians(),
             target_angle: 20.0f32.to_radians(),
             min_angle: 20.0f32.to_radians(),
@@ -195,6 +213,8 @@ fn setup(
             key_rotate_right: KeyCode::KeyE,
             key_rotate_speed: 0.5,
             lock_on_rotate: false,
+            // RMB is camera drag-pan when nothing is selected;
+            // frontage_position_system disables it while a selection exists.
             button_drag: Option::from(MouseButton::Right),
             lock_on_drag: false,
             edge_pan_width: 0.00,

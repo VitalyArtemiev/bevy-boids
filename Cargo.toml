@@ -5,11 +5,14 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+# Opt-in profiling: cargo run --release --features tracy
+# Do NOT enable for wasm builds (tracy-client-sys cannot target wasm).
+tracy = ["bevy/trace", "bevy/trace_tracy", "bevy/trace_tracy_memory"]
+
 [dependencies]
 #bevy = { version = "0.19", features = ["dynamic_linking", "trace", "trace_tracy", "trace_tracy_memory"] }
-bevy = { version = "0.19", features = [
-    "trace",
-] }
+bevy = { version = "0.19" }
 
 #bevy_spatial = "0.11.0"
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within", default-features = false, features = ["kdtree"] }
@@ -18,13 +21,6 @@ rand = "0.9.1"
 derive_more = { version = "2.0.1", features = ["full"] }
 lazy_static = "1.5.0"
 serde = { version = "1.0.219", features = ["derive"] }
-
-# Tracy profiling is native-only (tracy-client-sys cannot build for wasm)
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bevy = { version = "0.19", features = [
-    "trace_tracy",
-    "trace_tracy_memory",
-] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
