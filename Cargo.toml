@@ -11,8 +11,8 @@ edition = "2024"
 tracy = ["bevy/trace", "bevy/trace_tracy", "bevy/trace_tracy_memory"]
 
 [dependencies]
-#bevy = { version = "0.19", features = ["dynamic_linking", "trace", "trace_tracy", "trace_tracy_memory"] }
 bevy = { version = "0.19" }
+#bevy = { version = "0.19" }
 
 #bevy_spatial = "0.11.0"
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within", default-features = false, features = ["kdtree"] }
@@ -21,6 +21,16 @@ rand = "0.9.1"
 derive_more = { version = "2.0.1", features = ["full"] }
 lazy_static = "1.5.0"
 serde = { version = "1.0.219", features = ["derive"] }
+
+# Local dev conveniences (dynamic linking + Tracy) - native only, they
+# cannot build for wasm (tracy-client-sys needs a C++ toolchain).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bevy = { version = "0.19", features = [
+    "dynamic_linking",
+    "trace",
+    "trace_tracy",
+    #    "trace_tracy_memory"
+] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }

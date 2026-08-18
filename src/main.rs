@@ -9,13 +9,11 @@ mod terrain;
 mod util;
 
 use crate::boid::*;
-use crate::formations::{
-    FormationSim, assign_slots, move_formations, propagate_formation_targets,
-};
+use crate::formations::{LODGuard, assign_slots, propagate_formation_targets, run_formation_tasks};
 use crate::kinematics::*;
 use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
-    mouse_click_system, quick_group_system,
+    mouse_click_system, quick_group_system, selection_indicator_face,
 };
 use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
@@ -44,7 +42,7 @@ fn main() {
         .init_resource::<Materials>()
         .init_resource::<Meshes>()
         .init_resource::<Player>()
-        .init_resource::<FormationSim>()
+        .init_resource::<LODGuard>()
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -72,12 +70,15 @@ fn main() {
                 mouse_click_system,
                 quick_group_system,
                 frontage_position_system,
-                assign_slots,
+                selection_indicator_face,
                 hard_collisions.after(soft_collisions),
-                propagate_formation_targets,
             ),
         )
-        .add_systems(FixedUpdate, (follow_target, move_formations))
+        .add_systems(
+            FixedUpdate,
+            (assign_slots, propagate_formation_targets, follow_target),
+        )
+        .add_systems(Update, run_formation_tasks)
         .run();
 }
 

@@ -1,11 +1,11 @@
 use crate::boid::Boid;
 use crate::formations::{
-    CommandSlot, Formation, FormationKind, FormationOf, Formations, MemberOf, Members,
-    NeedsSlotAssignment,
-};use crate::kinematics::NNTree;
+    CommandSlot, Formation, FormationKind, FormationOf, FormationTask, Formations, MemberOf,
+    Members,
+};
+use crate::kinematics::{MAX_VELOCITY, NNTree, Velocity};
 use crate::target::Target;
 use crate::util::within_rect;
-use std::f32::consts::FRAC_PI_2;
 use bevy::color::palettes::basic::YELLOW;
 use bevy::ecs::component::{Mutable, StorageType};
 use bevy::ecs::lifecycle::{ComponentHook, HookContext};
@@ -15,11 +15,13 @@ use bevy::gizmos::GizmoAsset;
 use bevy::gizmos::config::GizmoLineConfig;
 use bevy::math::{Isometry3d, Quat, Vec3};
 use bevy::prelude::{
-    Assets, ButtonInput, Camera, Children, Color, Commands, Component, Dir3, Entity, FromWorld,
-    Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MouseButton, Query, Res,
-    ResMut, Resource, Transform, Vec2, Window, With, Without, World, default, info, warn,
+    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity,
+    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MouseButton,
+    Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World, default, info,
+    warn,
 };
 use bevy_rts_camera::{Ground, RtsCameraControls};
+use std::f32::consts::FRAC_PI_2;
 
 #[derive(Resource, Default)]
 pub struct Player {
@@ -38,14 +40,15 @@ pub struct SelectionGizmo(pub Handle<GizmoAsset>);
 
 impl FromWorld for SelectionGizmo {
     fn from_world(world: &mut World) -> Self {
+        // Elongated triangle outline on the ground plane, apex pointing +Z
+        // (local forward). Oriented per-boid by the indicator child's
+        // Transform rotation (see selection_indicator_face system).
         let mut gizmo = GizmoAsset::default();
-        gizmo
-            .circle(
-                Isometry3d::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-                0.5,
-                Color::srgb(1.0, 0.9, 0.0),
-            )
-            .resolution(32);
+        // Triangle in the XZ ground plane (x = right, z = forward), apex +Z.
+        let tip = Vec3::new(0.0, 0.0, 0.6);
+        let left = Vec3::new(-0.25, 0.0, -0.4);
+        let right = Vec3::new(0.25, 0.0, -0.4);
+        gizmo.linestrip([tip, right, left, tip], Color::srgb(1.0, 0.9, 0.0));
         let handle = world.resource_mut::<Assets<GizmoAsset>>().add(gizmo);
         Self(handle)
     }
@@ -153,7 +156,9 @@ fn get_intersection(
     ground_transform: &GlobalTransform,
 ) -> Option<Vec3> {
     // Calculate a ray pointing from the camera into the world based on the cursor's position.
-    let ray = camera.viewport_to_world(camera_transform, *cursor_position).unwrap();
+    let ray = camera
+        .viewport_to_world(camera_transform, *cursor_position)
+        .unwrap();
 
     // Calculate if and where the ray is hitting the ground plane.
     let distance = ray.intersect_plane(
@@ -165,7 +170,7 @@ fn get_intersection(
 }
 
 pub fn draw_cursor(
-    camera_query: Query<(&Camera, &GlobalTransform), /*With<Player>*/>,
+    camera_query: Query<(&Camera, &GlobalTransform) /*With<Player>*/>,
     ground_query: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
@@ -178,7 +183,8 @@ pub fn draw_cursor(
                 return;
             };
 
-            let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
+            let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground)
+            else {
                 return;
             };
 
@@ -240,7 +246,6 @@ pub fn mouse_click_system(
 
         player.corner3 = point;
 
-
         let right = camera_transform.right();
         let dif = player.corner3 - player.corner1;
 
@@ -251,7 +256,6 @@ pub fn mouse_click_system(
         let corner2 = corner1 + dif_vert;
         let corner3 = player.corner3;
         let corner4 = corner1 + dif_hor;
-
 
         for (_, entity) in within_rect(corner1, corner2, corner3, corner4, tree) {
             commands.entity(entity.unwrap()).insert(Selected);
@@ -288,6 +292,7 @@ pub fn quick_group_system(
     q_selected: Query<(Entity, &Transform), (With<Selected>, Without<Formation>)>,
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
     q_formations: Query<(Entity, &CommandSlot, &Members, Option<&Formations>), With<Formation>>,
+    q_formation_details: Query<&Formation, With<CommandSlot>>,
     mut commands: Commands,
 ) {
     const SLOT_KEYS: [KeyCode; 6] = [
@@ -311,7 +316,9 @@ pub fn quick_group_system(
     if ctrl {
         if let Ok(selected_formation) = q_selected_formations.single() {
             // Re-slot the selected formation to this number.
-            commands.entity(selected_formation).insert(CommandSlot(slot));
+            commands
+                .entity(selected_formation)
+                .insert(CommandSlot(slot));
         } else if !q_selected.is_empty() {
             // Assign: build a new formation at the selection's centroid.
             let mut centroid = Vec3::ZERO;
@@ -336,19 +343,23 @@ pub fn quick_group_system(
                 commands.entity(old).despawn();
             }
 
+            // Formation speed = min member max speed (MAX_VELOCITY for boids,
+            // max_speed for sub-formations).
+            let mut max_speed = f32::INFINITY;
+            for (entity, _) in &q_selected {
+                match q_formation_details.get(entity) {
+                    Ok(sub) => max_speed = max_speed.min(sub.max_speed),
+                    Err(_) => max_speed = max_speed.min(MAX_VELOCITY),
+                }
+            }
             let formation = commands
                 .spawn((
                     Formation {
-                        kind: FormationKind::default(),
+                        max_speed: max_speed.min(MAX_VELOCITY),
                         ..default()
                     },
                     Transform::from_translation(centroid),
-                    Target {
-                        pos: centroid,
-                        dir: Vec3::ZERO,
-                    },
                     CommandSlot(slot),
-                    NeedsSlotAssignment,
                 ))
                 .id();
             for (entity, _) in &q_selected {
@@ -393,8 +404,7 @@ pub fn frontage_position_system(
 ) {
     // Nothing selected: RMB stays the camera drag-pan control. With a
     // selection, RMB becomes frontage designation, so disable camera drag.
-    let has_selection =
-        !q_selected_boids.is_empty() || !q_selected_formations.is_empty();
+    let has_selection = !q_selected_boids.is_empty() || !q_selected_formations.is_empty();
     for mut controls in &mut q_camera_controls {
         controls.button_drag = (!has_selection).then_some(MouseButton::Right);
     }
@@ -426,8 +436,7 @@ pub fn frontage_position_system(
         }
         if mouse.just_released(MouseButton::Right) {
             player.front_left = None;
-            let adjust_width =
-                keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+            let adjust_width = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
             designate_frontage(
                 left,
                 point,
@@ -437,7 +446,6 @@ pub fn frontage_position_system(
                 &q_member_of,
                 &mut q_formation_mut,
                 &mut q_targets,
-                &mut commands,
             );
         }
     }
@@ -453,7 +461,6 @@ fn designate_frontage(
     q_member_of: &Query<&MemberOf>,
     q_formation_mut: &mut Query<&mut Formation>,
     q_targets: &mut Query<&mut Target>,
-    commands: &mut Commands,
 ) {
     let right_vec = right_pt - left;
     let width = right_vec.length();
@@ -529,15 +536,44 @@ fn designate_frontage(
         // behind it, so the body (boid radius / formation extent) is flush
         // against the line rather than straddling it.
         let pos = midpoint + right_dir * col_x - forward * (row as f32 * spacing + spacing * 0.5);
-        if let Ok(mut target) = q_targets.get_mut(unit) {
+        if let Ok(mut formation) = q_formation_mut.get_mut(unit) {
+            // Formation control goes through the task queue: a new order
+            // replaces pending tasks. Move handles the facing-change slot
+            // re-map; a width change reforms first (new columns).
+            formation.tasks.clear();
+            if adjust_width {
+                formation.tasks.push_back(FormationTask::Reform);
+            }
+            formation.tasks.push_back(FormationTask::Move {
+                pos,
+                facing_dir: forward,
+            });
+        } else if let Ok(mut target) = q_targets.get_mut(unit) {
+            // Free boids (not in any formation): direct target.
             target.pos = pos;
             target.dir = forward;
         }
-        // A designated formation re-maps members to slots in the new frame so
-        // the reshuffle to the new facing minimizes total movement.
-        if let Ok(mut formation) = q_formation_mut.get_mut(unit) {
-            formation.dir = forward;
-            commands.entity(unit).insert(NeedsSlotAssignment);
+    }
+}
+
+/// Point each selected boid's triangle indicator along its current movement
+/// direction (velocity if moving, else its target direction). Formation
+/// indicators (squares) are skipped - their facing is the formation's.
+pub fn selection_indicator_face(
+    q_boids: Query<(&Velocity, &Target), With<Boid>>,
+    mut q_indicators: Query<(&mut Transform, &ChildOf), With<SelectionIndicator>>,
+) {
+    for (mut transform, parent) in &mut q_indicators {
+        let Ok((velocity, target)) = q_boids.get(parent.parent()) else {
+            continue; // formation square: orientation handled by the formation
+        };
+        let dir = if velocity.v.length_squared() > 0.01 {
+            velocity.v
+        } else {
+            target.dir
+        };
+        if dir.length_squared() > 1e-6 {
+            transform.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
         }
     }
 }
