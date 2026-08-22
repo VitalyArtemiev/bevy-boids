@@ -9,7 +9,7 @@ mod terrain;
 mod util;
 
 use crate::boid::*;
-use crate::formations::{LODGuard, assign_slots, propagate_formation_targets, run_formation_tasks};
+use crate::formations::{LODGuard, assign_slots, init_formation_speed, propagate_formation_targets, process_formation_orders};
 use crate::kinematics::*;
 use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
@@ -76,9 +76,14 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            (assign_slots, propagate_formation_targets, follow_target),
+            (
+                init_formation_speed,
+                assign_slots,
+                propagate_formation_targets,
+                follow_target,
+            ),
         )
-        .add_systems(Update, run_formation_tasks)
+        .add_systems(Update, process_formation_orders)
         .run();
 }
 

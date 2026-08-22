@@ -11,3 +11,14 @@ rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
 # Nightly-only: per-profile codegen backend selection (cranelift for dev)
 [unstable]
 codegen-backend = true
+
+# Windows: force LLVM even where a profile selects cranelift. Cranelift
+# cannot emit dllimport relocations, which linking against bevy_dylib.dll
+# (dynamic_linking) requires on PE/COFF - data statics like log's
+# MAX_LOG_LEVEL_FILTER come out unresolved (LNK2001/LNK1120). ELF needs
+# no dllimport, so Linux keeps cranelift. rustc honors the LAST
+# -Zcodegen-backend flag, and these rustflags come after the
+# profile-derived ones, so this overrides Cargo.toml on windows only.
+# (rust-lang/rustc_codegen_cranelift#1610)
+[target.'cfg(target_os = "windows")']
+rustflags = ["-Zcodegen-backend=llvm"]

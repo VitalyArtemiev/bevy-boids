@@ -1,9 +1,9 @@
 use crate::boid::Boid;
 use crate::formations::{
-    CommandSlot, Formation, FormationKind, FormationOf, FormationTask, Formations, MemberOf,
-    Members,
+    Formation, FormationKind, FormationOf, FormationOrder, FormationSlot, Formations, MemberOf,
+    Members, QuickCommandGroup,
 };
-use crate::kinematics::{MAX_VELOCITY, NNTree, Velocity};
+use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
 use crate::util::within_rect;
 use bevy::color::palettes::basic::YELLOW;
@@ -291,8 +291,7 @@ pub fn quick_group_system(
     keys: Res<ButtonInput<KeyCode>>,
     q_selected: Query<(Entity, &Transform), (With<Selected>, Without<Formation>)>,
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
-    q_formations: Query<(Entity, &CommandSlot, &Members, Option<&Formations>), With<Formation>>,
-    q_formation_details: Query<&Formation, With<CommandSlot>>,
+    q_formations: Query<(Entity, &QuickCommandGroup, &Members, Option<&Formations>), With<Formation>>,
     mut commands: Commands,
 ) {
     const SLOT_KEYS: [KeyCode; 6] = [
@@ -318,7 +317,7 @@ pub fn quick_group_system(
             // Re-slot the selected formation to this number.
             commands
                 .entity(selected_formation)
-                .insert(CommandSlot(slot));
+                .insert(QuickCommandGroup(slot));
         } else if !q_selected.is_empty() {
             // Assign: build a new formation at the selection's centroid.
             let mut centroid = Vec3::ZERO;
@@ -329,11 +328,18 @@ pub fn quick_group_system(
             centroid /= count as f32;
 
             // Free the slot: detach members of the formation currently in it.
+            // Detached members must also drop their FormationSlot: a stale
+            // slot survives the validity check in assign_slots (in-range,
+            // unique) and would pin the member to an arbitrary slot in
+            // whatever formation it joins next.
             if let Some((old, _, members, subs)) =
                 q_formations.iter().find(|(_, s, _, _)| s.0 == slot)
             {
                 for member in members.iter() {
-                    commands.entity(member).remove::<MemberOf>();
+                    commands
+                        .entity(member)
+                        .remove::<MemberOf>()
+                        .remove::<FormationSlot>();
                 }
                 if let Some(subs) = subs {
                     for sub in subs.iter() {
@@ -343,23 +349,13 @@ pub fn quick_group_system(
                 commands.entity(old).despawn();
             }
 
-            // Formation speed = min member max speed (MAX_VELOCITY for boids,
-            // max_speed for sub-formations).
-            let mut max_speed = f32::INFINITY;
-            for (entity, _) in &q_selected {
-                match q_formation_details.get(entity) {
-                    Ok(sub) => max_speed = max_speed.min(sub.max_speed),
-                    Err(_) => max_speed = max_speed.min(MAX_VELOCITY),
-                }
-            }
+            // max_speed is derived from the member list by
+            // `init_formation_speed` on the ticks after the members attach.
             let formation = commands
                 .spawn((
-                    Formation {
-                        max_speed: max_speed.min(MAX_VELOCITY),
-                        ..default()
-                    },
+                    Formation::default(),
                     Transform::from_translation(centroid),
-                    CommandSlot(slot),
+                    QuickCommandGroup(slot),
                 ))
                 .id();
             for (entity, _) in &q_selected {
@@ -542,9 +538,9 @@ fn designate_frontage(
             // re-map; a width change reforms first (new columns).
             formation.tasks.clear();
             if adjust_width {
-                formation.tasks.push_back(FormationTask::Reform);
+                formation.tasks.push_back(FormationOrder::Reform);
             }
-            formation.tasks.push_back(FormationTask::Move {
+            formation.tasks.push_back(FormationOrder::Move {
                 pos,
                 facing_dir: forward,
             });
