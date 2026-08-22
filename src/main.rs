@@ -9,7 +9,10 @@ mod terrain;
 mod util;
 
 use crate::boid::*;
-use crate::formations::{LODGuard, assign_slots, init_formation_speed, propagate_formation_targets, process_formation_orders};
+use crate::formations::{
+    LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
+    plan_formation_goals, propagate_formation_targets, transition_formation_orders,
+};
 use crate::kinematics::*;
 use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
@@ -74,16 +77,24 @@ fn main() {
                 hard_collisions.after(soft_collisions),
             ),
         )
+        // The whole executor pipeline runs on the fixed timestep, chained:
+        // speed init -> LOD state -> order transitions -> slot re-mapping ->
+        // goal planning -> goal dispatch -> member steering. The chain's
+        // auto sync points make each stage's commands visible to the next,
+        // replacing the former single-system ParamSet passes.
         .add_systems(
             FixedUpdate,
             (
                 init_formation_speed,
-                assign_slots,
                 propagate_formation_targets,
+                transition_formation_orders,
+                assign_slots,
+                plan_formation_goals,
+                dispatch_formation_goals,
                 follow_target,
-            ),
+            )
+                .chain(),
         )
-        .add_systems(Update, process_formation_orders)
         .run();
 }
 

@@ -68,6 +68,27 @@ pub struct Formation {
 #[derive(Component, Default)]
 pub struct NeedsSpeedInit;
 
+/// The per-tick steering plan for one formation, computed by
+/// [`plan_formation_goals`] and consumed by [`dispatch_formation_goals`].
+/// Present while anything below the formation (or the formation itself, if
+/// it is the lowest loaded level) is steered; removed when there is nothing
+/// to steer (e.g. an assembling formation). This is the message that
+/// decouples planning from dispatch - a small, inspectable component
+/// instead of a snapshot vector shared inside one giant system.
+#[derive(Component, Debug)]
+pub struct FormationGoal {
+    /// Where the formation's "body" is: its own position when simulated as
+    /// a unit, otherwise the center of mass of everything simulated below.
+    pub center_of_mass: Vec3,
+    /// The intermediate goal everything below steers toward this tick.
+    pub goal: Vec3,
+    /// Effective facing this tick (`Vec3::ZERO` = keep the current one).
+    pub facing: Vec3,
+    /// Final target of the active `Move` order, if one is executing; drives
+    /// arrival pops and sub-order injection.
+    pub task_pos: Option<Vec3>,
+}
+
 impl Default for Formation {
     fn default() -> Self {
         Self {
@@ -93,10 +114,11 @@ impl Formation {
     }
 }
 
-/// Slot identity of a boid within its formation: member `FormationSlot(i)`
-/// occupies slot `i` of [`FormationKind::offset`]. Slots are persistent; if a
-/// boid dies or leaves, [`assign_slots`] backfills vacancies with the
-/// remaining members, minimizing total movement.
+/// Slot identity of an occupant within its formation: the occupant (boid
+/// or sub-formation) holding `FormationSlot(i)` occupies slot `i` of
+/// [`FormationKind::offset`]. Slots are persistent; if an occupant dies or
+/// leaves, [`assign_slots`] backfills vacancies with the remaining
+/// occupants, minimizing total movement.
 ///
 /// Persistence is deliberate: re-deriving slots every frame would reshuffle
 /// members (jitter), so slots only change when the current assignment is
@@ -115,36 +137,38 @@ impl Formation {
 #[derive(Component, Copy, Clone, Debug, PartialEq, Eq)]
 pub struct FormationSlot(pub usize);
 
-/// Relationship: this entity (a boid) is a member of a formation.
+/// Marker: the slot frame changed (rotate, reform, or a `Move` facing
+/// change) and members must be re-mapped to slots. Inserted by
+/// [`transition_formation_orders`], consumed by [`assign_slots`], which
+/// re-maps and then pops the finished `Rotate`/`Reform`. Presence is the
+/// state - the re-map happens on the `FixedUpdate` tick after insertion.
+#[derive(Component, Default)]
+pub struct SlotsStale;
+
+/// Relationship: this entity (a boid or a sub-formation) is a member of a
+/// formation. One relationship covers both: dispatch and slot bookkeeping
+/// treat every occupant alike, branching only on what the occupant *is*
+/// (`Has<Formation>`: injected orders vs `Target` writes).
 #[derive(Component)]
 #[relationship(relationship_target = Members)]
 pub struct MemberOf(pub Entity);
 
-/// Reverse relationship: all boids that are members of this formation.
+/// Reverse relationship: all occupants of this formation - boids and
+/// sub-formations alike, in join order. Slot fallback numbering (before
+/// the first assignment) follows this order.
+///
+/// Heterogeneous slot spacing (extent-based offsets for sub-formation
+/// occupants instead of uniform `FormationKind::SPACING`) is deliberately
+/// deferred.
 #[derive(Component)]
 #[relationship_target(relationship = MemberOf)]
 pub struct Members(Vec<Entity>);
 
-/// Relationship: this formation is a sub-formation of a larger formation.
-#[derive(Component)]
-#[relationship(relationship_target = Formations)]
-pub struct FormationOf(pub Entity);
-
-/// Reverse relationship: all sub-formations of this formation.
-///
-/// Order dispatch does NOT depend on this split anymore: a lowest loaded
-/// member (see [`propagate_formation_targets`]) executes orders on itself
-/// either way, and containers propagate down whatever they are. The split
-/// remains because boids and sub-formations consume different mechanics:
-/// boids hold [`FormationSlot`]s and receive `Target`s, sub-formations have
-/// their own kind/extent and receive injected orders.
-/// todo: give sub-formations slots too (replacing the positional
-/// `members.len() + i` indexing in `process_formation_orders`), then merge
-/// `MemberOf`/`FormationOf` into one relationship - with dispatch
-/// marker-based, the second relationship has no remaining job.
-#[derive(Component)]
-#[relationship_target(relationship = FormationOf)]
-pub struct Formations(Vec<Entity>);
+/// All slot occupants of a formation - boids and sub-formations alike
+/// (slot fallback numbering follows the `Members` join order).
+fn occupants<'a>(members: Option<&'a Members>) -> impl Iterator<Item = Entity> + 'a {
+    members.into_iter().flat_map(|m| m.iter())
+}
 
 /// Quick-command-group slot (RTS hotkey groups 1-6).
 #[derive(Component)]
@@ -299,23 +323,18 @@ impl Default for LODGuard {
 /// contribute `MAX_VELOCITY`.
 pub fn init_formation_speed(
     q_marked: Query<
-        (Entity, Option<&Members>, Option<&Formations>),
+        (Entity, Option<&Members>),
         (With<Formation>, With<NeedsSpeedInit>),
     >,
     q_details: Query<(&Formation, Option<&NeedsSpeedInit>)>,
     mut commands: Commands,
 ) {
-    for (entity, members, subs) in &q_marked {
+    for (entity, members) in &q_marked {
         let mut max_speed = f32::INFINITY;
         let mut pending = false;
         let mut any = false;
-        // `Members` only exists once a boid has attached; sub-only parents
-        // carry `Formations` alone.
-        let members = members
-            .into_iter()
-            .flat_map(|m| m.iter())
-            .chain(subs.into_iter().flat_map(|s| s.iter()));
-        for member in members {
+        // `Members` only exists once an occupant has attached.
+        for member in occupants(members) {
             any = true;
             match q_details.get(member) {
                 Ok((child, child_pending)) => {
@@ -341,48 +360,36 @@ pub fn init_formation_speed(
 /// Maintain per-formation bookkeeping (extent) and the LOD Velocity split:
 /// a formation WITH `Velocity` is the lowest loaded level of its branch -
 /// nothing below it needs simulating, so it integrates like a single boid
-/// (`move_step` + `follow_target`) and [`process_formation_orders`] executes
+/// (`move_step` + `follow_target`) and [`dispatch_formation_goals`] executes
 /// its orders on itself. WITHOUT `Velocity` it is a container that
 /// propagates orders down to its members instead.
 ///
 /// The rule is local and bottom-up consistent: a formation is lowest loaded
 /// if none of its members is simulated (carries `Velocity`) or is itself a
-/// container (has relationship targets). Unloading a formation's boids
-/// (removing their detail) therefore flips `Velocity` onto the formation;
-/// reloading flips it back off. `LODGuard` freezes all of this when
-/// propagation is off.
+/// container (has occupants). Unloading a formation's boids (removing their
+/// detail) therefore flips `Velocity` onto the formation; reloading flips
+/// it back off. `LODGuard` freezes all of this when propagation is off.
 pub fn propagate_formation_targets(
     lod: Res<LODGuard>,
     mut q_formations: Query<
-        (
-            Entity,
-            &mut Formation,
-            Option<&Members>,
-            Option<&Formations>,
-            Option<&Velocity>,
-        ),
+        (Entity, &mut Formation, Option<&Members>, Option<&Velocity>),
         With<Formation>,
     >,
-    q_member_state: Query<(Has<Velocity>, Has<Members>, Has<Formations>)>,
+    q_member_state: Query<(Has<Velocity>, Has<Members>)>,
     mut commands: Commands,
 ) {
     if !lod.propagate_targets {
         return;
     }
-    for (entity, mut formation, members, subs, velocity) in &mut q_formations {
-        let total = members.map_or(0, |m| m.len()) + subs.map_or(0, |s| s.len());
+    for (entity, mut formation, members, velocity) in &mut q_formations {
+        let total = members.map_or(0, |m| m.len());
         formation.extent = formation.slot_extent(total);
 
         // Lowest loaded iff nothing below is simulated or propagates
         // further. Unresolvable members are gone; they simulate nothing.
-        let should_have_velocity = members
-            .into_iter()
-            .flat_map(|m| m.iter())
-            .chain(subs.into_iter().flat_map(|s| s.iter()))
+        let should_have_velocity = occupants(members)
             .filter_map(|m| q_member_state.get(m).ok())
-            .all(|(simulated, has_members, has_formations)| {
-                !simulated && !has_members && !has_formations
-            });
+            .all(|(simulated, has_members)| !simulated && !has_members);
         match (velocity.is_some(), should_have_velocity) {
             (true, false) => {
                 commands.entity(entity).remove::<Velocity>();
@@ -395,34 +402,95 @@ pub fn propagate_formation_targets(
     }
 }
 
-/// Automatic slot maintenance: (re)assigns members whenever the current
-/// assignment is invalid - group creation (no slots yet), a member dying or
-/// leaving (gap), or a kind/column change. Explicit player-driven reforms go
-/// through [`FormationOrder::Reform`] in [`process_formation_orders`]; both paths
-/// share [`assign_slots_nearest`].
+/// Order state machine: advances the front of each formation's task queue.
+/// `Rotate` and a `Move` whose facing differs turn the slot frame (symmetric
+/// formations re-orient without moving: different slot, same position);
+/// `Reform` is an unconditional re-map. Containers get a [`SlotsStale`]
+/// marker for [`assign_slots`] to consume (which pops the finished
+/// `Rotate`/`Reform` once members are re-mapped). A lowest loaded formation
+/// has no slots to re-map, so its `Rotate`/`Reform` finish here and now.
+/// `Hold` formalizes the idle state - planning and dispatch treat it exactly
+/// like an empty queue.
+pub fn transition_formation_orders(
+    mut q_formations: Query<(Entity, &mut Formation, Option<&Velocity>), With<Formation>>,
+    mut commands: Commands,
+) {
+    for (entity, mut formation, velocity) in &mut q_formations {
+        let Some(task) = formation.tasks.front().copied() else {
+            continue;
+        };
+        match task {
+            FormationOrder::Rotate { to } => {
+                formation.dir = to;
+                if velocity.is_some() {
+                    formation.tasks.pop_front();
+                } else {
+                    commands.entity(entity).insert(SlotsStale);
+                }
+            }
+            FormationOrder::Reform => {
+                if velocity.is_some() {
+                    formation.tasks.pop_front();
+                } else {
+                    commands.entity(entity).insert(SlotsStale);
+                }
+            }
+            FormationOrder::Move { facing_dir, .. } => {
+                // Facing change: re-map slots into the new frame before marching.
+                if formation.dir.distance_squared(facing_dir) > 1e-4 {
+                    formation.dir = facing_dir;
+                    if velocity.is_none() {
+                        commands.entity(entity).insert(SlotsStale);
+                    }
+                }
+            }
+            FormationOrder::Hold { .. } => {}
+        }
+    }
+}
+
+/// Automatic slot maintenance: (re)assigns occupants - boids and
+/// sub-formations alike, sub-formations by their origins - whenever the
+/// current assignment is invalid (group creation, an occupant dying or
+/// leaving, a kind/column change) or when [`SlotsStale`] marks a turned
+/// slot frame. Finishes the front `Rotate`/`Reform` once the re-map is
+/// done. Both paths share [`assign_slots_nearest`].
 pub fn assign_slots(
     q_formations: Query<
-        (Entity, &Transform, &Formation, Option<&Members>, Option<&Formations>),
+        (
+            Entity,
+            &Transform,
+            &Formation,
+            Option<&Members>,
+            Option<&Velocity>,
+            Option<&SlotsStale>,
+        ),
         With<Formation>,
     >,
     q_members: Query<(&Transform, Option<&FormationSlot>)>,
     mut commands: Commands,
 ) {
-    for (entity, transform, formation, members, subs) in &q_formations {
-        let member_total = members.map_or(0, |m| m.len());
-        let total = member_total + subs.map_or(0, |s| s.len());
+    for (entity, transform, formation, members, velocity, stale) in &q_formations {
+        let occupant_ids: Vec<Entity> = occupants(members).collect();
+        let total = occupant_ids.len();
         if total == 0 {
             continue;
         }
+        // Lowest loaded formation: occupants are abstracted away, so slot
+        // bookkeeping waits until they reload (validity is rechecked then).
+        if velocity.is_some() {
+            if stale.is_some() {
+                commands.entity(entity).remove::<SlotsStale>();
+            }
+            continue;
+        }
 
-        // Validity check (cheap): every member has an in-range, unique slot.
+        // Validity check (cheap): every occupant has an in-range, unique slot.
         let mut valid = true;
         let mut seen = vec![false; total];
-        for member in members.into_iter().flat_map(|m| m.iter()) {
-            match q_members.get(member) {
-                Ok((_, Some(slot)))
-                    if (slot.0 as usize) < member_total && !seen[slot.0 as usize] =>
-                {
+        for occupant in &occupant_ids {
+            match q_members.get(*occupant) {
+                Ok((_, Some(slot))) if (slot.0 as usize) < total && !seen[slot.0 as usize] => {
                     seen[slot.0 as usize] = true;
                 }
                 _ => {
@@ -431,28 +499,53 @@ pub fn assign_slots(
                 }
             }
         }
-        if valid {
+        if valid && stale.is_none() {
             continue;
         }
 
         let rotation = yaw_quat(formation.dir).unwrap_or(Quat::IDENTITY);
         let origin = transform.translation;
-        let slot_positions: Vec<Vec3> = (0..member_total)
+        let slot_positions: Vec<Vec3> = (0..total)
             .map(|i| origin + rotation * formation.slot_offset(i, total))
             .collect();
-        let member_positions: Vec<(Entity, Vec3)> = members
-            .into_iter()
-            .flat_map(|m| m.iter())
-            .filter_map(|m| q_members.get(m).ok().map(|(t, _)| (m, t.translation)))
+        let occupant_positions: Vec<(Entity, Vec3)> = occupant_ids
+            .iter()
+            .filter_map(|&m| q_members.get(m).ok().map(|(t, _)| (m, t.translation)))
             .collect();
-        // Members cannot despawn mid-system (commands are deferred), so every
-        // member resolves; a short list would mis-pair the Morton matching.
-        debug_assert_eq!(member_positions.len(), member_total);
-        let assignment = assign_slots_nearest(origin, &member_positions, &slot_positions);
-        for (&(member, _), &slot) in member_positions.iter().zip(&assignment) {
+        // Occupants cannot despawn mid-system (commands are deferred), so
+        // every one resolves; a short list would mis-pair the Morton matching.
+        debug_assert_eq!(occupant_positions.len(), total);
+        let assignment = assign_slots_nearest(origin, &occupant_positions, &slot_positions);
+        for (&(occupant, _), &slot) in occupant_positions.iter().zip(&assignment) {
             if slot != usize::MAX {
-                commands.entity(member).insert(FormationSlot(slot));
+                commands.entity(occupant).insert(FormationSlot(slot));
             }
+        }
+        // A front Rotate/Reform finishes when its re-map lands. The deferred
+        // re-check guards the (unreachable in practice) case of the queue
+        // changing between this system and the sync point.
+        if matches!(
+            formation.tasks.front(),
+            Some(FormationOrder::Reform | FormationOrder::Rotate { .. })
+        ) {
+            commands.queue(move |world: &mut World| {
+                let poppable = matches!(
+                    world
+                        .get::<Formation>(entity)
+                        .and_then(|f| f.tasks.front().copied()),
+                    Some(FormationOrder::Reform | FormationOrder::Rotate { .. })
+                );
+                if poppable {
+                    world
+                        .get_mut::<Formation>(entity)
+                        .expect("formation existed a moment ago")
+                        .tasks
+                        .pop_front();
+                }
+            });
+        }
+        if stale.is_some() {
+            commands.entity(entity).remove::<SlotsStale>();
         }
     }
 }
@@ -510,31 +603,105 @@ fn yaw_quat(dir: Vec3) -> Option<Quat> {
     }
 }
 
-/// Task executor: runs the front of each formation's task queue until
-/// finished, then pops it and starts the next. With an empty queue the
-/// formation holds position: the origin tracks the members' center of mass
-/// and members hold their slots in the current facing.
+/// Per-formation inputs to [`plan_goal`], collected by
+/// [`plan_formation_goals`].
+struct FormationFrame {
+    own_pos: Vec3,
+    self_simulated: bool,
+    task: Option<FormationOrder>,
+    max_speed: f32,
+}
+
+/// The steering plan for one formation this tick: where its "body" is and
+/// the intermediate goal everything below it steers toward. Pure - takes
+/// the formation's frame plus the positions of its simulated occupants
+/// (loaded boids and lowest loaded sub-formations alike), no world access,
+/// so it is unit-testable with synthetic data. Returns `None` when nothing
+/// at or below the formation is simulated (an assembling formation): there
+/// is nothing to steer.
 ///
-/// Every frame, for every formation:
-/// 1. Task transitions: `Rotate` and a `Move` whose facing differs turn the
-///    slot frame and flag the formation for member re-mapping (symmetric
-///    formations re-orient without moving: different slot, same position);
-///    `Reform` flags it unconditionally. The assignment pass then re-maps
-///    members to slots via Morton-order locality matching and pops the
-///    finished `Rotate`/`Reform`.
-/// 2. The origin snaps to the center of mass of the members; a finished
-///    `Move` (center of mass within [`ARRIVE_TOLERANCE`] of `pos`) pops.
-/// 3. Targets propagate from the *intermediate goal*: for `Move`, offset
-///    from the center of mass toward `pos` by `slowest_member_speed *
-///    LEAD_TIME`, clamped to the remaining distance - members keep
-///    formation along the path and are never asked to cover more than the
-///    lead distance. Otherwise the goal is the center of mass itself (hold).
-///
-/// A lowest loaded formation (carrying `Velocity`, see
-/// [`propagate_formation_targets`]) is instead simulated as one unit: it
-/// keeps its integrated transform (no center-of-mass snapping) and step 3
-/// writes the intermediate goal into its own `Target`, so orders execute on
-/// the formation itself rather than propagating to unloaded members.
+/// For an active `Move` the goal is offset from the center of mass toward
+/// the task position by `slowest_member_speed * LEAD_TIME`, clamped to the
+/// remaining distance - members keep formation along the path and are never
+/// asked to cover more than the lead distance. Otherwise the goal is the
+/// center of mass itself (hold).
+fn plan_goal(frame: &FormationFrame, simulated_positions: &[Vec3]) -> Option<FormationGoal> {
+    let com = if frame.self_simulated {
+        frame.own_pos
+    } else {
+        if simulated_positions.is_empty() {
+            return None;
+        }
+        simulated_positions.iter().sum::<Vec3>() / simulated_positions.len() as f32
+    };
+
+    let (goal, facing, task_pos) = match frame.task {
+        Some(FormationOrder::Move { pos, facing_dir }) => {
+            let to_target = pos - com;
+            let distance = to_target.length();
+            let lead = (frame.max_speed * LEAD_TIME).max(MIN_LEAD).min(distance);
+            let goal = if distance > 1e-4 {
+                com + to_target * (lead / distance)
+            } else {
+                pos
+            };
+            (goal, facing_dir, Some(pos))
+        }
+        _ => (com, Vec3::ZERO, None),
+    };
+
+    Some(FormationGoal {
+        center_of_mass: com,
+        goal,
+        facing,
+        task_pos,
+    })
+}
+
+/// Planning half of the executor: computes each formation's
+/// [`FormationGoal`] and publishes it as a component. A lowest loaded
+/// formation (carrying `Velocity`, see [`propagate_formation_targets`]) is
+/// its own body; a container's body is the center of mass of everything
+/// simulated below it. `FormationGoal` presence is the "something to
+/// steer" state, so it is inserted/removed only when that flips and merely
+/// overwritten while marching.
+pub fn plan_formation_goals(
+    mut q_formations: Query<
+        (
+            Entity,
+            &Transform,
+            &Formation,
+            Option<&Members>,
+            Option<&Velocity>,
+            Option<&mut FormationGoal>,
+        ),
+        With<Formation>,
+    >,
+    q_simulated: Query<(&Transform, &Velocity)>,
+    mut commands: Commands,
+) {
+    for (entity, transform, formation, members, velocity, mut goal) in &mut q_formations {
+        let frame = FormationFrame {
+            own_pos: transform.translation,
+            self_simulated: velocity.is_some(),
+            task: formation.tasks.front().copied(),
+            max_speed: formation.max_speed,
+        };
+        let simulated_positions: Vec<Vec3> = occupants(members)
+            .filter_map(|m| q_simulated.get(m).ok().map(|(t, _)| t.translation))
+            .collect();
+        match (plan_goal(&frame, &simulated_positions), goal.as_deref_mut()) {
+            (Some(plan), Some(goal)) => *goal = plan,
+            (Some(plan), None) => {
+                commands.entity(entity).insert(plan);
+            }
+            (None, Some(_)) => {
+                commands.entity(entity).remove::<FormationGoal>();
+            }
+            (None, None) => {}
+        }
+    }
+}
 pub const LEAD_TIME: f32 = 10.0;
 
 /// Minimum lead distance so a formation ordered to march from a standstill
@@ -545,330 +712,115 @@ pub const MIN_LEAD: f32 = 2.0 * FormationKind::SPACING;
 /// Center-of-mass arrival tolerance for [`FormationOrder::Move`].
 pub const ARRIVE_TOLERANCE: f32 = 2.0;
 
-#[allow(clippy::type_complexity)]
-pub fn process_formation_orders(
-    mut params: ParamSet<(
-        Query<
-            (
-                Entity,
-                &mut Transform,
-                &mut Formation,
-                Option<&Members>,
-                Option<&Formations>,
-                Option<&Velocity>,
-            ),
-            With<Formation>,
-        >,
-        Query<(&Transform, &Velocity, Option<&FormationSlot>)>,
-        Query<&mut Target>,
+/// Dispatch half of the executor: consumes [`FormationGoal`] and steers
+/// everything the formation commands, one formation at a time.
+///
+/// - The origin snaps to the goal's center of mass (containers only; a
+///   lowest loaded formation's transform belongs to `move_step`), the
+///   marker rotation follows the effective facing, and a finished `Move`
+///   (center of mass within [`ARRIVE_TOLERANCE`] of `pos`) pops.
+/// - A lowest loaded formation (carries `Velocity`) executes its order on
+///   itself: `Target` is the steering actuator and the queue stays the
+///   single command channel.
+/// - Otherwise members are placed by slot identity (list order fallback
+///   before the first assignment): boids get `Target` directly;
+///   sub-formations receive an injected `Move` order (the parent fully
+///   dictates the child's placement) while the parent's own order is
+///   active - a holding parent leaves the sub's queue alone so the sub
+///   finishes its last order and goes idle.
+pub fn dispatch_formation_goals(
+    mut q_formations: Query<
+        (
+            Entity,
+            &mut Transform,
+            &mut Formation,
+            &FormationGoal,
+            Option<&Members>,
+            Option<&Velocity>,
+        ),
+        With<Formation>,
+    >,
+    mut q_members: Query<(
+        &mut Target,
+        Option<&FormationSlot>,
+        Option<&Velocity>,
+        Has<Formation>,
     )>,
     mut commands: Commands,
     mut gizmos: Gizmos,
 ) {
-    // Pass A - task transitions. Mutates Formation state only; slot
-    // assignment follows right after (it needs read-only access to both
-    // formations and member transforms).
-    let mut needs_assign: Vec<Entity> = Vec::new();
-    for (formation_entity, _, mut formation, _, _, _) in params.p0().iter_mut() {
-        let Some(task) = formation.tasks.front().copied() else {
-            continue;
-        };
-        match task {
-            FormationOrder::Rotate { to } => {
-                formation.dir = to;
-                needs_assign.push(formation_entity);
-                // Popped in the assignment pass below once members re-map.
-            }
-            FormationOrder::Reform => {
-                needs_assign.push(formation_entity);
-                // Popped in the assignment pass below when members re-map.
-            }
-            FormationOrder::Move { facing_dir, .. } => {
-                // Facing change: re-map slots into the new frame before marching.
-                if formation.dir.distance_squared(facing_dir) > 1e-4 {
-                    formation.dir = facing_dir;
-                    needs_assign.push(formation_entity);
-                }
-            }
-            // Hold formalizes the idle state; the passes below treat it
-            // exactly like an empty queue (hold at the center of mass).
-            FormationOrder::Hold { .. } => {}
-        }
-    }
-
-    // Assignment pass: re-map the members of the formations flagged above
-    // into their (possibly re-oriented) slot frames. Each formation's frame
-    // data is copied out so the p0 borrow ends before member transforms are
-    // read through p1; assignment is immediate, no intermediate jobs.
-    for formation_entity in needs_assign {
-        let q0 = params.p0();
-        let Ok((_, transform, formation, members, subs, velocity)) = q0.get(formation_entity)
-        else {
-            continue;
-        };
-        // A lowest loaded formation's members are abstracted away (they do
-        // not even match p1, which requires Velocity); slot re-mapping
-        // waits until they reload - `assign_slots` revalidates then.
-        if velocity.is_some() {
-            continue;
-        }
-        let member_total = members.map_or(0, |m| m.len());
-        if member_total == 0 {
-            continue;
-        }
-        let total = member_total + subs.map_or(0, |s| s.len());
-        let origin = transform.translation;
-        let rotation = yaw_quat(formation.dir).unwrap_or(Quat::IDENTITY);
-        let slot_positions: Vec<Vec3> = (0..member_total)
-            .map(|i| origin + rotation * formation.slot_offset(i, total))
-            .collect();
-        let member_ids: Vec<Entity> = members
-            .into_iter()
-            .flat_map(|m| m.iter())
-            .collect();
-        // Only Reform and Rotate finish by re-mapping; a Move facing change
-        // re-maps but keeps marching.
-        let pop_when_assigned = matches!(
-            formation.tasks.front(),
-            Some(FormationOrder::Reform | FormationOrder::Rotate { .. })
-        );
-        // Everything above is owned; the p0 borrow ends here.
-
-        let member_positions: Vec<(Entity, Vec3)> = member_ids
-            .iter()
-            .filter_map(|&m| params.p1().get(m).ok().map(|(t, _, _)| (m, t.translation)))
-            .collect();
-        // Members cannot despawn mid-system (commands are deferred), so every
-        // member resolves; a short list would mis-pair the Morton matching.
-        debug_assert_eq!(member_positions.len(), member_total);
-        let assignment = assign_slots_nearest(origin, &member_positions, &slot_positions);
-        for (&(member, _), &slot) in member_positions.iter().zip(&assignment) {
-            if slot != usize::MAX {
-                commands.entity(member).insert(FormationSlot(slot));
-            }
-        }
-        if pop_when_assigned {
-            commands.queue(move |world: &mut World| {
-                let poppable = matches!(
-                    world
-                        .get::<Formation>(formation_entity)
-                        .and_then(|f| f.tasks.front().copied()),
-                    Some(FormationOrder::Reform | FormationOrder::Rotate { .. })
-                );
-                if poppable {
-                    world
-                        .get_mut::<Formation>(formation_entity)
-                        .expect("formation existed a moment ago")
-                        .tasks
-                        .pop_front();
-                }
-            });
-        }
-    }
-
-    // Pass B - snapshot members (slots), the active task, max speed, and
-    // whether the formation itself is the lowest loaded level (carries
-    // `Velocity`). `max_speed` (derived by `init_formation_speed` after
-    // creation) drives the lead distance; the slowest-member scan is gone.
-    struct Snapshot {
-        entity: Entity,
-        own_pos: Vec3,
-        self_simulated: bool,
-        member_slots: Vec<(Entity, Option<usize>)>,
-        subs: Vec<Entity>,
-        task: Option<FormationOrder>,
-        max_speed: f32,
-    }
-    let mut snapshots: Vec<Snapshot> = params
-        .p0()
-        .iter()
-        .map(|(entity, transform, formation, members, subs, velocity)| Snapshot {
-            entity,
-            own_pos: transform.translation,
-            self_simulated: velocity.is_some(),
-            member_slots: members
-                .into_iter()
-                .flat_map(|m| m.iter())
-                .map(|m| (m, None))
-                .collect(),
-            subs: subs.into_iter().flat_map(|s| s.iter()).collect(),
-            task: formation.tasks.front().copied(),
-            max_speed: formation.max_speed,
-        })
-        .collect();
-    for snapshot in &mut snapshots {
-        for (member, slot) in &mut snapshot.member_slots {
-            if let Ok((_, _, s)) = params.p1().get(*member) {
-                *slot = s.map(|s| s.0);
-            }
-        }
-    }
-
-    struct Plan {
-        center_of_mass: Vec3,
-        goal: Vec3,
-        facing: Vec3,
-        task_pos: Option<Vec3>,
-    }
-    let mut plans: Vec<Option<Plan>> = Vec::with_capacity(snapshots.len());
-    for snapshot in &snapshots {
-        // A formation simulated as a unit IS its own center of mass; a
-        // container's is the center of mass of everything simulated below
-        // it: loaded boids and lowest loaded sub-formations alike.
-        let com = if snapshot.self_simulated {
-            snapshot.own_pos
-        } else {
-            let mut com = Vec3::ZERO;
-            let mut count = 0usize;
-            let simulated = snapshot
-                .member_slots
-                .iter()
-                .map(|(m, _)| *m)
-                .chain(snapshot.subs.iter().copied());
-            for member in simulated {
-                if let Ok((transform, _, _)) = params.p1().get(member) {
-                    com += transform.translation;
-                    count += 1;
-                }
-            }
-            if count == 0 {
-                plans.push(None);
-                continue;
-            }
-            com / count as f32
-        };
-
-        // Active Move: goal is the intermediate point toward the task
-        // position. Anything else (idle, Reform, pre-Move): hold at COM.
-        let (goal, facing, task_pos) = match snapshot.task {
-            Some(FormationOrder::Move { pos, facing_dir }) => {
-                let to_target = pos - com;
-                let distance = to_target.length();
-                let lead = (snapshot.max_speed * LEAD_TIME)
-                    .max(MIN_LEAD)
-                    .min(distance);
-                let goal = if distance > 1e-4 {
-                    com + to_target * (lead / distance)
-                } else {
-                    pos
-                };
-                (goal, facing_dir, Some(pos))
-            }
-            _ => (com, Vec3::ZERO, None),
-        };
-
-        plans.push(Some(Plan {
-            center_of_mass: com,
-            goal,
-            facing,
-            task_pos,
-        }));
-    }
-
-    // Pass C - snap the origin to the center of mass (containers only; a
-    // self-simulated formation's transform belongs to `move_step`); marker
-    // rotation follows the effective facing; pop finished Move tasks.
-    for ((_, mut transform, mut formation, _, _, velocity), plan) in
-        params.p0().iter_mut().zip(&plans)
-    {
-        let Some(plan) = plan else {
-            continue;
-        };
+    for (entity, mut transform, mut formation, goal, members, velocity) in &mut q_formations {
         if velocity.is_none() {
-            transform.translation = plan.center_of_mass;
+            transform.translation = goal.center_of_mass;
         }
-        let facing = if plan.facing == Vec3::ZERO {
+        let facing = if goal.facing == Vec3::ZERO {
             formation.dir
         } else {
-            plan.facing
+            goal.facing
         };
         if let Some(desired) = yaw_quat(facing) {
             transform.rotation = desired;
         }
-        if let Some(pos) = plan.task_pos {
-            if plan.center_of_mass.distance(pos) < ARRIVE_TOLERANCE {
+        if let Some(pos) = goal.task_pos {
+            if goal.center_of_mass.distance(pos) < ARRIVE_TOLERANCE {
                 formation.tasks.pop_front();
             }
         }
-    }
 
-    // Pass D - propagate the goal downward. A lowest loaded formation
-    // (carries `Velocity`) executes its order on itself: Target is the
-    // steering actuator and the queue stays the single command channel.
-    // Otherwise members are placed by slot identity (list order fallback
-    // before the first assignment): boids get Target directly;
-    // sub-formations receive a Move task (the parent fully dictates the
-    // child's placement) and propagate next frame.
-    let mut assignments: Vec<(Entity, Vec3, Vec3)> = Vec::new();
-    let mut sub_tasks: Vec<(Entity, FormationOrder)> = Vec::new();
-    for (((entity, _, formation, _, subs, velocity), snapshot), plan) in
-        params.p0().iter().zip(&snapshots).zip(&plans)
-    {
-        let Some(plan) = plan else {
-            continue;
-        };
-        let facing = if plan.facing == Vec3::ZERO {
-            formation.dir
-        } else {
-            plan.facing
-        };
         let rotation = yaw_quat(facing).unwrap_or(Quat::IDENTITY);
         if velocity.is_some() {
-            assignments.push((entity, plan.goal, facing));
-        } else {
-            let member_slots = &snapshot.member_slots;
-            let total = member_slots.len() + subs.map_or(0, |s| s.len());
-            for ((member, slot), fallback) in member_slots.iter().zip(0..) {
-                let slot = slot.unwrap_or(fallback);
-                assignments.push((
-                    *member,
-                    plan.goal + rotation * formation.slot_offset(slot, total),
-                    facing,
-                ));
+            // Lowest loaded: execute the order on itself.
+            if let Ok((mut target, _, _, _)) = q_members.get_mut(entity) {
+                target.pos = goal.goal;
+                target.dir = facing;
             }
-            if let Some(subs) = subs {
-                // Inject only while an order is active: a holding parent
-                // leaves the sub's queue alone, so the sub finishes its
-                // last injected order and goes idle (empty queue) instead
-                // of receiving a Move-to-current-position every frame.
-                if plan.task_pos.is_some() {
-                    for (i, sub) in subs.iter().enumerate() {
-                        sub_tasks.push((
-                            sub,
-                            FormationOrder::Move {
-                                pos: plan.goal
-                                    + rotation
-                                        * formation.slot_offset(member_slots.len() + i, total),
-                                facing_dir: facing,
-                            },
-                        ));
+        } else {
+            let member_ids: Vec<Entity> = occupants(members).collect();
+            let total = member_ids.len();
+            for (i, &member) in member_ids.iter().enumerate() {
+                let Ok((mut target, slot, simulated, is_formation)) = q_members.get_mut(member)
+                else {
+                    continue;
+                };
+                // Slot identity with list-order fallback before the first
+                // assignment.
+                let slot = slot.map(|s| s.0).unwrap_or(i);
+                let pos = goal.goal + rotation * formation.slot_offset(slot, total);
+                if is_formation {
+                    // Sub-formation: commanded through its task queue. Inject
+                    // only while an order is active - a holding parent leaves
+                    // the sub's queue alone, so the sub finishes its last
+                    // injected order and goes idle (empty queue) instead of
+                    // receiving a Move-to-current-position every frame.
+                    if goal.task_pos.is_some() {
+                        let task = FormationOrder::Move {
+                            pos,
+                            facing_dir: facing,
+                        };
+                        commands.queue(move |world: &mut World| {
+                            if let Some(mut sub) = world.get_mut::<Formation>(member) {
+                                // The parent dictates the sub's orders wholesale.
+                                sub.tasks.clear();
+                                sub.tasks.push_back(task);
+                            }
+                        });
                     }
+                } else if simulated.is_some() {
+                    // Loaded boid: direct steering; unloaded ones have
+                    // nothing to command.
+                    target.pos = pos;
+                    target.dir = facing;
                 }
             }
         }
         // Debug: center of mass -> goal, and goal -> final task target.
-        gizmos.line(plan.center_of_mass, plan.goal, Color::srgb(0.2, 0.6, 1.0));
-        if let Some(pos) = plan.task_pos {
+        gizmos.line(goal.center_of_mass, goal.goal, Color::srgb(0.2, 0.6, 1.0));
+        if let Some(pos) = goal.task_pos {
             let lifted = pos + Vec3::new(0.0, 0.2, 0.0);
-            if plan.goal.distance(lifted) > 1e-3 {
-                gizmos.line(plan.goal, lifted, Color::srgb(0.5, 0.5, 0.5));
+            if goal.goal.distance(lifted) > 1e-3 {
+                gizmos.line(goal.goal, lifted, Color::srgb(0.5, 0.5, 0.5));
             }
         }
-    }
-    for (entity, pos, dir) in assignments {
-        if let Ok(mut target) = params.p2().get_mut(entity) {
-            target.pos = pos;
-            target.dir = dir;
-        }
-    }
-    for (sub, task) in sub_tasks {
-        commands.queue(move |world: &mut World| {
-            if let Some(mut formation) = world.get_mut::<Formation>(sub) {
-                // The parent dictates the sub-formation's orders wholesale.
-                formation.tasks.clear();
-                formation.tasks.push_back(task);
-            }
-        });
     }
 }
 
@@ -879,16 +831,23 @@ mod tests {
     use crate::target::follow_target;
     use bevy::gizmos::AppGizmoBuilder;
     use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
-    use bevy::time::Time;
+    use bevy::time::{Fixed, Time, TimePlugin, TimeUpdateStrategy};
     use std::time::Duration;
 
-    /// Headless app: manual time, kd tree via the real AutomaticUpdate
-    /// plugin (fast refresh), and the formation + kinematics pipeline in
-    /// execution order.
+    /// Headless app: manual time (TimePlugin + manual update strategy -
+    /// the plugin owns the fixed-loop runner), kd tree via the real
+    /// AutomaticUpdate plugin (fast refresh), and the formation pipeline on
+    /// the fixed timestep in execution order, with the variable-step
+    /// integrator in Update (matching the real app's schedule split).
     fn test_app() -> App {
         use bevy_spatial::{AutomaticUpdate, TransformMode};
         let mut app = App::new();
-        app.init_resource::<Time>()
+        app.add_plugins(TimePlugin)
+            // Timestep matches tick()'s dt so exactly one FixedUpdate runs
+            // per tick.
+            .insert_resource(Time::<Fixed>::from_duration(Duration::from_secs_f32(
+                1.0 / 60.0,
+            )))
             .init_resource::<LODGuard>()
             .init_resource::<GizmoConfigStore>()
             .init_gizmo_group::<DefaultGizmoConfigGroup>()
@@ -899,24 +858,35 @@ mod tests {
                     .with_transform(TransformMode::Transform),
             )
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     init_formation_speed,
                     propagate_formation_targets,
+                    transition_formation_orders,
                     assign_slots,
-                    process_formation_orders,
+                    plan_formation_goals,
+                    dispatch_formation_goals,
                     follow_target,
-                    move_step,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(Update, move_step);
+        // Bevy's first update never advances the clocks (update_with_instant
+        // only records first_update), so it runs zero FixedUpdates. Burn it
+        // here, before any entities exist, so every tick() afterwards is
+        // exactly one fixed step.
+        app.update();
         app
     }
 
     fn tick(app: &mut App, dt: f32) {
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs_f32(dt));
+        // Manual strategy: time_system advances the clocks by exactly `dt`
+        // per update, which accumulates into exactly one FixedUpdate (the
+        // timestep matches dt) and republishes the clock as generic Time for
+        // the Update systems (move_step).
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f32(dt),
+        ));
         app.update();
     }
 
@@ -948,6 +918,22 @@ mod tests {
             }
         }
         com / n as f32
+    }
+
+    /// Harness guarantee: after the warmup in [`test_app`], every tick
+    /// advances the fixed clock by exactly one timestep (the fixed pipeline
+    /// runs once per tick, deterministically).
+    #[test]
+    fn harness_advances_one_fixed_step_per_tick() {
+        let mut app = test_app();
+        let timestep = app.world().resource::<Time<Fixed>>().timestep();
+        for _ in 0..3 {
+            let before = app.world().resource::<Time<Fixed>>().elapsed();
+            tick(&mut app, 1.0 / 60.0);
+            let after = app.world().resource::<Time<Fixed>>().elapsed();
+            assert_eq!(after - before, timestep);
+            assert_eq!(app.world().resource::<Time<Fixed>>().overstep(), Duration::ZERO);
+        }
     }
 
     #[test]
@@ -1132,6 +1118,56 @@ mod tests {
     }
 
     #[test]
+    fn subformations_hold_slots_in_parent_layout() {
+        let mut app = test_app();
+        // A sub-formation on the right, two free boids on the left: the
+        // parent's Morton assignment must treat the sub like any other
+        // occupant (matched by its origin), so slots follow positions -
+        // left boid 0, inner boid 1, sub 2.
+        let sub = spawn_formation(
+            &mut app,
+            &[Vec3::new(4.0, 0.0, 0.0), Vec3::new(6.0, 0.0, 0.0)],
+        );
+        for _ in 0..10 {
+            tick(&mut app, 1.0 / 60.0);
+        }
+        let boids = {
+            let world = app.world_mut();
+            let parent = world
+                .spawn((Formation::default(), Transform::default()))
+                .id();
+            let boids: Vec<Entity> = [-6.0, -4.0]
+                .iter()
+                .map(|&x| {
+                    world
+                        .spawn((
+                            Transform::from_xyz(x, 0.0, 0.0),
+                            Velocity::default(),
+                            TrackedByTree,
+                            Target::default(),
+                        ))
+                        .id()
+                })
+                .collect();
+            for &boid in &boids {
+                world.entity_mut(boid).insert(MemberOf(parent));
+            }
+            world.entity_mut(sub).insert(MemberOf(parent));
+            boids
+        };
+        for _ in 0..5 {
+            tick(&mut app, 1.0 / 60.0);
+        }
+
+        let world = app.world_mut();
+        let slot = |e: Entity| world.get::<FormationSlot>(e).unwrap().0;
+        assert_eq!(slot(boids[0]), 0, "leftmost boid takes slot 0");
+        assert_eq!(slot(boids[1]), 1, "inner boid takes slot 1");
+        assert_eq!(slot(sub), 2, "sub-formation is an occupant like any other");
+
+    }
+
+    #[test]
     fn init_formation_speed_derives_from_slowest_subformation() {
         let mut app = test_app();
         // Sub-formation with boid members initializes to MAX_VELOCITY on the
@@ -1145,7 +1181,7 @@ mod tests {
             .world_mut()
             .spawn((Formation::default(), Transform::default()))
             .id();
-        app.world_mut().entity_mut(sub).insert(FormationOf(parent));
+        app.world_mut().entity_mut(sub).insert(MemberOf(parent));
         tick(&mut app, 1.0 / 60.0);
         assert!(
             app.world().get::<NeedsSpeedInit>(parent).is_some(),
@@ -1251,7 +1287,7 @@ mod tests {
             .world_mut()
             .spawn((Formation::default(), Transform::default()))
             .id();
-        app.world_mut().entity_mut(sub).insert(FormationOf(parent));
+        app.world_mut().entity_mut(sub).insert(MemberOf(parent));
         app.world_mut()
             .get_mut::<Formation>(parent)
             .unwrap()
@@ -1366,5 +1402,82 @@ mod tests {
             elapsed.as_millis() < budget_ms,
             "too slow: {elapsed:?} (budget {budget_ms}ms)"
         );
+    }
+
+    /// plan_goal is pure: these tests run on synthetic data, no world.
+    #[test]
+    fn plan_goal_holds_at_center_of_mass_without_orders() {
+        let frame = FormationFrame {
+            own_pos: Vec3::ZERO,
+            self_simulated: false,
+            task: None,
+            max_speed: crate::kinematics::MAX_VELOCITY,
+        };
+        let positions = vec![Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)];
+        let goal = plan_goal(&frame, &positions).unwrap();
+        assert_eq!(goal.center_of_mass, Vec3::ZERO);
+        assert_eq!(goal.goal, Vec3::ZERO); // hold: the goal is the COM itself
+        assert_eq!(goal.facing, Vec3::ZERO);
+        assert!(goal.task_pos.is_none());
+    }
+
+    #[test]
+    fn plan_goal_leads_active_move_by_lead_distance() {
+        let frame = FormationFrame {
+            own_pos: Vec3::ZERO,
+            self_simulated: false,
+            task: Some(FormationOrder::Move {
+                pos: Vec3::new(100.0, 0.0, 0.0),
+                facing_dir: Vec3::new(0.0, 0.0, 1.0),
+            }),
+            max_speed: 5.0,
+        };
+        let positions = vec![Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
+        let goal = plan_goal(&frame, &positions).unwrap();
+        // lead = max_speed * LEAD_TIME = 50 < distance 100.
+        assert_eq!(goal.goal, Vec3::new(50.0, 0.0, 0.0));
+        assert_eq!(goal.facing, Vec3::new(0.0, 0.0, 1.0));
+        assert_eq!(goal.task_pos, Some(Vec3::new(100.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn plan_goal_self_simulated_uses_own_position() {
+        let frame = FormationFrame {
+            own_pos: Vec3::new(7.0, 0.0, 9.0),
+            self_simulated: true,
+            task: None,
+            max_speed: crate::kinematics::MAX_VELOCITY,
+        };
+        // Abstracted members' positions are irrelevant.
+        let goal = plan_goal(&frame, &[]).unwrap();
+        assert_eq!(goal.center_of_mass, Vec3::new(7.0, 0.0, 9.0));
+        assert_eq!(goal.goal, Vec3::new(7.0, 0.0, 9.0));
+    }
+
+    #[test]
+    fn plan_goal_returns_none_when_nothing_simulated() {
+        let frame = FormationFrame {
+            own_pos: Vec3::ZERO,
+            self_simulated: false,
+            task: None,
+            max_speed: crate::kinematics::MAX_VELOCITY,
+        };
+        assert!(plan_goal(&frame, &[]).is_none());
+    }
+
+    #[test]
+    fn plan_goal_bootstraps_standstill_with_min_lead() {
+        let frame = FormationFrame {
+            own_pos: Vec3::ZERO,
+            self_simulated: false,
+            task: Some(FormationOrder::Move {
+                pos: Vec3::new(100.0, 0.0, 0.0),
+                facing_dir: Vec3::new(1.0, 0.0, 0.0),
+            }),
+            max_speed: 0.0, // at rest: lead would be zero without MIN_LEAD
+        };
+        let positions = vec![Vec3::ZERO];
+        let goal = plan_goal(&frame, &positions).unwrap();
+        assert_eq!(goal.goal, Vec3::new(MIN_LEAD, 0.0, 0.0));
     }
 }

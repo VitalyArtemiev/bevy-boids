@@ -115,17 +115,22 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob` |
 | `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts, `move_step` integrator, `NNTree`/`TrackedByTree` |
 | `target.rs` | `Target` component, `follow_target` steering |
-| `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationTask` queue, Morton-order slot assignment, LOD, most tests |
+| `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
 | `terrain.rs`, `resources.rs`, `util.rs` | Ground/obstacles; shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
 | `horse.rs` | Stub for future cavalry behavior |
 
 ## Scheduling conventions
 
-- Input, selection, camera, per-frame animation, and the task executor
-  (`process_formation_orders`, which also draws gizmos) run in `Update`.
-  Formation bookkeeping (`assign_slots`, `propagate_formation_targets`,
-  `follow_target`) runs in `FixedUpdate`.
+- Input, selection, camera, and per-frame animation run in `Update`, along
+  with the variable-step integrator (`move_step`) and collisions.
+- The whole formation pipeline runs in `FixedUpdate`, explicitly chained
+  (see `main.rs`): `init_formation_speed` → `propagate_formation_targets`
+  (LOD `Velocity` state) → `transition_formation_orders` (task state
+  machine, inserts `SlotsStale`) → `assign_slots` (Morton re-mapping, pops
+  finished `Rotate`/`Reform`) → `plan_formation_goals` (writes
+  `FormationGoal`) → `dispatch_formation_goals` (origin snap, arrival pops,
+  `Target` writes / sub-order injection, gizmos) → `follow_target`.
 - Pipeline order is load-bearing: collisions → task propagation →
   `follow_target` → `move_step`. Express ordering explicitly where it
   matters (`.after(soft_collisions)` in `main.rs`); tests pin full order
@@ -138,16 +143,24 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   once in `setup`; clone `Handle`s into spawned entities. Shared gizmo
   shapes are `GizmoAsset`s in Resources built via `FromWorld`
   (`SelectionGizmo` in `player.rs`).
-- **Hierarchies are relationships**: `MemberOf`/`Members` and
-  `FormationOf`/`Formations` via `#[relationship]`/`#[relationship_target]`;
-  parenting uses `ChildOf`/`Children`.
+- **Hierarchies are relationships**: one `MemberOf`/`Members` relationship
+  covers all formation occupants — boids and sub-formations alike — via
+  `#[relationship]`/`#[relationship_target]`; "is this occupant a
+  sub-formation" is a `Has<Formation>` check, not a separate relationship.
+  Parenting uses `ChildOf`/`Children`.
 - **Component presence is state**: a formation carries `Velocity` if it is
   the lowest loaded LOD level; `propagate_formation_targets` inserts/removes
   it. Don't add parallel bool flags.
-- **Multi-view systems use `ParamSet` with named passes** — see
-  `process_formation_orders` (pass A mutates state, then snapshots, then applies).
-  This is the project's answer to borrow conflicts in big systems; prefer it
-  over splitting data through `Local` temporaries.
+- **Pipeline stages communicate through components, not snapshot vectors**:
+  when a chain of read-after-write steps would force one giant `ParamSet`
+  system (the former `process_formation_orders`), split it into chained
+  systems that pass small marker/data components instead — `SlotsStale`
+  (re-map needed) and `FormationGoal` (this tick's steering plan) in
+  `formations.rs`. Presence/absence is the state; each system's queries are
+  then non-overlapping and no `ParamSet` is needed. Extract the pure math
+  (`plan_goal`) as world-free functions and unit-test those directly.
+  `ParamSet` remains the tool when a single system genuinely must touch
+  overlapping queries in one pass.
 - **Deferred structural changes use `commands.queue(move |world: &mut
   World| ...)`** when the change depends on values computed mid-system (Reform
   pop, sub-formation task injection in `formations.rs`).
@@ -183,7 +196,7 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 ## Style conventions
 
 - Doc comments on public types/systems explain *why* and the invariants
-  (see `Formation`, `process_formation_orders`) — keep that density for new ones.
+  (see `Formation`, `dispatch_formation_goals`) — keep that density for new ones.
 - Tuning constants live as module-level `const`s near their system, with
   units in the name (`MAX_VELOCITY`, `DECELERATION_TIME_SEC`, `LEAD_TIME`).
 - Comments recording measurements ("this is slower at 10k", "~7ms in

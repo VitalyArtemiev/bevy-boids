@@ -1,7 +1,7 @@
 use crate::boid::Boid;
 use crate::formations::{
-    Formation, FormationKind, FormationOf, FormationOrder, FormationSlot, Formations, MemberOf,
-    Members, QuickCommandGroup,
+    Formation, FormationKind, FormationOrder, FormationSlot, MemberOf, Members,
+    QuickCommandGroup,
 };
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
@@ -291,7 +291,7 @@ pub fn quick_group_system(
     keys: Res<ButtonInput<KeyCode>>,
     q_selected: Query<(Entity, &Transform), (With<Selected>, Without<Formation>)>,
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
-    q_formations: Query<(Entity, &QuickCommandGroup, &Members, Option<&Formations>), With<Formation>>,
+    q_formations: Query<(Entity, &QuickCommandGroup, &Members), With<Formation>>,
     mut commands: Commands,
 ) {
     const SLOT_KEYS: [KeyCode; 6] = [
@@ -327,24 +327,17 @@ pub fn quick_group_system(
             }
             centroid /= count as f32;
 
-            // Free the slot: detach members of the formation currently in it.
-            // Detached members must also drop their FormationSlot: a stale
-            // slot survives the validity check in assign_slots (in-range,
-            // unique) and would pin the member to an arbitrary slot in
-            // whatever formation it joins next.
-            if let Some((old, _, members, subs)) =
-                q_formations.iter().find(|(_, s, _, _)| s.0 == slot)
-            {
+            // Free the slot: detach occupants of the formation currently in
+            // it. Detached occupants must also drop their FormationSlot: a
+            // stale slot survives the validity check in assign_slots
+            // (in-range, unique) and would pin the member to an arbitrary
+            // slot in whatever formation it joins next.
+            if let Some((old, _, members)) = q_formations.iter().find(|(_, s, _)| s.0 == slot) {
                 for member in members.iter() {
                     commands
                         .entity(member)
                         .remove::<MemberOf>()
                         .remove::<FormationSlot>();
-                }
-                if let Some(subs) = subs {
-                    for sub in subs.iter() {
-                        commands.entity(sub).remove::<FormationOf>();
-                    }
                 }
                 commands.entity(old).despawn();
             }
@@ -362,8 +355,8 @@ pub fn quick_group_system(
                 commands.entity(entity).insert(MemberOf(formation));
             }
         }
-    } else if let Some((formation_entity, _, _, _)) =
-        q_formations.iter().find(|(_, s, _, _)| s.0 == slot)
+    } else if let Some((formation_entity, _, _)) =
+        q_formations.iter().find(|(_, s, _)| s.0 == slot)
     {
         // Plain number: select this group, replacing the current selection.
         for (entity, _) in &q_selected {
