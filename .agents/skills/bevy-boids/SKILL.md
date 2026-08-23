@@ -117,7 +117,8 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | `target.rs` | `Target` component, `follow_target` steering |
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
-| `terrain.rs`, `resources.rs`, `util.rs` | Ground/obstacles; shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
+| `terrain/` | Voxel world via `bevy_voxel_world` (`mod.rs` config, `MainWorld`); fBm generation (`noise.rs`, pure `terrain_height`); boid grounding (`grounding.rs`, `GroundY`, `find_surface`); camera terrain clearance (`camera.rs`, `CameraClearance`, disc-of-neighbours clamp + headless cliff-world test); deformation brushes (`brush.rs`, 7/8/9/0 modes, `[/]` radius, hold G); walkability derivation + debug overlay (`walkability.rs`, hold H); obstacles |
+| `resources.rs`, `util.rs` | Shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
 | `horse.rs` | Stub for future cavalry behavior |
 
 ## Scheduling conventions

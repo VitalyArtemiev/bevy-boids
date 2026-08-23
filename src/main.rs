@@ -7,7 +7,6 @@ mod resources;
 mod target;
 mod terrain;
 mod util;
-mod walkability;
 
 use crate::boid::*;
 use crate::formations::{
@@ -25,7 +24,7 @@ use crate::terrain::{
     CameraClearance, MainWorld, ObstacleBundle, TerrainBrush, camera_terrain_clearance,
     ground_boids, terrain_brush_system, terrain_height,
 };
-use crate::walkability::debug_walkability;
+use crate::terrain::walkability::debug_walkability;
 use bevy::asset::RenderAssetUsages;
 use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
 use bevy::math::bounding::Aabb2d;
@@ -198,14 +197,12 @@ fn setup(
         // its centre), not on the y=0 plane the boids spawn at.
         let y = terrain_height(x, z) + 0.5;
 
-        let mut ent = commands
-            .spawn(ObstacleBundle::new(
-                mesh_list.cube.clone(),
-                mat_list.black.clone(),
-                Vec3::from_array([1.0, 0.0, 0.0]),
-                Vec3::from_array([x, y, z]),
-            ))
-            .id();
+        commands.spawn(ObstacleBundle::new(
+            mesh_list.cube.clone(),
+            mat_list.black.clone(),
+            Vec3::from_array([1.0, 0.0, 0.0]),
+            Vec3::from_array([x, y, z]),
+        ));
     }
 
     commands.spawn((

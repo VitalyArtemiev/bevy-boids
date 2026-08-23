@@ -1,9 +1,9 @@
-//! Pure terrain walkability derivation.
+//! Pure terrain walkability derivation, plus a debug overlay.
 //!
 //! Walkability is reduced from the voxel world to a 2D grid of per-column
 //! surface heights (`Option<f32>`: `None` = no surface in the scanned
-//! window / chunk not generated). The M1 model is the top surface only —
-//! multi-span columns (tunnels, ramparts, halls) arrive with fort
+//! window / chunk not generated). The current model is the top surface
+//! only — multi-span columns (tunnels, ramparts, halls) arrive with fort
 //! structures; the API takes surfaces as plain data so the span model can
 //! extend it without touching consumers.
 //!
@@ -13,7 +13,8 @@
 //! - [`WalkField::clearance`]: how many cells from the nearest impassable
 //!   cell — a formation of footprint W plans routes where clearance >= W.
 
-use crate::terrain::{MainWorld, find_surface};
+use super::MainWorld;
+use super::grounding::find_surface;
 use bevy::prelude::*;
 use bevy_rts_camera::RtsCamera;
 use bevy_voxel_world::prelude::VoxelWorld;
@@ -41,8 +42,8 @@ pub fn traversable(from: Option<f32>, to: Option<f32>) -> bool {
 pub struct WalkField {
     pub width: usize,
     pub height: usize,
-    /// A cell is passable when it has a surface and is not a cliff edge
-    /// (some existing neighbour within [`CLIFF_DROP_M`]).
+    /// A cell is passable when it has a surface and does not drop more than
+    /// [`CLIFF_DROP_M`] toward any existing neighbour.
     passable: Vec<bool>,
     /// Manhattan distance (in cells, saturating) to the nearest impassable
     /// cell; 0 on impassable cells themselves.
@@ -70,7 +71,12 @@ impl WalkField {
                 // cells with no existing neighbours (window borders) carry
                 // no evidence of a cliff and stay passable.
                 let mut cliff = false;
-                for (nx, nz) in [(x + 1, z), (x.wrapping_sub(1), z), (x, z + 1), (x, z.wrapping_sub(1))] {
+                for (nx, nz) in [
+                    (x + 1, z),
+                    (x.wrapping_sub(1), z),
+                    (x, z + 1),
+                    (x, z.wrapping_sub(1)),
+                ] {
                     if nx < width && nz < height {
                         if let Some(nh) = surfaces[idx(nx, nz)] {
                             if h - nh > CLIFF_DROP_M {
@@ -268,7 +274,7 @@ mod tests {
         ) -> bool {
             let width = (width as usize).max(1);
             let height = passable.len().div_ceil(width).max(1);
-            let mut padded = passable.clone();
+            let mut padded = passable;
             padded.resize(width * height, true);
             let field = WalkField::from_surfaces(
                 &padded.iter().map(|&p| if p { Some(1.0) } else { None }).collect::<Vec<_>>(),
