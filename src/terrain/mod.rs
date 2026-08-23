@@ -5,12 +5,14 @@
 
 mod brush;
 mod camera;
+mod far;
 mod grounding;
 mod noise;
 pub mod walkability;
 
 pub use brush::{TerrainBrush, terrain_brush_system};
 pub use camera::{CameraClearance, camera_terrain_clearance};
+pub use far::{FarTerrain, far_terrain_stream};
 pub use grounding::{GroundY, ground_boids};
 pub use noise::{TerrainNoise, terrain_height};
 

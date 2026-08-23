@@ -21,8 +21,8 @@ use crate::player::{
 use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, MainWorld, ObstacleBundle, TerrainBrush, camera_terrain_clearance,
-    ground_boids, terrain_brush_system, terrain_height,
+    CameraClearance, FarTerrain, MainWorld, ObstacleBundle, TerrainBrush, camera_terrain_clearance,
+    far_terrain_stream, ground_boids, terrain_brush_system, terrain_height,
 };
 use crate::terrain::walkability::debug_walkability;
 use bevy::asset::RenderAssetUsages;
@@ -52,6 +52,7 @@ fn main() {
         .init_resource::<Player>()
         .init_resource::<LODGuard>()
         .init_resource::<TerrainBrush>()
+        .init_resource::<FarTerrain>()
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -85,6 +86,7 @@ fn main() {
                 selection_indicator_face,
                 terrain_brush_system,
                 debug_walkability,
+                far_terrain_stream,
                 camera_terrain_clearance::<MainWorld>.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
             ),
