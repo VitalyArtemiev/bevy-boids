@@ -85,7 +85,7 @@ fn main() {
                 selection_indicator_face,
                 terrain_brush_system,
                 debug_walkability,
-                camera_terrain_clearance.after(RtsCameraSystemSet),
+                camera_terrain_clearance::<MainWorld>.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
             ),
         )
