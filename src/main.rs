@@ -7,6 +7,7 @@ mod resources;
 mod target;
 mod terrain;
 mod util;
+mod walkability;
 
 use crate::boid::*;
 use crate::formations::{
@@ -20,8 +21,10 @@ use crate::player::{
 };
 use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
-use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
-use crate::util::*;
+use crate::terrain::{
+    MainWorld, ObstacleBundle, TerrainBrush, ground_boids, terrain_brush_system, terrain_height,
+};
+use crate::walkability::debug_walkability;
 use bevy::asset::RenderAssetUsages;
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
@@ -30,6 +33,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
+use bevy_voxel_world::prelude::{VoxelWorldCamera, VoxelWorldPlugin};
 use rand::Rng;
 use std::time::Duration;
 
@@ -46,6 +50,7 @@ fn main() {
         .init_resource::<Meshes>()
         .init_resource::<Player>()
         .init_resource::<LODGuard>()
+        .init_resource::<TerrainBrush>()
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -55,6 +60,7 @@ fn main() {
                 }),
         )
         .add_plugins(RtsCameraPlugin)
+        .add_plugins(VoxelWorldPlugin::with_config(MainWorld))
         .init_resource::<SelectionGizmo>()
         .init_resource::<FormationSelectionGizmo>()
         .add_plugins(
@@ -68,12 +74,15 @@ fn main() {
             (
                 soft_collisions,
                 move_step,
+                ground_boids.after(move_step).before(bob),
                 bob,
                 draw_cursor,
                 mouse_click_system,
                 quick_group_system,
                 frontage_position_system,
                 selection_indicator_face,
+                terrain_brush_system,
+                debug_walkability,
                 hard_collisions.after(soft_collisions),
             ),
         )
@@ -174,13 +183,16 @@ fn setup(
         let mut rng = rand::rng();
         let x = rng.random_range(-100.0..100.0);
         let z = rng.random_range(-100.0..100.0);
+        // Obstacles sit on the terrain surface (cube is 1 m, so +0.5 to
+        // its centre), not on the y=0 plane the boids spawn at.
+        let y = terrain_height(x, z) + 0.5;
 
         let mut ent = commands
             .spawn(ObstacleBundle::new(
                 mesh_list.cube.clone(),
                 mat_list.black.clone(),
                 Vec3::from_array([1.0, 0.0, 0.0]),
-                Vec3::from_array([x as f32, 1.0, z as f32]),
+                Vec3::from_array([x, y, z]),
             ))
             .id();
     }
@@ -196,15 +208,20 @@ fn setup(
         Transform::from_xyz(10.0, 10.0, 0.0),
     ));
 
-    // ground plane
-    commands.spawn(TerrainBundle::default(
-        &mut meshes,
-        &mut images,
-        &mut materials,
+    // Terrain is lit by a sun; its shadows stay off for now — chunk meshes
+    // stream in constantly and shadow-map redraws would churn.
+    commands.spawn((
+        DirectionalLight {
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(50.0, 80.0, 30.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     commands.spawn((
         Camera3d::default(),
+        // Marks the camera the voxel world streams chunks around.
+        VoxelWorldCamera::<MainWorld>::default(),
         RtsCamera {
             bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
             height_min: 2.0,

@@ -17,6 +17,8 @@ bevy = { version = "0.19" }
 #bevy_spatial = "0.11.0"
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within", default-features = false, features = ["kdtree"] }
 bevy_rts_camera = "0.14.0"
+bevy_voxel_world = "0.17"
+fastnoise-lite = "1.1"
 rand = "0.9.1"
 derive_more = { version = "2.0.1", features = ["full"] }
 lazy_static = "1.5.0"

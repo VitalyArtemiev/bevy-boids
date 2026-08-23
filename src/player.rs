@@ -5,6 +5,7 @@ use crate::formations::{
 };
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
+use crate::terrain::MainWorld;
 use crate::util::within_rect;
 use bevy::color::palettes::basic::YELLOW;
 use bevy::ecs::component::{Mutable, StorageType};
@@ -15,12 +16,12 @@ use bevy::gizmos::GizmoAsset;
 use bevy::gizmos::config::GizmoLineConfig;
 use bevy::math::{Isometry3d, Quat, Vec3};
 use bevy::prelude::{
-    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity,
-    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MouseButton,
-    Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World, default, info,
-    warn,
+    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Entity,
+    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, KeyCode, MouseButton, Query, Res, ResMut,
+    Resource, Transform, Vec2, Window, With, Without, World, default, info, warn,
 };
-use bevy_rts_camera::{Ground, RtsCameraControls};
+use bevy_rts_camera::RtsCameraControls;
+use bevy_voxel_world::prelude::VoxelWorld;
 use std::f32::consts::FRAC_PI_2;
 
 #[derive(Resource, Default)]
@@ -149,50 +150,44 @@ impl Component for Selected {
     }
 }
 
-fn get_intersection(
+/// Ray from the cursor into the world, intersected with the voxel terrain.
+/// Returns the world-space hit point on the terrain surface, or None when
+/// the ray misses (aimed at the sky) or the terrain there is not generated.
+pub(crate) fn get_intersection(
+    voxel_world: &VoxelWorld<MainWorld>,
     cursor_position: &Vec2,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    ground_transform: &GlobalTransform,
 ) -> Option<Vec3> {
-    // Calculate a ray pointing from the camera into the world based on the cursor's position.
     let ray = camera
         .viewport_to_world(camera_transform, *cursor_position)
-        .unwrap();
-
-    // Calculate if and where the ray is hitting the ground plane.
-    let distance = ray.intersect_plane(
-        ground_transform.translation(),
-        InfinitePlane3d { normal: Dir3::Y },
-    )?;
-
-    Some(ray.get_point(distance))
+        .ok()?;
+    let hit = voxel_world.raycast(ray, &|(_pos, _voxel)| true)?;
+    Some(hit.position)
 }
 
 pub fn draw_cursor(
     camera_query: Query<(&Camera, &GlobalTransform) /*With<Player>*/>,
-    ground_query: Query<&GlobalTransform, With<Ground>>,
+    voxel_world: VoxelWorld<MainWorld>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
 ) {
     match camera_query.single() {
         Ok((camera, camera_transform)) => {
-            let ground = ground_query.single().unwrap();
-
             let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
                 return;
             };
 
-            let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground)
+            let Some(point) = get_intersection(&voxel_world, &cursor_position, camera, camera_transform)
             else {
                 return;
             };
 
-            // Draw a circle just above the ground plane at that position,
+            // Draw a circle just above the terrain at that position,
             // rotated to lie flat (circle default normal is +Z, ground is +Y).
             gizmos.circle(
                 Isometry3d::new(
-                    point + ground.up() * 0.01, // Up vector is already normalized.
+                    point + Vec3::Y * 0.01,
                     Quat::from_rotation_x(-FRAC_PI_2),
                 ),
                 0.2,
@@ -205,8 +200,8 @@ pub fn draw_cursor(
 
 pub fn mouse_click_system(
     mut player: ResMut<Player>,
+    voxel_world: VoxelWorld<MainWorld>,
     mut q_camera: Query<(&Camera, &GlobalTransform)>,
-    q_ground: Query<&GlobalTransform, With<Ground>>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
@@ -216,11 +211,11 @@ pub fn mouse_click_system(
     mut commands: Commands,
 ) {
     let (camera, camera_transform) = q_camera.single_mut().unwrap();
-    let ground = q_ground.single().unwrap();
     let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
         return;
     };
-    let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
+    let Some(point) = get_intersection(&voxel_world, &cursor_position, camera, camera_transform)
+    else {
         return;
     };
 
@@ -379,8 +374,8 @@ pub fn frontage_position_system(
     mut player: ResMut<Player>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    voxel_world: VoxelWorld<MainWorld>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    q_ground: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
     q_selected_boids: Query<Entity, (With<Selected>, With<Boid>, Without<Formation>)>,
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
@@ -405,13 +400,10 @@ pub fn frontage_position_system(
     let Ok((camera, camera_transform)) = q_camera.single() else {
         return;
     };
-    let Ok(ground) = q_ground.single() else {
-        return;
-    };
     let Some(cursor) = windows.single().ok().and_then(|w| w.cursor_position()) else {
         return;
     };
-    let Some(point) = get_intersection(&cursor, camera, camera_transform, ground) else {
+    let Some(point) = get_intersection(&voxel_world, &cursor, camera, camera_transform) else {
         return;
     };
 
