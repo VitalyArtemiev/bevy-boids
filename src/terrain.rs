@@ -465,45 +465,37 @@ pub fn terrain_brush_system(
 // Camera terrain clearance
 // ---------------------------------------------------------------------------
 
-/// Margin kept between the camera and the terrain surface when the plugin's
-/// desired camera position lands inside a hill (closest zoom on slopes).
+/// Minimum altitude kept between the camera and the terrain directly below
+/// it: when the plugin's zoom placement dips the camera into a hill, the
+/// camera is lifted to surface + margin. Clamp-only and upward-only, so
+/// zooming out is never fought.
 const CAMERA_TERRAIN_MARGIN_M: f32 = 0.6;
-/// The camera focus sits exactly on the surface (the plugin's follow_ground
-/// pins it there); lift the clearance ray origin slightly so it exits the
-/// ground cleanly instead of grazing it.
-const CAMERA_RAY_ORIGIN_LIFT_M: f32 = 0.3;
-/// Never pull the camera closer to the focus than this, even when terrain
-/// crowds it: a slightly clipped view beats a degenerate one.
-const CAMERA_MIN_RADIUS_M: f32 = 1.0;
 
-/// Keep the RTS camera out of the terrain. bevy_rts_camera positions the
-/// camera from focus + height + angle and only terrain-follows the *focus*
-/// point, so at close zoom on a slope the camera body itself ends up inside
-/// a hill. Runs after `RtsCameraSystemSet` (which sets the transform) and
-/// pulls the camera along the focus->camera ray to just in front of the
-/// first terrain hit. Clamping only: when nothing blocks the ray the
-/// plugin's placement is untouched, so there is no state to jitter.
+/// Keep the RTS camera above the terrain. bevy_rts_camera terrain-follows
+/// only the *focus* point (`follow_ground`), so at close zoom on a slope
+/// the camera body itself ends up inside a hill. A focus->camera ray does
+/// NOT work here: the RTS angle is shallow (~20 degrees elevation), so a
+/// ray leaving the surface-locked focus travels nearly horizontally,
+/// grazes the first bump, and would pin the camera to the ground every
+/// frame. Instead: cast straight down from above the camera's own XZ
+/// position and lift it to just above the surface. Only the height is
+/// touched — the plugin owns XZ and rotation.
 pub fn camera_terrain_clearance(
     mut cameras: Query<(&mut Transform, &RtsCamera), With<Camera3d>>,
     voxel_world: VoxelWorld<MainWorld>,
 ) {
     for (mut transform, rts) in &mut cameras {
-        let origin = rts.focus.translation + Vec3::Y * CAMERA_RAY_ORIGIN_LIFT_M;
-        let offset = transform.translation - origin;
-        let radius = offset.length();
-        if radius <= f32::EPSILON {
-            continue;
-        }
-        let Ok(dir) = Dir3::new(offset) else {
-            continue;
-        };
-        let Some(hit) = voxel_world.raycast(Ray3d::new(origin, dir), &|(_, _)| true) else {
+        let pos = transform.translation;
+        // Cast from above anything the plugin can place under us, so a
+        // camera that is already buried still finds the surface above it.
+        let origin = Vec3::new(pos.x, pos.y + rts.height_max, pos.z);
+        let Some(hit) = voxel_world.raycast(Ray3d::new(origin, Dir3::NEG_Y), &|(_, _)| true)
+        else {
             continue;
         };
-        let hit_dist = (hit.position - origin).length();
-        let allowed = (hit_dist - CAMERA_TERRAIN_MARGIN_M).max(CAMERA_MIN_RADIUS_M);
-        if allowed < radius {
-            transform.translation = origin + dir * allowed;
+        let min_y = hit.position.y + CAMERA_TERRAIN_MARGIN_M;
+        if pos.y < min_y {
+            transform.translation.y = min_y;
         }
     }
 }
