@@ -17,7 +17,7 @@ use crate::formations::{
 use crate::kinematics::*;
 use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
-    mouse_click_system, quick_group_system, selection_indicator_face,
+    height_scaled_zoom, mouse_click_system, quick_group_system, selection_indicator_face,
 };
 use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
@@ -82,6 +82,7 @@ fn main() {
                 mouse_click_system,
                 quick_group_system,
                 frontage_position_system,
+                height_scaled_zoom,
                 selection_indicator_face,
                 terrain_brush_system,
                 debug_walkability,
@@ -266,7 +267,9 @@ fn setup(
             edge_pan_width: 0.00,
             edge_pan_restrict_to_viewport: false,
             pan_speed: 15.0,
-            zoom_sensitivity: 0.5,
+            // Neutralized: zoom input is ours (height_scaled_zoom), whose
+            // speed scales with camera height instead of staying constant.
+            zoom_sensitivity: 0.0,
             enabled: true,
         },
     ));

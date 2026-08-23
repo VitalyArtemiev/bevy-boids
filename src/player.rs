@@ -17,11 +17,13 @@ use bevy::gizmos::config::GizmoLineConfig;
 use bevy::math::{Isometry3d, Quat, Vec3};
 use bevy::prelude::{
     Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Entity,
-    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, KeyCode, MouseButton, Query, Res, ResMut,
-    Resource, Transform, Vec2, Window, With, Without, World, default, info, warn,
+    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, KeyCode, MessageReader, MouseButton,
+    Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World, default, info,
+    warn,
 };
-use bevy_rts_camera::RtsCameraControls;
+use bevy_rts_camera::{RtsCamera, RtsCameraControls};
 use bevy_voxel_world::prelude::VoxelWorld;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use std::f32::consts::FRAC_PI_2;
 
 #[derive(Resource, Default)]
@@ -549,6 +551,48 @@ fn designate_frontage(
     }
 }
 
+/// Height-scaled zoom: replaces the plugin's stock zoom input (disabled by
+/// `zoom_sensitivity: 0` on the camera controls).
+///
+/// Stock bevy_rts_camera adds a constant zoom delta per wheel unit, which
+/// is a constant ~75 m of height per notch at every altitude. Here the
+/// delta is scaled by `max(1, height / ZOOM_SPEED_ANCHOR_M)`: identical to
+/// stock below the anchor (same formula, same constants), linearly faster
+/// above it — exponential zoom in height space, so the upper range
+/// (50→300 m) is covered in a couple of notches instead of four.
+const ZOOM_SPEED_ANCHOR_M: f32 = 50.0;
+/// The plugin's internal zoom factor (0.5) times the sensitivity the
+/// controls used before zoom became height-scaled (0.5).
+const ZOOM_PER_WHEEL_UNIT: f32 = 0.25;
+/// Pixel-unit wheel deltas are scaled down like the plugin does, so the
+/// feel matches across mouse drivers/browsers.
+const PIXEL_WHEEL_SCALE: f32 = 0.001;
+
+pub fn height_scaled_zoom(
+    mut mouse_wheel: MessageReader<MouseWheel>,
+    mut cam_q: Query<(&mut RtsCamera, &RtsCameraControls)>,
+) {
+    for (mut cam, controls) in cam_q.iter_mut().filter(|(_, c)| c.enabled) {
+        let wheel = mouse_wheel
+            .read()
+            .map(|message| match message.unit {
+                MouseScrollUnit::Line => message.y,
+                MouseScrollUnit::Pixel => message.y * PIXEL_WHEEL_SCALE,
+            })
+            .fold(0.0, |acc, val| acc + val);
+        if wheel == 0.0 {
+            continue;
+        }
+        // Manual lerp (height_max -> height_min as zoom goes 0 -> 1) to
+        // avoid the FloatExt trait import; matches the plugin's mapping.
+        let height =
+            cam.height_max + (cam.height_min - cam.height_max) * cam.target_zoom;
+        let scale = (height / ZOOM_SPEED_ANCHOR_M).max(1.0);
+        cam.target_zoom =
+            (cam.target_zoom + wheel * ZOOM_PER_WHEEL_UNIT * scale).clamp(0.0, 1.0);
+    }
+}
+
 /// Point each selected boid's triangle indicator along its current movement
 /// direction (velocity if moving, else its target direction). Formation
 /// indicators (squares) are skipped - their facing is the formation's.
@@ -568,5 +612,78 @@ pub fn selection_indicator_face(
         if dir.length_squared() > 1e-6 {
             transform.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::app::App;
+    use bevy::input::mouse::MouseScrollUnit;
+    use bevy::prelude::Update;
+
+    /// Bare headless rig: just the zoom system and one camera. Wheel events
+    /// are injected as messages, no real input plumbing.
+    fn zoom_app(target_zoom: f32) -> (App, bevy::prelude::Entity) {
+        let mut app = App::new();
+        app.add_message::<MouseWheel>()
+            .add_systems(Update, height_scaled_zoom);
+        let camera = app
+            .world_mut()
+            .spawn((
+                RtsCamera {
+                    height_min: 2.0,
+                    height_max: 300.0,
+                    zoom: target_zoom,
+                    target_zoom,
+                    ..Default::default()
+                },
+                RtsCameraControls::default(),
+            ))
+            .id();
+        (app, camera)
+    }
+
+    fn scroll(app: &mut App, y: f32) {
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y,
+            window: bevy::prelude::Entity::PLACEHOLDER,
+            phase: bevy::input::touch::TouchPhase::Moved,
+        });
+        app.update();
+    }
+
+    #[test]
+    fn zoom_speed_matches_stock_below_anchor_height() {
+        // At height_min (2 m) the scale clamps to 1: the per-notch delta is
+        // exactly the stock formula (wheel * 0.25).
+        let (mut app, camera) = zoom_app(1.0);
+        scroll(&mut app, -0.1);
+        assert_eq!(
+            app.world().get::<RtsCamera>(camera).unwrap().target_zoom,
+            0.975
+        );
+    }
+
+    #[test]
+    fn zoom_speed_scales_up_above_anchor_height() {
+        // target_zoom 0.2 => height 300 - 298*0.2 = 240.4 m => scale 4.808:
+        // ten notches' worth of stock zoom in one small scroll.
+        let (mut app, camera) = zoom_app(0.2);
+        scroll(&mut app, -0.1);
+        let expected = 0.2 - 0.1 * ZOOM_PER_WHEEL_UNIT * (240.4 / ZOOM_SPEED_ANCHOR_M);
+        assert!((app.world().get::<RtsCamera>(camera).unwrap().target_zoom - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_stays_clamped_to_the_zoom_range() {
+        let (mut app, camera) = zoom_app(0.0);
+        scroll(&mut app, -5.0); // hard zoom-out at max altitude
+        assert_eq!(
+            app.world().get::<RtsCamera>(camera).unwrap().target_zoom,
+            0.0
+        );
     }
 }
