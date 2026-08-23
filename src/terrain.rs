@@ -1,6 +1,5 @@
 use crate::boid::Boid;
 use crate::kinematics::{HardCollision, TrackedByTree, Velocity};
-use bevy::math::Ray3d;
 use bevy::prelude::*;
 use bevy_rts_camera::{Ground, RtsCamera};
 use bevy_voxel_world::prelude::{
@@ -465,37 +464,84 @@ pub fn terrain_brush_system(
 // Camera terrain clearance
 // ---------------------------------------------------------------------------
 
-/// Minimum altitude kept between the camera and the terrain directly below
-/// it: when the plugin's zoom placement dips the camera into a hill, the
-/// camera is lifted to surface + margin. Clamp-only and upward-only, so
-/// zooming out is never fought.
-const CAMERA_TERRAIN_MARGIN_M: f32 = 0.6;
+/// Minimum altitude kept between the camera and the highest terrain column
+/// within `CAMERA_CLEARANCE_RADIUS_M` of its XZ position.
+const CAMERA_TERRAIN_MARGIN_M: f32 = 1.0;
+/// Horizontal clearance radius. Clearing only the column directly below is
+/// wrong on slopes: the camera slides along a mountainside with the columns
+/// *beside* it higher, clipping into their sides. The camera must clear the
+/// highest surface in this disc (the 8 neighbours plus a partial second
+/// ring at 1 m voxels), which is what makes a zoomed, rotated view from a
+/// mountaintop possible.
+const CAMERA_CLEARANCE_RADIUS_M: f32 = 2.0;
+/// How fast the clearance lift relaxes when terrain no longer demands it.
+/// Rising is instant (never clip); falling is eased so the camera doesn't
+/// staircase down rough ground in 1 m voxel steps.
+const CAMERA_CLEARANCE_RELAX_M_PER_SEC: f32 = 8.0;
+/// Column scan floor below the camera: valley surfaces far underneath
+/// cannot clip the camera, so scans stop here.
+const CAMERA_SCAN_BELOW_M: i32 = 64;
 
-/// Keep the RTS camera above the terrain. bevy_rts_camera terrain-follows
-/// only the *focus* point (`follow_ground`), so at close zoom on a slope
-/// the camera body itself ends up inside a hill. A focus->camera ray does
-/// NOT work here: the RTS angle is shallow (~20 degrees elevation), so a
-/// ray leaving the surface-locked focus travels nearly horizontally,
-/// grazes the first bump, and would pin the camera to the ground every
-/// frame. Instead: cast straight down from above the camera's own XZ
-/// position and lift it to just above the surface. Only the height is
-/// touched — the plugin owns XZ and rotation.
+/// Smoothed clearance lift per camera. The plugin re-derives the camera
+/// transform every frame, so the clamp is recomputed from scratch each
+/// frame against the plugin's placement; this component carries only the
+/// relax smoothing between frames.
+#[derive(Component, Default)]
+pub struct CameraClearance {
+    offset: f32,
+}
+
+/// Keep the RTS camera out of the terrain. bevy_rts_camera terrain-follows
+/// only the *focus* point (`follow_ground`), so zooming in on a mountain
+/// lowers the camera into the peak and its surrounding columns. A
+/// focus->camera ray does not work (the ~20 degree RTS angle makes it graze
+/// terrain immediately); instead, sample the highest surface in a small
+/// disc around the camera's XZ position and keep the camera above it.
+/// Runs after `RtsCameraSystemSet`; only the height is touched — the
+/// plugin owns XZ and rotation.
 pub fn camera_terrain_clearance(
-    mut cameras: Query<(&mut Transform, &RtsCamera), With<Camera3d>>,
+    mut cameras: Query<(&mut Transform, &RtsCamera, &mut CameraClearance), With<Camera3d>>,
     voxel_world: VoxelWorld<MainWorld>,
+    time: Res<Time>,
 ) {
-    for (mut transform, rts) in &mut cameras {
+    let get_voxel = voxel_world.get_voxel_fn();
+    for (mut transform, rts, mut clearance) in &mut cameras {
         let pos = transform.translation;
-        // Cast from above anything the plugin can place under us, so a
-        // camera that is already buried still finds the surface above it.
-        let origin = Vec3::new(pos.x, pos.y + rts.height_max, pos.z);
-        let Some(hit) = voxel_world.raycast(Ray3d::new(origin, Dir3::NEG_Y), &|(_, _)| true)
-        else {
-            continue;
-        };
-        let min_y = hit.position.y + CAMERA_TERRAIN_MARGIN_M;
-        if pos.y < min_y {
-            transform.translation.y = min_y;
+        let cx = pos.x.floor() as i32;
+        let cz = pos.z.floor() as i32;
+
+        // Scan from above anything the plugin can place under us (so a
+        // buried camera, or a cliff wall beside it, still finds the top
+        // surface) down to a floor well below: deep surfaces can't clip.
+        let top = pos.y as i32 + rts.height_max as i32;
+        let bottom = pos.y as i32 - CAMERA_SCAN_BELOW_M;
+        let r = CAMERA_CLEARANCE_RADIUS_M.ceil() as i32;
+        let mut max_surface = f32::NEG_INFINITY;
+        for dx in -r..=r {
+            for dz in -r..=r {
+                if (dx * dx + dz * dz) as f32 > CAMERA_CLEARANCE_RADIUS_M.powi(2) {
+                    continue;
+                }
+                if let Some(h) = find_surface(&*get_voxel, cx + dx, cz + dz, top, bottom) {
+                    max_surface = max_surface.max(h);
+                }
+            }
+        }
+        if max_surface == f32::NEG_INFINITY {
+            continue; // no terrain loaded around the camera yet
+        }
+
+        let min_y = max_surface + CAMERA_TERRAIN_MARGIN_M;
+        let needed = (min_y - pos.y).max(0.0);
+        if needed > clearance.offset {
+            clearance.offset = needed;
+        } else {
+            clearance.offset =
+                (clearance.offset - CAMERA_CLEARANCE_RELAX_M_PER_SEC * time.delta_secs())
+                    .max(needed);
+        }
+        if clearance.offset > 0.0 {
+            transform.translation.y = pos.y + clearance.offset;
         }
     }
 }

@@ -22,8 +22,8 @@ use crate::player::{
 use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    MainWorld, ObstacleBundle, TerrainBrush, camera_terrain_clearance, ground_boids,
-    terrain_brush_system, terrain_height,
+    CameraClearance, MainWorld, ObstacleBundle, TerrainBrush, camera_terrain_clearance,
+    ground_boids, terrain_brush_system, terrain_height,
 };
 use crate::walkability::debug_walkability;
 use bevy::asset::RenderAssetUsages;
@@ -232,6 +232,8 @@ fn setup(
         Camera3d::default(),
         // Marks the camera the voxel world streams chunks around.
         VoxelWorldCamera::<MainWorld>::default(),
+        // Smoothed terrain-clearance lift state (see camera_terrain_clearance).
+        CameraClearance::default(),
         RtsCamera {
             bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
             height_min: 2.0,
