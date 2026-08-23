@@ -22,16 +22,18 @@ use crate::player::{
 use crate::resources::{Materials, Meshes};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    MainWorld, ObstacleBundle, TerrainBrush, ground_boids, terrain_brush_system, terrain_height,
+    MainWorld, ObstacleBundle, TerrainBrush, camera_terrain_clearance, ground_boids,
+    terrain_brush_system, terrain_height,
 };
 use crate::walkability::debug_walkability;
 use bevy::asset::RenderAssetUsages;
+use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
+use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin, RtsCameraSystemSet};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use bevy_voxel_world::prelude::{VoxelWorldCamera, VoxelWorldPlugin};
 use rand::Rng;
@@ -83,6 +85,7 @@ fn main() {
                 selection_indicator_face,
                 terrain_brush_system,
                 debug_walkability,
+                camera_terrain_clearance.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
             ),
         )
@@ -151,7 +154,14 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut mesh_list: ResMut<Meshes>,
     mut mat_list: ResMut<Materials>,
+    mut gizmo_store: ResMut<GizmoConfigStore>,
 ) {
+    // Debug gizmos (cursor, selection box, brushes, walkability) must read
+    // through the terrain: pull them to the near plane so slopes can't
+    // bury them.
+    let (gizmo_config, _) = gizmo_store.config_mut::<DefaultGizmoConfigGroup>();
+    gizmo_config.depth_bias = -1.0;
+
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
     mat_list.debug_material = materials.add(StandardMaterial {

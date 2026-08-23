@@ -33,6 +33,18 @@ pub struct Player {
     front_left: Option<Vec3>,
 }
 
+/// Drag slop below which an LMB press+release counts as a click, not a
+/// selection box. Exact point equality worked on the old flat plane but
+/// never on terrain, where every cursor move shifts the hit height.
+const MIN_DRAG_M: f32 = 0.5;
+
+/// The selection box is drawn flat at the height of its starting corner
+/// (terrain heights vary across the box otherwise); current cursor point
+/// projected onto that plane.
+fn flat_on_corner(corner1: Vec3, point: Vec3) -> Vec3 {
+    Vec3::new(point.x, corner1.y, point.z)
+}
+
 pub struct Selected;
 
 /// Shared gizmo asset for selection rings.
@@ -235,11 +247,11 @@ pub fn mouse_click_system(
 
         // Click without drag: deselect (above) but no box select. This also
         // guards against a stale corner1 producing a phantom selection.
-        if player.corner1 == point {
+        if (point - player.corner1).length() < MIN_DRAG_M {
             return;
         }
 
-        player.corner3 = point;
+        player.corner3 = flat_on_corner(player.corner1, point);
 
         let right = camera_transform.right();
         let dif = player.corner3 - player.corner1;
@@ -258,7 +270,7 @@ pub fn mouse_click_system(
     }
 
     if mouse_button_input.pressed(MouseButton::Left) {
-        player.corner3 = point;
+        player.corner3 = flat_on_corner(player.corner1, point);
 
         let right = camera_transform.right();
         let dif = player.corner3 - player.corner1;

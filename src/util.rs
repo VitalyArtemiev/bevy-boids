@@ -3,6 +3,12 @@ use bevy::prelude::*;
 use bevy_spatial::kdtree::KDTree3;
 use bevy_spatial::SpatialAABBAccess;
 
+/// The selection box is flat at its starting corner's height, but boids
+/// stand at arbitrary terrain heights under it; the kd-tree pre-filter
+/// AABB needs this vertical band. The point-in-triangle test below is
+/// XZ-projected, so a generous band only widens the candidate set.
+const SELECTION_Y_TOLERANCE_M: f32 = 5.0;
+
 pub fn side(start: Vec3, end: Vec3, query: &Vec3) -> f32 {
     (end.z - start.z) * (query.x - start.x) + (-end.x + start.x) * (query.z - start.z)
 }
@@ -70,15 +76,15 @@ pub fn within_rect(
 
     let loc1 = Vec3 {
         x: xs.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-        y: ys.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+        y: ys.iter().fold(f32::INFINITY, |a, &b| a.min(b)) - SELECTION_Y_TOLERANCE_M,
         z: zs.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-    } - Dir3::Y.as_vec3();
+    };
 
     let loc2 = Vec3 {
-        x: xs.iter().fold(f32::INFINITY, |a, &b| a.max(b)),
-        y: ys.iter().fold(f32::INFINITY, |a, &b| a.max(b)),
-        z: zs.iter().fold(f32::INFINITY, |a, &b| a.max(b)),
-    } + Dir3::Y.as_vec3();
+        x: xs.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+        y: ys.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)) + SELECTION_Y_TOLERANCE_M,
+        z: zs.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+    };
 
     tree.within(loc1, loc2)
         .into_iter()

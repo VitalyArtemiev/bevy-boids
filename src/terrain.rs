@@ -1,7 +1,8 @@
 use crate::boid::Boid;
 use crate::kinematics::{HardCollision, TrackedByTree, Velocity};
+use bevy::math::Ray3d;
 use bevy::prelude::*;
-use bevy_rts_camera::Ground;
+use bevy_rts_camera::{Ground, RtsCamera};
 use bevy_voxel_world::prelude::{
     TextureIndexMapperFn, VoxelLookupDelegate, VoxelWorld, VoxelWorldConfig, WorldVoxel,
 };
@@ -456,6 +457,53 @@ pub fn terrain_brush_system(
             for y in (new_i + 1)..=old_i {
                 voxel_world.set_voxel(IVec3::new(x, y, z), WorldVoxel::Air);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Camera terrain clearance
+// ---------------------------------------------------------------------------
+
+/// Margin kept between the camera and the terrain surface when the plugin's
+/// desired camera position lands inside a hill (closest zoom on slopes).
+const CAMERA_TERRAIN_MARGIN_M: f32 = 0.6;
+/// The camera focus sits exactly on the surface (the plugin's follow_ground
+/// pins it there); lift the clearance ray origin slightly so it exits the
+/// ground cleanly instead of grazing it.
+const CAMERA_RAY_ORIGIN_LIFT_M: f32 = 0.3;
+/// Never pull the camera closer to the focus than this, even when terrain
+/// crowds it: a slightly clipped view beats a degenerate one.
+const CAMERA_MIN_RADIUS_M: f32 = 1.0;
+
+/// Keep the RTS camera out of the terrain. bevy_rts_camera positions the
+/// camera from focus + height + angle and only terrain-follows the *focus*
+/// point, so at close zoom on a slope the camera body itself ends up inside
+/// a hill. Runs after `RtsCameraSystemSet` (which sets the transform) and
+/// pulls the camera along the focus->camera ray to just in front of the
+/// first terrain hit. Clamping only: when nothing blocks the ray the
+/// plugin's placement is untouched, so there is no state to jitter.
+pub fn camera_terrain_clearance(
+    mut cameras: Query<(&mut Transform, &RtsCamera), With<Camera3d>>,
+    voxel_world: VoxelWorld<MainWorld>,
+) {
+    for (mut transform, rts) in &mut cameras {
+        let origin = rts.focus.translation + Vec3::Y * CAMERA_RAY_ORIGIN_LIFT_M;
+        let offset = transform.translation - origin;
+        let radius = offset.length();
+        if radius <= f32::EPSILON {
+            continue;
+        }
+        let Ok(dir) = Dir3::new(offset) else {
+            continue;
+        };
+        let Some(hit) = voxel_world.raycast(Ray3d::new(origin, dir), &|(_, _)| true) else {
+            continue;
+        };
+        let hit_dist = (hit.position - origin).length();
+        let allowed = (hit_dist - CAMERA_TERRAIN_MARGIN_M).max(CAMERA_MIN_RADIUS_M);
+        if allowed < radius {
+            transform.translation = origin + dir * allowed;
         }
     }
 }
