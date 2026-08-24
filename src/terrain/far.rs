@@ -33,6 +33,12 @@ const LEVEL_RING: i32 = 2;
 /// Tiles whose centre is closer to the focus than this multiple of their
 /// own tile size are skipped: the level below already renders them.
 const INNER_CUT_TILE_MULT: f32 = 1.5;
+/// Far tiles sample float heights while the voxel surface sits at
+/// `floor(height)`, so an unmodified tile would float up to 1 m ABOVE the
+/// voxels and drape over them. Dropping the far surface by 1 m guarantees
+/// `h - 1 <= floor(h)`: the far field hides underneath the voxel terrain
+/// wherever both exist, and only shows beyond the voxel radius.
+const FAR_BELOW_VOXEL_SURFACE_M: f32 = 1.0;
 
 /// Tile identity: LOD level + grid position at that level's tile size.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -94,7 +100,8 @@ fn tile_mesh(key: TileKey) -> Mesh {
     let mut heights = [[0.0f32; TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
-            heights[iz][ix] = terrain_height(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell);
+            heights[iz][ix] = terrain_height(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell)
+                - FAR_BELOW_VOXEL_SURFACE_M;
         }
     }
 
@@ -120,11 +127,13 @@ fn tile_mesh(key: TileKey) -> Mesh {
     }
 
     // Skirt: duplicate the border ring, sunk by `skirt`. Winding runs
-    // around the tile edge so the walls face outward.
+    // around the tile edge so the walls face outward. Each corner appears
+    // exactly once: edge D starts at iz = TILE_QUADS - 1 because edge C
+    // already ends at the (iz = TILE_QUADS, ix = 0) corner.
     let border: Vec<usize> = (0..TILE_VERTS)
         .chain((1..TILE_VERTS).map(|i| i * TILE_VERTS + TILE_QUADS))
         .chain((0..TILE_QUADS).rev().map(|i| TILE_VERTS * TILE_QUADS + i))
-        .chain((1..TILE_VERTS).rev().map(|i| i * TILE_VERTS))
+        .chain((1..TILE_QUADS).rev().map(|i| i * TILE_VERTS))
         .collect();
     let mut skirt_start = positions.len();
     for &v in &border {
@@ -137,8 +146,14 @@ fn tile_mesh(key: TileKey) -> Mesh {
     for iz in 0..TILE_QUADS {
         for ix in 0..TILE_QUADS {
             let v0 = (iz * TILE_VERTS + ix) as u32;
-            indices.extend_from_slice(&[v0, v0 + 1, v0 + TILE_VERTS as u32]);
-            indices.extend_from_slice(&[v0 + 1, v0 + TILE_VERTS as u32 + 1, v0 + TILE_VERTS as u32]);
+            // Winding so faces point UP (+y): (B - A) x (C - A) with
+            // +x then +z edges gives -y, so the +z corner comes second.
+            indices.extend_from_slice(&[v0, v0 + TILE_VERTS as u32, v0 + 1]);
+            indices.extend_from_slice(&[
+                v0 + 1,
+                v0 + TILE_VERTS as u32,
+                v0 + TILE_VERTS as u32 + 1,
+            ]);
         }
     }
     let n = border.len();
@@ -147,8 +162,9 @@ fn tile_mesh(key: TileKey) -> Mesh {
         let top_b = border[(i + 1) % n] as u32;
         let bot_a = (skirt_start + i) as u32;
         let bot_b = (skirt_start + (i + 1) % n) as u32;
-        indices.extend_from_slice(&[top_a, bot_a, top_b]);
-        indices.extend_from_slice(&[top_b, bot_a, bot_b]);
+        // Skirt walls face outward from the tile.
+        indices.extend_from_slice(&[top_a, top_b, bot_a]);
+        indices.extend_from_slice(&[top_b, bot_b, bot_a]);
     }
 
     let mut mesh = Mesh::new(
@@ -270,6 +286,68 @@ mod tests {
         app.update();
         app.update();
         app
+    }
+
+    #[test]
+    fn tile_faces_point_up_and_skirts_outward() {
+        // Backface culling uses winding: interior faces must have +y
+        // geometric normals (a spike-era bug wound them downward, leaving
+        // the far field visible only at grazing angles), and skirt walls
+        // must face away from the tile centre.
+        let key = TileKey { level: 2, x: -3, z: 7 };
+        let mesh = tile_mesh(key);
+        let positions = match mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("positions")
+        {
+            VertexAttributeValues::Float32x3(p) => p.clone(),
+            _ => panic!("unexpected position format"),
+        };
+        let indices: Vec<u32> = match mesh.indices().expect("indices") {
+            Indices::U32(i) => i.clone(),
+            _ => panic!("unexpected index format"),
+        };
+
+        let face_normal = |a: usize, b: usize, c: usize| {
+            let pa = Vec3::from(positions[a]);
+            let pb = Vec3::from(positions[b]);
+            let pc = Vec3::from(positions[c]);
+            (pb - pa).cross(pc - pa)
+        };
+
+        let interior_count = TILE_QUADS * TILE_QUADS * 2;
+        for tri in 0..interior_count {
+            let (a, b, c) = (
+                indices[tri * 3] as usize,
+                indices[tri * 3 + 1] as usize,
+                indices[tri * 3 + 2] as usize,
+            );
+            let normal = face_normal(a, b, c);
+            assert!(
+                normal.y > 0.0,
+                "interior triangle {tri} faces {normal:?}, not up"
+            );
+        }
+
+        let centre = {
+            let c = key.centre();
+            Vec3::new(c.x, 0.0, c.y)
+        };
+        for tri in interior_count..(indices.len() / 3) {
+            let (a, b, c) = (
+                indices[tri * 3] as usize,
+                indices[tri * 3 + 1] as usize,
+                indices[tri * 3 + 2] as usize,
+            );
+            let normal = face_normal(a, b, c);
+            let face_mid = (Vec3::from(positions[a]) + Vec3::from(positions[b])
+                + Vec3::from(positions[c]))
+                / 3.0;
+            assert!(
+                (face_mid - centre).dot(normal) > 0.0,
+                "skirt triangle {tri} faces inward"
+            );
+        }
     }
 
     #[test]
