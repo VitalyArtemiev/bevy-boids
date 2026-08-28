@@ -166,6 +166,7 @@ fn setup(
 
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
+    mat_list.ground = materials.add(StandardMaterial::from_color(Color::srgb(0.38, 0.5, 0.3)));
     mat_list.debug_material = materials.add(StandardMaterial {
         base_color_texture: Some(images.add(uv_debug_texture())),
         ..default()

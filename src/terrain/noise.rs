@@ -37,7 +37,7 @@ pub(crate) const BEDROCK_TOP_Y: i32 = 0;
 pub(crate) fn surface_material(surface_y: i32) -> u8 {
     if surface_y <= 1 {
         MATERIAL_SHORE
-    } else if surface_y < 16 {
+    } else if surface_y < 40 {
         MATERIAL_GRASS
     } else {
         MATERIAL_ROCK

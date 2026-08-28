@@ -33,12 +33,24 @@ const LEVEL_RING: i32 = 2;
 /// Tiles whose centre is closer to the focus than this multiple of their
 /// own tile size are skipped: the level below already renders them.
 const INNER_CUT_TILE_MULT: f32 = 1.5;
+/// The voxel near-field radius (spawning_distance x 32 m chunks). Tiles
+/// lying fully inside it are skipped: full-resolution voxels render there,
+/// and a smooth heightfield copy underneath only fights them at the seam.
+/// Tiles straddling the boundary stay — their inner part hides 1 m below
+/// the voxels, and they close the gap to the first fully-far ring.
+const VOXEL_NEAR_RADIUS_M: f32 = 1200.0;
 /// Far tiles sample float heights while the voxel surface sits at
 /// `floor(height)`, so an unmodified tile would float up to 1 m ABOVE the
 /// voxels and drape over them. Dropping the far surface by 1 m guarantees
 /// `h - 1 <= floor(h)`: the far field hides underneath the voxel terrain
 /// wherever both exist, and only shows beyond the voxel radius.
 const FAR_BELOW_VOXEL_SURFACE_M: f32 = 1.0;
+/// Levels up to this index (cell <= 64 m) round heights down to whole
+/// metres near the seam, matching the voxel grid's blocky silhouette so
+/// the style handoff happens at matched coarseness instead of smooth-vs-
+/// blocky. Coarser levels stay smooth: at their distance the difference
+/// is sub-pixel.
+const QUANTIZED_LEVELS: usize = 3;
 
 /// Tile identity: LOD level + grid position at that level's tile size.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -96,12 +108,18 @@ fn tile_mesh(key: TileKey) -> Mesh {
     let origin_z = key.z as f32 * tile_size;
     let skirt = (cell * 1.5).max(8.0);
 
-    // Interior grid heights, sampled once and reused for normals.
+    // Interior grid heights, sampled once and reused for normals. Levels
+    // near the seam quantize to the voxel grid's integer heights.
+    let quantize = (key.level as usize) < QUANTIZED_LEVELS;
     let mut heights = [[0.0f32; TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
-            heights[iz][ix] = terrain_height(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell)
-                - FAR_BELOW_VOXEL_SURFACE_M;
+            let h = terrain_height(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell);
+            heights[iz][ix] = if quantize {
+                h.floor()
+            } else {
+                h
+            } - FAR_BELOW_VOXEL_SURFACE_M;
         }
     }
 
@@ -209,9 +227,13 @@ pub fn far_terrain_stream(
                     x: focus_tile.x + dx,
                     z: focus_tile.y + dz,
                 };
+                // Fully inside the voxel near-field: voxels render there.
+                let centre_dist = (key.centre() - focus).length();
+                if centre_dist + tile_size * 0.5 < VOXEL_NEAR_RADIUS_M {
+                    continue;
+                }
                 // Inner cut: the finer level below renders this area.
-                if level > 0 && (key.centre() - focus).length() < INNER_CUT_TILE_MULT * tile_size
-                {
+                if level > 0 && centre_dist < INNER_CUT_TILE_MULT * tile_size {
                     continue;
                 }
                 desired.push(key);
@@ -239,7 +261,7 @@ pub fn far_terrain_stream(
         let entity = commands
             .spawn((
                 Mesh3d(mesh),
-                MeshMaterial3d(materials.white.clone()),
+                MeshMaterial3d(materials.ground.clone()),
                 Transform::IDENTITY,
             ))
             .id();
@@ -274,14 +296,14 @@ mod tests {
             })
             .add_systems(Update, far_terrain_stream);
         // The Materials resource holds handles that setup normally fills;
-        // give the white material a real asset before streaming runs.
-        let white = app
+        // give the ground material a real asset before streaming runs.
+        let ground = app
             .world_mut()
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial::from_color(Color::WHITE));
         app.world_mut()
             .resource_mut::<crate::resources::Materials>()
-            .white = white;
+            .ground = ground;
         // Startup + a couple of streaming passes.
         app.update();
         app.update();
@@ -346,6 +368,21 @@ mod tests {
             assert!(
                 (face_mid - centre).dot(normal) > 0.0,
                 "skirt triangle {tri} faces inward"
+            );
+        }
+    }
+
+    #[test]
+    fn no_far_tiles_inside_the_voxel_near_field() {
+        let app = far_app(Vec3::ZERO);
+        let far = app.world().resource::<FarTerrain>();
+        for key in far.tiles.keys() {
+            let centre_dist = (key.centre() - Vec2::ZERO).length();
+            assert!(
+                centre_dist + key.tile_size() * 0.5 >= VOXEL_NEAR_RADIUS_M,
+                "level {} tile at {:?} lies fully inside the voxel field",
+                key.level,
+                key.centre()
             );
         }
     }

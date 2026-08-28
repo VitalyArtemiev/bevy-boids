@@ -12,4 +12,7 @@ pub struct Materials {
     pub debug_material: Handle<StandardMaterial>,
     pub black: Handle<StandardMaterial>,
     pub white: Handle<StandardMaterial>,
+    /// Far-terrain LOD tiles; tinted to read as a continuation of the voxel
+    /// landscape rather than a separate white sheet.
+    pub ground: Handle<StandardMaterial>,
 }
