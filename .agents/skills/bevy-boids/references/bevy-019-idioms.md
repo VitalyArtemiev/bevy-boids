@@ -14,23 +14,35 @@ check the Bevy 0.19 docs — do not fall back to older-API memory.
 | `time.delta_seconds()` | `time.delta_secs()` | `kinematics.rs` |
 | `Color::rgb(..)` / `Color::rgba(..)` | `Color::srgb(..)` (colorspace-explicit constructors); named constants via palettes, e.g. `bevy::color::palettes::basic::YELLOW` | `player.rs`, `formations.rs` |
 | `v.try_normalize().unwrap_or(Vec3::ZERO)` | `v.normalize_or_zero()` | everywhere |
-| Spawn-side effects via observer-less `Added<T>` polling or ad-hoc systems | component lifecycle hooks: manual `impl Component` with `on_insert()` / `on_remove()` returning a `ComponentHook` taking `(&mut DeferredWorld, HookContext)` | `player.rs` (`Selected`) |
+| Spawn-side effects via observer-less `Added<T>` polling or ad-hoc systems | component lifecycle hooks: manual `impl Component` (`const STORAGE_TYPE`, `type Mutability = Mutable`) with `on_insert()` / `on_remove()` returning a `ComponentHook` taking `(&mut DeferredWorld, HookContext)` | `player.rs` (`Selected`) |
 | Synthetic entity ids in tests: `Entity::from_raw(i)` | `Entity::from_raw_u32(i).unwrap()` (returns `Option` in 0.19) | `formations.rs` tests |
-| Per-frame `Vec` gathering across disjoint queries via `Local` + multiple systems | one system, `ParamSet<(P0, P1, P2)>` with sequential passes | `process_formation_orders` |
+| Cramming a read-after-write pipeline into one system with `ParamSet` passes | chained systems passing small marker/data components (`SlotsStale`, `FormationGoal`) — the chain's auto sync points flush `Commands` between stages; keep `ParamSet` only when one system genuinely needs overlapping access in one pass | `formations.rs` executor pipeline |
 | Mutating another entity's state mid-iteration via `World` access hacks | `commands.queue(move \|world: &mut World\| ...)` deferred closure | `formations.rs` |
+| `async fn` systems, tokio/futures to "get concurrency" | Plain sync systems — the scheduler runs non-conflicting systems in parallel; `par_iter_mut()` for per-entity loops | `soft_collisions` in `boid.rs` |
 
 Notes:
 
+- "Parallel by default" ≠ async: systems are synchronous functions run
+  concurrently by the multithreaded scheduler (there is no first-class
+  async system support in Bevy). Async exists only at the engine level via
+  `bevy::tasks` task pools for background work — see the parallelism bullet
+  in SKILL.md before reaching for it.
 - Both tuple-spawns (`commands.spawn((A, B, C))`) and derived `Bundle`
   structs with constructors (`BoidBundle::with_target`) are in use; either is
   fine — bundle constructors are preferred when spawn sites repeat.
-- Required components (0.16+) are available; this codebase mostly spells
-  components out explicitly for clarity. Follow the local file's style.
+- Required components (0.16+) are in use: `#[require(NeedsSpeedInit,
+  Target)]` on `Formation` guarantees every spawn path gets them. Prefer
+  `require` over repeating components at each spawn site.
 - Observers (`Trigger`, `.observe(..)`) exist in 0.19 but are unused here;
   prefer the existing hook/system/queued-task patterns unless asked.
 - wasm: don't force wgpu backends. `main.rs` pins `Backends::VULKAN` only
   under `#[cfg(not(target_arch = "wasm32"))]`; browsers must let wgpu pick
   (WebGL2/WebGPU). Keep any new render settings wasm-conditional if they
-  touch backends.
-- `#[allow(clippy::type_complexity)]` on systems with long `ParamSet`/`Query`
-  types is accepted practice here (see `process_formation_orders`).
+  touch backends. The atmosphere (`Atmosphere`/`ScatteringMedium`) builds
+  its lookup textures with compute shaders, so the sky needs WebGPU on
+  wasm — WebGL2 keeps sun lighting but falls back to the flat `ClearColor`
+  sky (see `sky.rs`).
+- Extra fields on a relationship component are a footgun upstream:
+  re-inserting the relationship silently resets them to `Default`
+  (bevy#19589). Keep companion data as its own component — `FormationSlot`
+  deliberately stays separate from `MemberOf`; see its doc comment.

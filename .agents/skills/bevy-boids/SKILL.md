@@ -61,11 +61,14 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
    `[unstable] codegen-backend = true` (cranelift for `profile.dev`).
    `rust-toolchain.toml` pins nightly and CI sets `RUSTUP_TOOLCHAIN`.
    Don't move the project to stable or reorder profiles.
-2. **Tracy and dynamic linking are native-only.** The `tracy` feature (and
-   `dynamic_linking`, `trace`, `trace_tracy`) live under
+2. **Tracy and dynamic linking are native-only.** Native builds enable
+   `dynamic_linking`, `trace`, and `trace_tracy` by default under
    `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` for a reason:
-   tracy-client-sys cannot build for wasm. Keep the native/wasm dependency
-   split intact; never enable those features for wasm targets.
+   tracy-client-sys cannot build for wasm. The opt-in features are `tracy`
+   (same tracing, for instrumented release builds) and `tracy_mem` (adds
+   `trace_tracy_memory`) — both still pull tracy-client-sys, so neither may
+   ever be enabled for wasm targets. Keep the native/wasm dependency split
+   intact.
 3. **wasm needs the getrandom backend cfg.** `.cargo/config.toml` sets
    `--cfg getrandom_backend="wasm_js"` for `wasm32-unknown-unknown`, matching
    the `getrandom = { features = ["wasm_js"] }` dep. Removing either breaks
@@ -92,11 +95,10 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 ## Commands
 
-- Dev run: `cargo run` (native builds already carry Tracy instrumentation
-  via target deps).
-    # "trace_tracy",
-- Dev run with tracing: `cargo run --features trace_tracy`
-- Profiling: `cargo run --release --features trace_tracy`, connect Tracy.
+- Dev run: `cargo run --features bevy/dynamic_linking` (dynamic linking for faster iteration).
+- Dev run with profiling: `cargo run --features tracy`.
+- Dev run with memory tracing: `cargo run --features tracy_mem`.
+- Profiling: `cargo run --release --features tracy`, connect Tracy.
 - Tests: `cargo test`; run perf-budget tests in release for realistic
   timings (`cargo test --release nearest_solver`).
 - Wasm check: `cargo check --target wasm32-unknown-unknown`.
@@ -111,12 +113,13 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 | Module | Contents |
 | --- | --- |
-| `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/light/camera/ground) |
+| `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/camera/ground; the sun/sky lives in `sky.rs`) |
 | `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob` |
 | `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts, `move_step` integrator, `NNTree`/`TrackedByTree` |
 | `target.rs` | `Target` component, `follow_target` steering |
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
+| `sky.rs` | `SkyPlugin`: atmosphere + directional sun (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`); pure `sun_transform` helper with unit tests |
 | `terrain.rs`, `resources.rs`, `util.rs` | Ground/obstacles; shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
 | `horse.rs` | Stub for future cavalry behavior |
 
@@ -151,6 +154,16 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 - **Component presence is state**: a formation carries `Velocity` if it is
   the lowest loaded LOD level; `propagate_formation_targets` inserts/removes
   it. Don't add parallel bool flags.
+- **Required components guarantee creation-path invariants**:
+  `#[require(NeedsSpeedInit, Target)]` on `Formation` means every spawn
+  path gets the marker; `init_formation_speed` later derives `max_speed`
+  from the member list and removes it. Data derived from relationship
+  targets must be computed by a system on a later tick (targets only
+  populate when spawn commands apply) — never set it by hand at spawn
+  sites, never in a spawn hook.
+- **Self-contained features are plugins**: `SkyPlugin` bundles its own
+  startup system; `main.rs` just adds it. Prefer a plugin over loose
+  `add_systems` calls when a module owns a cohesive feature.
 - **Pipeline stages communicate through components, not snapshot vectors**:
   when a chain of read-after-write steps would force one giant `ParamSet`
   system (the former `process_formation_orders`), split it into chained
@@ -165,13 +178,25 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   World| ...)`** when the change depends on values computed mid-system (Reform
   pop, sub-formation task injection in `formations.rs`).
 - **Spawn/despawn side effects use component lifecycle hooks**: manual
-  `impl Component` returning `on_insert()`/`on_remove()` hooks
-  (`Selected` in `player.rs`). Observers exist in 0.19 but this codebase
-  doesn't use them — reach for hooks/systems first for consistency.
+  `impl Component` returning `on_insert()`/`on_remove()` hooks (`Selected`
+  in `player.rs` spawns indicator children; its `on_remove` cleans them up
+  via `despawn_related::<Children>()`). Observers exist in 0.19 but this
+  codebase doesn't use them — reach for hooks/systems first for
+  consistency.
 - **Spatial membership is a component**: entities queried via the kd-tree
   need the `TrackedByTree` marker (see `SoftCollision`/`HardCollision`
   embedding it); the `AutomaticUpdate::<TrackedByTree>` plugin refreshes the
   tree periodically (tests configure a faster refresh for determinism).
+- **Parallelism comes free — don't add async.** Bevy systems are plain
+  synchronous functions: the multithreaded scheduler already runs
+  non-conflicting systems in parallel based on their data access, and
+  `query.par_iter_mut()` parallelizes independent per-entity work within a
+  system (`soft_collisions` in `boid.rs`). This codebase has zero async
+  code — don't reach for async/await, tokio, or an executor crate to "get
+  concurrency"; parallel ≠ async, and systems can't be `async fn`. The
+  escape hatch for genuinely background work (asset warmup, network
+  interop) is `bevy::tasks` (`AsyncComputeTaskPool`) with results fed back
+  into a system each frame; propose that before adding it.
 - **Movement model**: steering writes `vel.a` / `vel.target_v`
   (`follow_target`, `soft_collisions`); `move_step` integrates
   semi-implicit-Euler and clamps. Never teleport entities from steering
@@ -180,9 +205,13 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 ## Testing conventions
 
-- Headless `App` harness: `test_app()` in `formations.rs` builds a minimal
-  app with the real `AutomaticUpdate` plugin and the pipeline `.chain()`ed;
-  `tick(app, dt)` advances `Time` manually via `advance_by`.
+- Headless `App` harness: `test_app()` in `formations.rs` adds `TimePlugin`
+  (the plugin owns the fixed-loop runner), sets `Time::<Fixed>` to the tick
+  dt, and chains the FixedUpdate pipeline; `tick(app, dt)` drives time via
+  `TimeUpdateStrategy::ManualDuration` so every tick runs exactly one
+  FixedUpdate. Bevy's first `update()` never advances the clocks, so
+  `test_app()` burns it before any entities exist — and a self-test
+  (`harness_advances_one_fixed_step_per_tick`) pins that guarantee.
 - If a system starts becoming complex, split it into testable fuctions with
   simple inputs and outputs, test it without instantiating the world if possible.
 - Headless gizmos need `init_gizmo_group::<DefaultGizmoConfigGroup>()`,

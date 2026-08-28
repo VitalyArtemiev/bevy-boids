@@ -8,13 +8,12 @@ edition = "2024"
 [features]
 # Opt-in profiling: cargo run --release --features tracy
 # Do NOT enable for wasm builds (tracy-client-sys cannot target wasm).
-tracy = ["bevy/trace", "bevy/trace_tracy", "bevy/trace_tracy_memory"]
+tracy = ["bevy/trace", "bevy/trace_tracy"]
+tracy_mem = ["bevy/trace", "bevy/trace_tracy", "bevy/trace_tracy_memory"]
 
 [dependencies]
 bevy = { version = "0.19" }
-#bevy = { version = "0.19" }
 
-#bevy_spatial = "0.11.0"
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within", default-features = false, features = ["kdtree"] }
 bevy_rts_camera = "0.14.0"
 rand = "0.9.1"
