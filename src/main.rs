@@ -4,6 +4,7 @@ mod horse;
 mod kinematics;
 mod player;
 mod resources;
+mod sky;
 mod target;
 mod terrain;
 mod util;
@@ -19,9 +20,13 @@ use crate::player::{
     mouse_click_system, quick_group_system, selection_indicator_face,
 };
 use crate::resources::{Materials, Meshes};
+use crate::sky::SkyPlugin;
 use crate::target::{Target, follow_target};
 use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
 use crate::util::*;
+use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
+use bevy::pbr::AtmosphereSettings;
+use bevy::post_process::bloom::Bloom;
 use bevy::asset::RenderAssetUsages;
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
@@ -55,6 +60,11 @@ fn main() {
                 }),
         )
         .add_plugins(RtsCameraPlugin)
+        .add_plugins(SkyPlugin)
+        // The atmosphere's environment-map light is the ambient source; the
+        // flat default ambient would wash it out.
+        .insert_resource(GlobalAmbientLight::NONE)
+        .insert_resource(ClearColor(Color::srgb(0.38, 0.62, 0.86)))
         .init_resource::<SelectionGizmo>()
         .init_resource::<FormationSelectionGizmo>()
         .add_plugins(
@@ -106,6 +116,11 @@ struct Container {
 }
 
 const X_EXTENT: f32 = 14.5;
+
+/// Camera draw distance. The default (1000 m) clipped most of the 5 km
+/// ground plane; the atmosphere's aerial perspective needs a few km of
+/// terrain to haze out over.
+const CAMERA_FAR_PLANE_M: f32 = 30_000.0;
 
 fn uv_debug_texture() -> Image {
     const TEXTURE_SIZE: usize = 8;
@@ -185,17 +200,6 @@ fn setup(
             .id();
     }
 
-    commands.spawn((
-        PointLight {
-            color: Default::default(),
-            intensity: 9000.0,
-            range: 100.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(10.0, 10.0, 0.0),
-    ));
-
     // ground plane
     commands.spawn(TerrainBundle::default(
         &mut meshes,
@@ -205,6 +209,16 @@ fn setup(
 
     commands.spawn((
         Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            far: CAMERA_FAR_PLANE_M,
+            ..default()
+        }),
+        // Enables atmosphere rendering for this view; requires HDR.
+        AtmosphereSettings::default(),
+        // Sky-driven ambient and reflections (GlobalAmbientLight is NONE).
+        AtmosphereEnvironmentMapLight::default(),
+        // Makes the SunDisk glow.
+        Bloom::default(),
         RtsCamera {
             bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
             height_min: 2.0,
