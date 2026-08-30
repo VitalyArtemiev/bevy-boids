@@ -6,10 +6,17 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-# Opt-in profiling: cargo run --release --features tracy
-# Do NOT enable for wasm builds (tracy-client-sys cannot target wasm).
-tracy = ["bevy/trace", "bevy/trace_tracy"]
-tracy_mem = ["bevy/trace", "bevy/trace_tracy", "bevy/trace_tracy_memory"]
+# Opt-in instrumentation. `tracing` is the base span layer; the frontends
+# add a sink on top of it. Do NOT enable tracy/tracy_mem for wasm builds
+# (tracy-client-sys cannot target wasm).
+tracing = ["bevy/trace"]
+chrome = ["tracing", "bevy/trace_chrome"]
+tracy = ["tracing", "bevy/trace_tracy"]
+tracy_mem = ["tracing", "bevy/trace_tracy_memory"]
+
+# Development-only Bevy dylib for fast native iteration. Do NOT combine
+# with wasm, and do not enable it for LTO release builds.
+dynamic = ["bevy/dynamic_linking"]
 
 [dependencies]
 bevy = { version = "0.19" }
@@ -20,23 +27,19 @@ bevy_egui = "0.42"
 bevy_enhanced_input = "0.26"
 
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within", default-features = false, features = ["kdtree"] }
-bevy_rts_camera = "0.14.0"
+# Vendored fork of 0.14.0: `follow_ground` removed. Its full-world mesh
+# raycast cost ~5 ms/frame with 10k boid meshes; the game samples the
+# analytic HeightField instead (terrain::camera::focus_camera_on_ground).
+bevy_rts_camera = { path = "vendor/bevy_rts_camera" }
 fastnoise-lite = "1.1"
 rand = "0.9.1"
 derive_more = { version = "2.0.1", features = ["full"] }
 lazy_static = "1.5.0"
 serde = { version = "1.0.219", features = ["derive"] }
 
-# Local dev conveniences (dynamic linking + Tracy) - native only, they
-# cannot build for wasm (tracy-client-sys needs a C++ toolchain).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bevy = { version = "0.19", features = [
-    "dynamic_linking",
-    "trace",
-    "trace_tracy",
-    #    "trace_tracy_memory"
-] }
-
+# Bevy itself stays static and untraced by default: `--features dynamic`
+# buys faster native iteration, `--features tracing`/`tracy`/`chrome` buy
+# instrumentation, and release keeps LTO compatible with static linking.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 

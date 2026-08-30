@@ -1,6 +1,6 @@
 use crate::boid::Boid;
 use crate::formations::{
-    Formation, FormationKind, FormationOrder, FormationSlot, MemberOf, Members,
+    Formation, FormationKind, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
     QuickCommandGroup,
 };
 use crate::kinematics::{NNTree, Velocity};
@@ -22,7 +22,7 @@ use bevy::prelude::{
     MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World,
     default, info, warn,
 };
-use bevy_rts_camera::{Ground, RtsCamera, RtsCameraControls};
+use bevy_rts_camera::{RtsCamera, RtsCameraControls};
 use std::f32::consts::FRAC_PI_2;
 
 #[derive(Resource, Default)]
@@ -203,7 +203,11 @@ pub fn draw_cursor(
     field: Res<HeightField>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
+    debug: Res<crate::debug_ui::DebugConfig>,
 ) {
+    if !debug.show_cursor_circle {
+        return;
+    }
     match camera_query.single() {
         Ok((camera, camera_transform)) => {
             let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
@@ -218,10 +222,7 @@ pub fn draw_cursor(
             // Draw a circle just above the terrain at that position,
             // rotated to lie flat (circle default normal is +Z, ground is +Y).
             gizmos.circle(
-                Isometry3d::new(
-                    point + Vec3::Y * 0.01,
-                    Quat::from_rotation_x(-FRAC_PI_2),
-                ),
+                Isometry3d::new(point + Vec3::Y * 0.01, Quat::from_rotation_x(-FRAC_PI_2)),
                 0.2,
                 Color::WHITE,
             );
@@ -381,8 +382,7 @@ pub fn quick_group_system(
                 commands.entity(entity).insert(MemberOf(formation));
             }
         }
-    } else if let Some((formation_entity, _, _)) =
-        q_formations.iter().find(|(_, s, _)| s.0 == slot)
+    } else if let Some((formation_entity, _, _)) = q_formations.iter().find(|(_, s, _)| s.0 == slot)
     {
         // Plain number: select this group, replacing the current selection.
         for (entity, _) in &q_selected {
@@ -416,6 +416,7 @@ pub fn frontage_position_system(
     mut q_targets: Query<&mut Target>,
     mut q_camera_controls: Query<&mut RtsCameraControls>,
     mut gizmos: Gizmos,
+    tuning: Res<FormationTuning>,
 ) {
     // Nothing selected: RMB stays the camera drag-pan control. With a
     // selection, RMB becomes frontage designation, so disable camera drag.
@@ -453,6 +454,7 @@ pub fn frontage_position_system(
                 left,
                 point,
                 adjust_width,
+                tuning.spacing_m,
                 &q_selected_boids,
                 &q_selected_formations,
                 &q_member_of,
@@ -464,10 +466,12 @@ pub fn frontage_position_system(
 }
 
 /// Arrange `units` in a grid spanning the frontage from `left` to `right_pt`.
+/// `spacing_m` is the slot spacing (see [`FormationTuning`]).
 fn designate_frontage(
     left: Vec3,
     right_pt: Vec3,
     adjust_width: bool,
+    spacing_m: f32,
     q_selected_boids: &Query<Entity, (With<Selected>, With<Boid>, Without<Formation>)>,
     q_selected_formations: &Query<Entity, (With<Selected>, With<Formation>)>,
     q_member_of: &Query<&MemberOf>,
@@ -514,9 +518,9 @@ fn designate_frontage(
     // Minimum spacing: boid slot spacing, widened to the largest formation
     // extent when any formation is among the units.
     // Ctrl held: fit each formation's internal grid width to the frontage
-    // (columns = width / SPACING); the slot system re-maps members.
+    // (columns = width / spacing); the slot system re-maps members.
     if adjust_width {
-        let new_cols = (width / FormationKind::SPACING).round().max(1.0) as usize;
+        let new_cols = (width / spacing_m).round().max(1.0) as usize;
         for &unit in &units {
             if let Ok(mut formation) = q_formation_mut.get_mut(unit) {
                 formation.columns = Some(new_cols);

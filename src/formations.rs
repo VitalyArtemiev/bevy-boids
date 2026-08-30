@@ -25,7 +25,7 @@ pub enum FormationOrder {
     /// the individual units can just change direction or after a formation changes.
     Rotate { to: Vec3 },
     /// Hold position. This is the default order that doesn't get removed.
-    Hold { pos: Vec3, facing_dir: Vec3 }
+    Hold { pos: Vec3, facing_dir: Vec3 },
 }
 
 /// A formation groups boids (and possibly sub-formations) and assigns each
@@ -104,13 +104,14 @@ impl Default for Formation {
 
 impl Formation {
     /// Slot offset honoring the column override (Grid only).
-    pub fn slot_offset(&self, index: usize, total: usize) -> Vec3 {
-        self.kind.offset_with_cols(index, total, self.columns)
+    pub fn slot_offset(&self, index: usize, total: usize, spacing: f32) -> Vec3 {
+        self.kind
+            .offset_with_cols(index, total, self.columns, spacing)
     }
 
     /// Enclosing-square side honoring the column override (Grid only).
-    pub fn slot_extent(&self, total: usize) -> f32 {
-        self.kind.extent_with_cols(total, self.columns)
+    pub fn slot_extent(&self, total: usize, spacing: f32) -> f32 {
+        self.kind.extent_with_cols(total, self.columns, spacing)
     }
 }
 
@@ -207,50 +208,56 @@ impl FormationKind {
 
     /// Side of the square (centered on the formation origin) that encloses
     /// all member slots for this kind and member count.
-    pub fn extent(&self, total: usize) -> f32 {
-        self.extent_with_cols(total, None)
+    pub fn extent(&self, total: usize, spacing: f32) -> f32 {
+        self.extent_with_cols(total, None, spacing)
     }
 
     /// [`extent`](Self::extent) honoring a Grid column override.
-    pub fn extent_with_cols(&self, total: usize, cols: Option<usize>) -> f32 {
-        const S: f32 = FormationKind::SPACING;
+    pub fn extent_with_cols(&self, total: usize, cols: Option<usize>, spacing: f32) -> f32 {
+        let s = spacing;
         if total == 0 {
-            return S;
+            return s;
         }
         let side = match self {
-            FormationKind::Line | FormationKind::Column => (total.saturating_sub(1)) as f32 * S,
+            FormationKind::Line | FormationKind::Column => (total.saturating_sub(1)) as f32 * s,
             FormationKind::Grid => {
                 let cols = self.grid_cols(total, cols);
                 let rows = total.div_ceil(cols);
-                ((cols - 1) as f32 * S).max((rows - 1) as f32 * S)
+                ((cols - 1) as f32 * s).max((rows - 1) as f32 * s)
             }
             FormationKind::Wedge => {
                 // Last (widest) row has `rows` members, rows extend forward.
                 let rows = Self::wedge_rows(total);
-                (rows - 1) as f32 * S
+                (rows - 1) as f32 * s
             }
-            FormationKind::Ring => 2.0 * (total as f32 * S / std::f32::consts::TAU).max(S),
+            FormationKind::Ring => 2.0 * (total as f32 * s / std::f32::consts::TAU).max(s),
         };
-        side.max(S)
+        side.max(s)
     }
 
     /// Desired position of the member with `index` (out of `total` members,
     /// counting both boids and sub-formations) relative to the formation origin.
-    pub fn offset(&self, index: usize, total: usize) -> Vec3 {
-        self.offset_with_cols(index, total, None)
+    pub fn offset(&self, index: usize, total: usize, spacing: f32) -> Vec3 {
+        self.offset_with_cols(index, total, None, spacing)
     }
 
     /// [`offset`](Self::offset) honoring a Grid column override.
-    pub fn offset_with_cols(&self, index: usize, total: usize, cols: Option<usize>) -> Vec3 {
-        const S: f32 = FormationKind::SPACING;
+    pub fn offset_with_cols(
+        &self,
+        index: usize,
+        total: usize,
+        cols: Option<usize>,
+        spacing: f32,
+    ) -> Vec3 {
+        let s = spacing;
         match self {
             FormationKind::Line => {
-                let c = (total.saturating_sub(1)) as f32 * S / 2.0;
-                Vec3::new(index as f32 * S - c, 0.0, 0.0)
+                let c = (total.saturating_sub(1)) as f32 * s / 2.0;
+                Vec3::new(index as f32 * s - c, 0.0, 0.0)
             }
             FormationKind::Column => {
-                let c = (total.saturating_sub(1)) as f32 * S / 2.0;
-                Vec3::new(0.0, 0.0, index as f32 * S - c)
+                let c = (total.saturating_sub(1)) as f32 * s / 2.0;
+                Vec3::new(0.0, 0.0, index as f32 * s - c)
             }
             FormationKind::Grid => {
                 let cols = self.grid_cols(total, cols);
@@ -258,9 +265,9 @@ impl FormationKind {
                 let col = index % cols;
                 let row = index / cols;
                 Vec3::new(
-                    col as f32 * S - (cols - 1) as f32 * S / 2.0,
+                    col as f32 * s - (cols - 1) as f32 * s / 2.0,
                     0.0,
-                    row as f32 * S - (rows - 1) as f32 * S / 2.0,
+                    row as f32 * s - (rows - 1) as f32 * s / 2.0,
                 )
             }
             FormationKind::Wedge => {
@@ -275,13 +282,13 @@ impl FormationKind {
                 let row_len = row + 1;
                 let rows = Self::wedge_rows(total);
                 Vec3::new(
-                    in_row as f32 * S - (row_len - 1) as f32 * S / 2.0,
+                    in_row as f32 * s - (row_len - 1) as f32 * s / 2.0,
                     0.0,
-                    row as f32 * S - (rows - 1) as f32 * S / 2.0,
+                    row as f32 * s - (rows - 1) as f32 * s / 2.0,
                 )
             }
             FormationKind::Ring => {
-                let radius = (total as f32 * S / std::f32::consts::TAU).max(S);
+                let radius = (total as f32 * s / std::f32::consts::TAU).max(s);
                 let angle = index as f32 / total as f32 * std::f32::consts::TAU;
                 Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius)
             }
@@ -322,10 +329,7 @@ impl Default for LODGuard {
 /// of reading a bogus speed. Plain boids have no per-entity speed (yet) and
 /// contribute `MAX_VELOCITY`.
 pub fn init_formation_speed(
-    q_marked: Query<
-        (Entity, Option<&Members>),
-        (With<Formation>, With<NeedsSpeedInit>),
-    >,
+    q_marked: Query<(Entity, Option<&Members>), (With<Formation>, With<NeedsSpeedInit>)>,
     q_details: Query<(&Formation, Option<&NeedsSpeedInit>)>,
     mut commands: Commands,
 ) {
@@ -371,6 +375,7 @@ pub fn init_formation_speed(
 /// it back off. `LODGuard` freezes all of this when propagation is off.
 pub fn propagate_formation_targets(
     lod: Res<LODGuard>,
+    tuning: Res<FormationTuning>,
     mut q_formations: Query<
         (Entity, &mut Formation, Option<&Members>, Option<&Velocity>),
         With<Formation>,
@@ -383,7 +388,7 @@ pub fn propagate_formation_targets(
     }
     for (entity, mut formation, members, velocity) in &mut q_formations {
         let total = members.map_or(0, |m| m.len());
-        formation.extent = formation.slot_extent(total);
+        formation.extent = formation.slot_extent(total, tuning.spacing_m);
 
         // Lowest loaded iff nothing below is simulated or propagates
         // further. Unresolvable members are gone; they simulate nothing.
@@ -467,6 +472,7 @@ pub fn assign_slots(
         ),
         With<Formation>,
     >,
+    tuning: Res<FormationTuning>,
     q_members: Query<(&Transform, Option<&FormationSlot>)>,
     mut commands: Commands,
 ) {
@@ -506,7 +512,7 @@ pub fn assign_slots(
         let rotation = yaw_quat(formation.dir).unwrap_or(Quat::IDENTITY);
         let origin = transform.translation;
         let slot_positions: Vec<Vec3> = (0..total)
-            .map(|i| origin + rotation * formation.slot_offset(i, total))
+            .map(|i| origin + rotation * formation.slot_offset(i, total, tuning.spacing_m))
             .collect();
         let occupant_positions: Vec<(Entity, Vec3)> = occupant_ids
             .iter()
@@ -625,7 +631,11 @@ struct FormationFrame {
 /// remaining distance - members keep formation along the path and are never
 /// asked to cover more than the lead distance. Otherwise the goal is the
 /// center of mass itself (hold).
-fn plan_goal(frame: &FormationFrame, simulated_positions: &[Vec3]) -> Option<FormationGoal> {
+fn plan_goal(
+    frame: &FormationFrame,
+    simulated_positions: &[Vec3],
+    tuning: &FormationTuning,
+) -> Option<FormationGoal> {
     let com = if frame.self_simulated {
         frame.own_pos
     } else {
@@ -639,7 +649,9 @@ fn plan_goal(frame: &FormationFrame, simulated_positions: &[Vec3]) -> Option<For
         Some(FormationOrder::Move { pos, facing_dir }) => {
             let to_target = pos - com;
             let distance = to_target.length();
-            let lead = (frame.max_speed * LEAD_TIME).max(MIN_LEAD).min(distance);
+            let lead = (frame.max_speed * tuning.lead_time_sec)
+                .max(tuning.min_lead_m())
+                .min(distance);
             let goal = if distance > 1e-4 {
                 com + to_target * (lead / distance)
             } else {
@@ -679,6 +691,7 @@ pub fn plan_formation_goals(
     >,
     q_simulated: Query<(&Transform, &Velocity)>,
     mut commands: Commands,
+    tuning: Res<FormationTuning>,
 ) {
     for (entity, transform, formation, members, velocity, mut goal) in &mut q_formations {
         let frame = FormationFrame {
@@ -690,7 +703,10 @@ pub fn plan_formation_goals(
         let simulated_positions: Vec<Vec3> = occupants(members)
             .filter_map(|m| q_simulated.get(m).ok().map(|(t, _)| t.translation))
             .collect();
-        match (plan_goal(&frame, &simulated_positions), goal.as_deref_mut()) {
+        match (
+            plan_goal(&frame, &simulated_positions, &tuning),
+            goal.as_deref_mut(),
+        ) {
             (Some(plan), Some(goal)) => *goal = plan,
             (Some(plan), None) => {
                 commands.entity(entity).insert(plan);
@@ -711,6 +727,36 @@ pub const MIN_LEAD: f32 = 2.0 * FormationKind::SPACING;
 
 /// Center-of-mass arrival tolerance for [`FormationOrder::Move`].
 pub const ARRIVE_TOLERANCE: f32 = 2.0;
+
+/// Runtime-tunable formation geometry; exposed as sliders by the debug UI.
+/// Defaults mirror the consts (which stay authoritative for docs and
+/// `Formation::default`).
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct FormationTuning {
+    /// Spacing between neighbouring slots, metres (`FormationKind::SPACING`).
+    pub spacing_m: f32,
+    /// Lead distance multiplier, seconds of slowest member speed (`LEAD_TIME`).
+    pub lead_time_sec: f32,
+    /// Center-of-mass arrival tolerance for `Move`, metres (`ARRIVE_TOLERANCE`).
+    pub arrive_tolerance_m: f32,
+}
+
+impl Default for FormationTuning {
+    fn default() -> Self {
+        Self {
+            spacing_m: FormationKind::SPACING,
+            lead_time_sec: LEAD_TIME,
+            arrive_tolerance_m: ARRIVE_TOLERANCE,
+        }
+    }
+}
+
+impl FormationTuning {
+    /// [`MIN_LEAD`] at the current spacing: see the const's docs.
+    pub fn min_lead_m(&self) -> f32 {
+        2.0 * self.spacing_m
+    }
+}
 
 /// Dispatch half of the executor: consumes [`FormationGoal`] and steers
 /// everything the formation commands, one formation at a time.
@@ -748,6 +794,8 @@ pub fn dispatch_formation_goals(
     )>,
     mut commands: Commands,
     mut gizmos: Gizmos,
+    tuning: Res<FormationTuning>,
+    debug: Res<crate::debug_ui::DebugConfig>,
 ) {
     for (entity, mut transform, mut formation, goal, members, velocity) in &mut q_formations {
         if velocity.is_none() {
@@ -762,7 +810,7 @@ pub fn dispatch_formation_goals(
             transform.rotation = desired;
         }
         if let Some(pos) = goal.task_pos {
-            if goal.center_of_mass.distance(pos) < ARRIVE_TOLERANCE {
+            if goal.center_of_mass.distance(pos) < tuning.arrive_tolerance_m {
                 formation.tasks.pop_front();
             }
         }
@@ -785,7 +833,8 @@ pub fn dispatch_formation_goals(
                 // Slot identity with list-order fallback before the first
                 // assignment.
                 let slot = slot.map(|s| s.0).unwrap_or(i);
-                let pos = goal.goal + rotation * formation.slot_offset(slot, total);
+                let pos =
+                    goal.goal + rotation * formation.slot_offset(slot, total, tuning.spacing_m);
                 if is_formation {
                     // Sub-formation: commanded through its task queue. Inject
                     // only while an order is active - a holding parent leaves
@@ -814,11 +863,13 @@ pub fn dispatch_formation_goals(
             }
         }
         // Debug: center of mass -> goal, and goal -> final task target.
-        gizmos.line(goal.center_of_mass, goal.goal, Color::srgb(0.2, 0.6, 1.0));
-        if let Some(pos) = goal.task_pos {
-            let lifted = pos + Vec3::new(0.0, 0.2, 0.0);
-            if goal.goal.distance(lifted) > 1e-3 {
-                gizmos.line(goal.goal, lifted, Color::srgb(0.5, 0.5, 0.5));
+        if debug.show_formation_goals {
+            gizmos.line(goal.center_of_mass, goal.goal, Color::srgb(0.2, 0.6, 1.0));
+            if let Some(pos) = goal.task_pos {
+                let lifted = pos + Vec3::new(0.0, 0.2, 0.0);
+                if goal.goal.distance(lifted) > 1e-3 {
+                    gizmos.line(goal.goal, lifted, Color::srgb(0.5, 0.5, 0.5));
+                }
             }
         }
     }
@@ -849,6 +900,9 @@ mod tests {
                 1.0 / 60.0,
             )))
             .init_resource::<LODGuard>()
+            .init_resource::<FormationTuning>()
+            .init_resource::<crate::kinematics::KinematicsTuning>()
+            .init_resource::<crate::debug_ui::DebugConfig>()
             .init_resource::<GizmoConfigStore>()
             .init_gizmo_group::<DefaultGizmoConfigGroup>()
             .init_resource::<Assets<GizmoAsset>>()
@@ -884,9 +938,9 @@ mod tests {
         // per update, which accumulates into exactly one FixedUpdate (the
         // timestep matches dt) and republishes the clock as generic Time for
         // the Update systems (move_step).
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f32(dt),
-        ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            dt,
+        )));
         app.update();
     }
 
@@ -932,7 +986,10 @@ mod tests {
             tick(&mut app, 1.0 / 60.0);
             let after = app.world().resource::<Time<Fixed>>().elapsed();
             assert_eq!(after - before, timestep);
-            assert_eq!(app.world().resource::<Time<Fixed>>().overstep(), Duration::ZERO);
+            assert_eq!(
+                app.world().resource::<Time<Fixed>>().overstep(),
+                Duration::ZERO
+            );
         }
     }
 
@@ -1164,7 +1221,6 @@ mod tests {
         assert_eq!(slot(boids[0]), 0, "leftmost boid takes slot 0");
         assert_eq!(slot(boids[1]), 1, "inner boid takes slot 1");
         assert_eq!(slot(sub), 2, "sub-formation is an occupant like any other");
-
     }
 
     #[test]
@@ -1211,7 +1267,11 @@ mod tests {
         let mut app = test_app();
         let formation = spawn_formation(
             &mut app,
-            &[Vec3::new(-2.0, 0.0, 0.0), Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)],
+            &[
+                Vec3::new(-2.0, 0.0, 0.0),
+                Vec3::ZERO,
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
         );
         for _ in 0..10 {
             tick(&mut app, 1.0 / 60.0);
@@ -1268,7 +1328,11 @@ mod tests {
         let mut app = test_app();
         let sub = spawn_formation(
             &mut app,
-            &[Vec3::new(-2.0, 0.0, 0.0), Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0)],
+            &[
+                Vec3::new(-2.0, 0.0, 0.0),
+                Vec3::ZERO,
+                Vec3::new(2.0, 0.0, 0.0),
+            ],
         );
         for _ in 0..10 {
             tick(&mut app, 1.0 / 60.0);
@@ -1334,7 +1398,9 @@ mod tests {
     #[test]
     fn nearest_solver_maps_mirrored_layout_onto_itself() {
         // Slots and members identical: zero movement, identity mapping.
-        let slots: Vec<Vec3> = (0..4).map(|i| Vec3::new(i as f32 * 2.0, 0.0, 0.0)).collect();
+        let slots: Vec<Vec3> = (0..4)
+            .map(|i| Vec3::new(i as f32 * 2.0, 0.0, 0.0))
+            .collect();
         let members: Vec<(Entity, Vec3)> = slots
             .iter()
             .enumerate()
@@ -1347,7 +1413,11 @@ mod tests {
     #[test]
     fn nearest_solver_assigns_distinct_slots_on_collision() {
         // Two members piled on one slot: both must get distinct slots.
-        let slots = vec![Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0)];
+        let slots = vec![
+            Vec3::ZERO,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+        ];
         let members: Vec<(Entity, Vec3)> = [
             Vec3::new(0.1, 0.0, 0.0),
             Vec3::new(-0.1, 0.0, 0.0),
@@ -1370,13 +1440,7 @@ mod tests {
         let cols = (n as f32).sqrt().ceil() as usize;
         let s = FormationKind::SPACING;
         let slots: Vec<Vec3> = (0..n)
-            .map(|i| {
-                Vec3::new(
-                    (i % cols) as f32 * s,
-                    0.0,
-                    (i / cols) as f32 * s,
-                )
-            })
+            .map(|i| Vec3::new((i % cols) as f32 * s, 0.0, (i / cols) as f32 * s))
             .collect();
         // Members jittered around the slots (post-selection blob).
         let members: Vec<(Entity, Vec3)> = slots
@@ -1384,11 +1448,18 @@ mod tests {
             .enumerate()
             .map(|(i, &p)| {
                 let j = |x: f32| x + ((i * 2654435761 % 97) as f32 / 97.0 - 0.5) * 2.0;
-                (Entity::from_raw_u32(i as u32).unwrap(), Vec3::new(j(p.x), 0.0, j(p.z)))
+                (
+                    Entity::from_raw_u32(i as u32).unwrap(),
+                    Vec3::new(j(p.x), 0.0, j(p.z)),
+                )
             })
             .collect();
         let t0 = std::time::Instant::now();
-        let assignment = assign_slots_nearest(Vec3::new(cols as f32 * s / 2.0, 0.0, cols as f32 * s / 2.0), &members, &slots);
+        let assignment = assign_slots_nearest(
+            Vec3::new(cols as f32 * s / 2.0, 0.0, cols as f32 * s / 2.0),
+            &members,
+            &slots,
+        );
         let t1 = std::time::Instant::now();
         let elapsed = t1 - t0;
         let mut seen = std::collections::HashSet::new();
@@ -1414,7 +1485,7 @@ mod tests {
             max_speed: crate::kinematics::MAX_VELOCITY,
         };
         let positions = vec![Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)];
-        let goal = plan_goal(&frame, &positions).unwrap();
+        let goal = plan_goal(&frame, &positions, &FormationTuning::default()).unwrap();
         assert_eq!(goal.center_of_mass, Vec3::ZERO);
         assert_eq!(goal.goal, Vec3::ZERO); // hold: the goal is the COM itself
         assert_eq!(goal.facing, Vec3::ZERO);
@@ -1433,7 +1504,7 @@ mod tests {
             max_speed: 5.0,
         };
         let positions = vec![Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
-        let goal = plan_goal(&frame, &positions).unwrap();
+        let goal = plan_goal(&frame, &positions, &FormationTuning::default()).unwrap();
         // lead = max_speed * LEAD_TIME = 50 < distance 100.
         assert_eq!(goal.goal, Vec3::new(50.0, 0.0, 0.0));
         assert_eq!(goal.facing, Vec3::new(0.0, 0.0, 1.0));
@@ -1449,7 +1520,7 @@ mod tests {
             max_speed: crate::kinematics::MAX_VELOCITY,
         };
         // Abstracted members' positions are irrelevant.
-        let goal = plan_goal(&frame, &[]).unwrap();
+        let goal = plan_goal(&frame, &[], &FormationTuning::default()).unwrap();
         assert_eq!(goal.center_of_mass, Vec3::new(7.0, 0.0, 9.0));
         assert_eq!(goal.goal, Vec3::new(7.0, 0.0, 9.0));
     }
@@ -1462,7 +1533,7 @@ mod tests {
             task: None,
             max_speed: crate::kinematics::MAX_VELOCITY,
         };
-        assert!(plan_goal(&frame, &[]).is_none());
+        assert!(plan_goal(&frame, &[], &FormationTuning::default()).is_none());
     }
 
     #[test]
@@ -1477,7 +1548,7 @@ mod tests {
             max_speed: 0.0, // at rest: lead would be zero without MIN_LEAD
         };
         let positions = vec![Vec3::ZERO];
-        let goal = plan_goal(&frame, &positions).unwrap();
+        let goal = plan_goal(&frame, &positions, &FormationTuning::default()).unwrap();
         assert_eq!(goal.goal, Vec3::new(MIN_LEAD, 0.0, 0.0));
     }
 }

@@ -426,8 +426,9 @@ pub fn stream_terrain_tiles(
         }
     });
 
-    // Spawn new tiles. Ground-marked so bevy_rts_camera raycasts (pan
-    // focus, drag) follow the actual terrain surface.
+    // Spawn new tiles. Camera focus-following samples the HeightField
+    // directly (terrain::camera); the Ground marker remains for drag-pan's
+    // grab-point raycast.
     for (key, stamp) in desired {
         if tiles.tiles.contains_key(&key) {
             continue;
@@ -452,7 +453,7 @@ pub fn stream_terrain_tiles(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{rebuild_height_field, TerrainTuning};
+    use super::super::{TerrainTuning, rebuild_height_field};
     use super::*;
 
     fn flat_field() -> HeightField {
@@ -463,7 +464,11 @@ mod tests {
     fn tile_faces_point_up_and_skirts_outward() {
         // Backface culling uses winding: interior faces must have +y
         // geometric normals, and skirt walls must face away from the tile.
-        let key = TileKey { level: 2, x: -3, z: 7 };
+        let key = TileKey {
+            level: 2,
+            x: -3,
+            z: 7,
+        };
         // Focus on the tile itself: no rim edges, pure interior test.
         let mesh = tile_mesh(&flat_field(), key, IVec2::new(-3, 7), None);
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
@@ -505,9 +510,9 @@ mod tests {
                 indices[tri * 3 + 2] as usize,
             );
             let normal = face_normal(a, b, cc);
-            let face_mid = (Vec3::from(positions[a]) + Vec3::from(positions[b])
-                + Vec3::from(positions[cc]))
-                / 3.0;
+            let face_mid =
+                (Vec3::from(positions[a]) + Vec3::from(positions[b]) + Vec3::from(positions[cc]))
+                    / 3.0;
             assert!(
                 (face_mid - centre).dot(normal) > 0.0,
                 "skirt triangle {tri} faces inward"
@@ -548,9 +553,7 @@ mod tests {
         let before = tile_entities(&app);
         assert!(!before.is_empty(), "no tiles streamed initially");
 
-        app.world_mut()
-            .resource_mut::<TerrainTuning>()
-            .ridge_max_m += 10.0;
+        app.world_mut().resource_mut::<TerrainTuning>().ridge_max_m += 10.0;
         app.update();
         app.update();
 
@@ -564,10 +567,7 @@ mod tests {
     }
 
     fn tile_entities(app: &App) -> Vec<Entity> {
-        app.world()
-            .resource::<TerrainTiles>()
-            .entities()
-            .collect()
+        app.world().resource::<TerrainTiles>().entities().collect()
     }
 
     #[test]
@@ -580,18 +580,13 @@ mod tests {
         let mut covered = 0usize;
         let mut total = 0usize;
         let mut radii: Vec<f32> = (1..24).map(|i| i as f32 * 16.0).collect();
-        radii.extend_from_slice(&[
-            1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 4_000_000.0,
-        ]);
+        radii.extend_from_slice(&[1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 4_000_000.0]);
         for radius in radii {
             for angle in 0..16 {
                 let a = angle as f32 * std::f32::consts::TAU / 16.0;
                 let point = Vec2::new(a.cos(), a.sin()) * radius;
                 total += 1;
-                covered += tiles_covering_point(
-                    desired_set_for_focus(Vec2::ZERO),
-                    point,
-                ) as usize;
+                covered += tiles_covering_point(desired_set_for_focus(Vec2::ZERO), point) as usize;
             }
         }
         assert_eq!(covered, total, "some ring points are not covered");
@@ -600,7 +595,10 @@ mod tests {
     /// The desired-set computation extracted for tests: which tiles would
     /// stream around this focus.
     fn desired_set_for_focus(focus: Vec2) -> Vec<TileKey> {
-        desired_tiles(focus).into_iter().map(|(key, _)| key).collect()
+        desired_tiles(focus)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
     }
 
     fn tiles_covering_point(tiles: Vec<TileKey>, point: Vec2) -> bool {
@@ -634,7 +632,11 @@ mod tests {
         let focus = Vec2::new(64.0, 64.0); // level-0 square: [0, 160]^2
         let (hmin, hmax) = finer_render_square(1, focus);
         // A level-1 tile (128 m) straddling the square's +x edge.
-        let key = TileKey { level: 1, x: 1, z: 1 };
+        let key = TileKey {
+            level: 1,
+            x: 1,
+            z: 1,
+        };
         let with_hole = tile_mesh(&field, key, IVec2::new(1, 1), Some((hmin, hmax)));
         let without_hole = tile_mesh(&field, key, IVec2::new(1, 1), None);
         let quad_count = |mesh: &Mesh| mesh.indices().expect("indices").len() as usize;
@@ -729,7 +731,11 @@ mod tests {
         // a stitched rim vertex must sit on the chord, an interior one on
         // the field itself (minus their respective drops).
         let field = HeightField::from_fn(|_, z| 0.001 * z * z);
-        let key = TileKey { level: 0, x: 2, z: 0 }; // +x rim of the focus ring
+        let key = TileKey {
+            level: 0,
+            x: 2,
+            z: 0,
+        }; // +x rim of the focus ring
         let mesh = tile_mesh(&field, key, IVec2::ZERO, None);
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
             VertexAttributeValues::Float32x3(p) => p.clone(),
@@ -753,8 +759,7 @@ mod tests {
                 let t = (z - z0) / parent_cell;
                 let h0 = 0.001 * z0 * z0;
                 let h1 = 0.001 * (z0 + parent_cell) * (z0 + parent_cell);
-                h0 + (h1 - h0) * t - level_drop(1)
-                    - parent_cell * STITCH_BIAS_CELL_FRACTION
+                h0 + (h1 - h0) * t - level_drop(1) - parent_cell * STITCH_BIAS_CELL_FRACTION
             };
             assert!(
                 (vertex_y(TILE_QUADS, iz) - expected).abs() < 1e-4,
@@ -805,8 +810,26 @@ mod tests {
         // edge of two adjacent tiles must carry identical normals — this
         // is what kills the per-tile lighting grid.
         let field = HeightField::default();
-        let a = tile_mesh(&field, TileKey { level: 0, x: 0, z: 0 }, IVec2::ZERO, None);
-        let b = tile_mesh(&field, TileKey { level: 0, x: 1, z: 0 }, IVec2::ZERO, None);
+        let a = tile_mesh(
+            &field,
+            TileKey {
+                level: 0,
+                x: 0,
+                z: 0,
+            },
+            IVec2::ZERO,
+            None,
+        );
+        let b = tile_mesh(
+            &field,
+            TileKey {
+                level: 0,
+                x: 1,
+                z: 0,
+            },
+            IVec2::ZERO,
+            None,
+        );
         let normals = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_NORMAL).expect("normals") {
             VertexAttributeValues::Float32x3(n) => n.clone(),
             _ => panic!("unexpected normal format"),

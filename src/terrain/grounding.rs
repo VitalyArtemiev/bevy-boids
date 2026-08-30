@@ -37,16 +37,18 @@ pub fn ground_boids(
     mut query: Query<(&Transform, &mut GroundY, &mut Velocity), With<Boid>>,
     field: Res<HeightField>,
 ) {
-    query.par_iter_mut().for_each(|(transform, mut ground, mut vel)| {
-        let t = transform.translation;
-        let col = (t.x.floor() as i32, t.z.floor() as i32);
-        if col != ground.col {
-            ground.surface = field.height(t.x, t.z);
-            ground.col = col;
-        }
-        vel.v.y = 0.0;
-        vel.a.y = 0.0;
-    });
+    query
+        .par_iter_mut()
+        .for_each(|(transform, mut ground, mut vel)| {
+            let t = transform.translation;
+            let col = (t.x.floor() as i32, t.z.floor() as i32);
+            if col != ground.col {
+                ground.surface = field.height(t.x, t.z);
+                ground.col = col;
+            }
+            vel.v.y = 0.0;
+            vel.a.y = 0.0;
+        });
 }
 
 /// Clear every boid's cached column after the height field changed (tuning

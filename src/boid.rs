@@ -66,11 +66,40 @@ impl BoidBundle {
 
 const INTERACTION_RADIUS: f32 = 1.0;
 const REPEL_COEF: f32 = 0.05;
-const MAX_REPEL_ACCELERATION: f32 = MAX_ACCELERATION * 0.5;
+
+/// Runtime-tunable separation/bob parameters; defaults mirror the consts
+/// above, which stay authoritative for comments and docs.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct BoidTuning {
+    /// Fraction of current acceleration reused as the repulsion cap.
+    pub repel_coef: f32,
+    /// Query radius for obstacle (hard) collisions, metres.
+    pub obstacle_interaction_radius_m: f32,
+    /// Idle bob height, metres.
+    pub bob_amplitude_m: f32,
+    /// Bob frequency per m/s of speed.
+    pub bob_freq_coef: f32,
+    /// Floor for the bob frequency, Hz.
+    pub bob_freq_min_hz: f32,
+}
+
+impl Default for BoidTuning {
+    fn default() -> Self {
+        Self {
+            repel_coef: REPEL_COEF,
+            obstacle_interaction_radius_m: OBSTACLE_INTERACTION_RADIUS,
+            bob_amplitude_m: BOB_AMPLITUDE,
+            bob_freq_coef: BOB_FREQ_COEF,
+            bob_freq_min_hz: BOB_FREQ_MIN,
+        }
+    }
+}
 
 pub fn soft_collisions(
     mut query: Query<(Entity, &Transform, &mut Velocity), With<Boid>>,
     tree: Res<NNTree>,
+    kin: Res<KinematicsTuning>,
+    boid: Res<BoidTuning>,
 ) {
     //replace with iter_combinations_mut?
     query
@@ -96,7 +125,8 @@ pub fn soft_collisions(
             //     dir += vec.normalize() / len;
             // }
 
-            let min_a = (vel.a.length() * REPEL_COEF).min(MAX_REPEL_ACCELERATION);
+            // Repulsion can add at most half of MAX_ACCELERATION.
+            let min_a = (vel.a.length() * boid.repel_coef).min(kin.max_acceleration_mpss * 0.5);
 
             // vel.push = (dir).clamp_length_max(min_a);
             vel.a += (dir).clamp_length_max(min_a);
@@ -109,11 +139,12 @@ pub fn hard_collisions(
     mut q_boids: Query<(&Transform, &mut Velocity), With<Boid>>,
     q_walls: Query<(&Obstacle, &Transform), With<HardCollision>>,
     tree: Res<NNTree>,
+    tuning: Res<BoidTuning>,
 ) {
     // Find wall. Find all ents near wall. Remove vel along normal.
     q_walls.iter().for_each(|(obstacle, transform)| {
         for (_other, entity) in
-            tree.within_distance(transform.translation, OBSTACLE_INTERACTION_RADIUS)
+            tree.within_distance(transform.translation, tuning.obstacle_interaction_radius_m)
         {
             if let Ok((_transform, mut velocity)) = q_boids.get_mut(entity.unwrap()) {
                 let p_v = velocity.v.project_onto(obstacle.normal);
@@ -142,12 +173,14 @@ const BOID_HALF_HEIGHT: f32 = 0.5;
 pub fn bob(
     mut q_boids: Query<(&mut Transform, &Velocity, &Bob, &GroundY), With<Boid>>,
     time: Res<Time>,
+    tuning: Res<BoidTuning>,
 ) {
     for (mut transform, vel, bob, ground) in &mut q_boids {
-        let freq = (vel.v.length() * BOB_FREQ_COEF).clamp(BOB_FREQ_MIN, BOB_FREQ_MIN * 4.);
+        let freq = (vel.v.length() * tuning.bob_freq_coef)
+            .clamp(tuning.bob_freq_min_hz, tuning.bob_freq_min_hz * 4.);
         let time_elapsed = time.elapsed_secs();
         transform.translation.y = ground.surface
             + BOID_HALF_HEIGHT
-            + BOB_AMPLITUDE * f32::sin(freq * (bob.offset + time_elapsed))
+            + tuning.bob_amplitude_m * f32::sin(freq * (bob.offset + time_elapsed))
     }
 }

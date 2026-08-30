@@ -143,52 +143,56 @@ fn terrain_tuning_ui(
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
-    egui::Window::new("Terrain tuning").open(&mut *shown).show(ctx, |ui| {
-        let tuning: &mut TerrainTuning = &mut *tuning;
-        ui.label("World regenerates live while you drag.");
-        ui.add_space(6.0);
+    egui::Window::new("Terrain tuning")
+        .open(&mut *shown)
+        .show(ctx, |ui| {
+            let tuning: &mut TerrainTuning = &mut *tuning;
+            ui.label("World regenerates live while you drag.");
+            ui.add_space(6.0);
 
-        ui.heading("Seed");
-        ui.add(egui::DragValue::new(&mut tuning.seed).speed(1));
+            ui.heading("Seed");
+            ui.add(egui::DragValue::new(&mut tuning.seed).speed(1));
 
-        ui.heading("Base (rolling hills)");
-        amplitude_wavelength(
-            ui,
-            &mut tuning.base_amplitude_m,
-            &mut tuning.base_wavelength_m,
-            60.0,
-            2000.0,
-        );
+            ui.heading("Base (rolling hills)");
+            amplitude_wavelength(
+                ui,
+                &mut tuning.base_amplitude_m,
+                &mut tuning.base_wavelength_m,
+                60.0,
+                2000.0,
+            );
 
-        ui.heading("Mountains");
-        ui.add(egui::Slider::new(&mut tuning.ridge_max_m, 0.0..=150.0).text("ridge height (m)"));
-        ui.add(
-            egui::Slider::new(&mut tuning.ridge_wavelength_m, 100.0..=3000.0)
-                .text("ridge wavelength (m)"),
-        );
-        ui.add(
-            egui::Slider::new(&mut tuning.mask_wavelength_m, 200.0..=5000.0)
-                .text("range spacing (m)"),
-        );
+            ui.heading("Mountains");
+            ui.add(
+                egui::Slider::new(&mut tuning.ridge_max_m, 0.0..=150.0).text("ridge height (m)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut tuning.ridge_wavelength_m, 100.0..=3000.0)
+                    .text("ridge wavelength (m)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut tuning.mask_wavelength_m, 200.0..=5000.0)
+                    .text("range spacing (m)"),
+            );
 
-        ui.heading("Domain warp (meander)");
-        amplitude_wavelength(
-            ui,
-            &mut tuning.warp_amplitude_m,
-            &mut tuning.warp_wavelength_m,
-            500.0,
-            3000.0,
-        );
+            ui.heading("Domain warp (meander)");
+            amplitude_wavelength(
+                ui,
+                &mut tuning.warp_amplitude_m,
+                &mut tuning.warp_wavelength_m,
+                500.0,
+                3000.0,
+            );
 
-        ui.heading("Detail (surface texture)");
-        amplitude_wavelength(
-            ui,
-            &mut tuning.detail_amplitude_m,
-            &mut tuning.detail_wavelength_m,
-            5.0,
-            200.0,
-        );
-    });
+            ui.heading("Detail (surface texture)");
+            amplitude_wavelength(
+                ui,
+                &mut tuning.detail_amplitude_m,
+                &mut tuning.detail_wavelength_m,
+                5.0,
+                200.0,
+            );
+        });
     Ok(())
 }
 
@@ -201,9 +205,7 @@ fn amplitude_wavelength(
     wavelength_max: f32,
 ) {
     ui.add(egui::Slider::new(amplitude, 0.0..=amplitude_max).text("amplitude (m)"));
-    ui.add(
-        egui::Slider::new(wavelength, 10.0..=wavelength_max).text("wavelength (m)"),
-    );
+    ui.add(egui::Slider::new(wavelength, 10.0..=wavelength_max).text("wavelength (m)"));
 }
 
 /// Escape toggles between playing and paused.

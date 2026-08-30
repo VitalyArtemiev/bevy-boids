@@ -2,6 +2,7 @@
 
 use super::HeightField;
 use bevy::prelude::*;
+use bevy_rts_camera::RtsCamera;
 
 /// Minimum altitude kept between the camera and the highest terrain within
 /// `CAMERA_CLEARANCE_RADIUS_M` of its XZ position.
@@ -25,13 +26,27 @@ pub struct CameraClearance {
     offset: f32,
 }
 
-/// Keep the RTS camera above the terrain. bevy_rts_camera terrain-follows
-/// only the *focus* point (`follow_ground`), so zooming in on a mountain
-/// lowers the camera body into the peak and surrounding slopes. Sample
-/// the highest field height in a small disc around the camera's XZ
-/// position and keep the camera above it. Runs after
-/// `RtsCameraSystemSet`; only the height is touched — the plugin owns XZ
-/// and rotation.
+/// Terrain-follow the camera focus with one analytic height sample.
+///
+/// The stock crate `follow_ground` raycast every `Ground`-marked mesh, but
+/// `MeshRayCast` AABB-culls the whole mesh world first — ~5 ms/frame with
+/// 10k boid meshes, every frame, even with a still camera. The heightfield
+/// is the authoritative terrain anyway, so sample it directly. Runs before
+/// `RtsCameraSystemSet`: the plugin's smoothing then eases `focus` onto the
+/// new focus height.
+pub fn focus_camera_on_ground(mut cameras: Query<&mut RtsCamera>, field: Res<HeightField>) {
+    for mut camera in &mut cameras {
+        let focus = camera.target_focus.translation;
+        camera.target_focus.translation.y = field.height(focus.x, focus.z);
+    }
+}
+
+/// Keep the RTS camera above the terrain. Focus-following (above) tracks
+/// only the *focus* point, so zooming in on a mountain still lowers the
+/// camera body into the peak and surrounding slopes. Sample the highest
+/// field height in a small disc around the camera's XZ position and keep
+/// the camera above it. Runs after `RtsCameraSystemSet`; only the height
+/// is touched — the plugin owns XZ and rotation.
 pub fn camera_terrain_clearance(
     mut cameras: Query<(&mut Transform, &mut CameraClearance), With<Camera3d>>,
     field: Res<HeightField>,
@@ -49,8 +64,7 @@ pub fn camera_terrain_clearance(
                 if (dx * dx + dz * dz) as f32 > CAMERA_CLEARANCE_RADIUS_M.powi(2) {
                     continue;
                 }
-                max_surface =
-                    max_surface.max(field.height((cx + dx) as f32, (cz + dz) as f32));
+                max_surface = max_surface.max(field.height((cx + dx) as f32, (cz + dz) as f32));
             }
         }
 
@@ -61,7 +75,7 @@ pub fn camera_terrain_clearance(
         } else {
             clearance.offset = (clearance.offset
                 - CAMERA_CLEARANCE_RELAX_M_PER_SEC * time.delta_secs())
-                .max(needed);
+            .max(needed);
         }
         if clearance.offset > 0.0 {
             transform.translation.y = pos.y + clearance.offset;
@@ -97,11 +111,32 @@ mod tests {
     }
 
     fn camera_y(app: &App, camera: Entity) -> f32 {
-        app.world()
-            .get::<Transform>(camera)
+        app.world().get::<Transform>(camera).unwrap().translation.y
+    }
+
+    #[test]
+    fn camera_focus_samples_the_field_at_its_own_xz() {
+        let mut app = App::new();
+        app.insert_resource(HeightField::from_fn(|x, z| 10.0 + x + 2.0 * z))
+            .add_systems(Update, focus_camera_on_ground);
+        let camera = app
+            .world_mut()
+            .spawn(RtsCamera {
+                target_focus: Transform::from_translation(Vec3::new(3.0, 999.0, -4.0)),
+                ..default()
+            })
+            .id();
+        app.update();
+
+        let focus = app
+            .world()
+            .get::<RtsCamera>(camera)
             .unwrap()
-            .translation
-            .y
+            .target_focus
+            .translation;
+        assert_eq!(focus.x, 3.0);
+        assert_eq!(focus.z, -4.0);
+        assert_eq!(focus.y, 5.0);
     }
 
     #[test]

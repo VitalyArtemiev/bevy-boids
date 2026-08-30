@@ -3,6 +3,7 @@ mod debug_ui;
 mod formations;
 mod horse;
 mod kinematics;
+mod launch;
 mod player;
 mod resources;
 mod sky;
@@ -18,36 +19,45 @@ use crate::formations::{
     plan_formation_goals, propagate_formation_targets, transition_formation_orders,
 };
 use crate::kinematics::*;
+use crate::launch::{BenchPlugin, LaunchConfig, launch_terrain_enabled, parse_launch_args};
 use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
     height_scaled_zoom, mouse_click_system, quick_group_system, selection_indicator_face,
 };
 use crate::resources::{Materials, Meshes};
-use crate::sky::SkyPlugin;
+use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
     CameraClearance, HeightField, ObstacleBundle, TerrainTiles, TerrainTuning,
-    camera_terrain_clearance, ground_boids, project_obstacles_onto_field, rebuild_height_field,
-    reset_ground_caches, stream_terrain_tiles,
+    camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
+    rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
 };
 use crate::ui::{GameState, UiPlugin};
-use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
-use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
-use bevy::pbr::AtmosphereSettings;
-use bevy::post_process::bloom::Bloom;
 use bevy::asset::RenderAssetUsages;
 use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
+use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
 use bevy::math::bounding::Aabb2d;
+use bevy::pbr::AtmosphereSettings;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
+use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin, RtsCameraSystemSet};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use rand::Rng;
 use std::time::Duration;
 
 fn main() {
+    let launch = match parse_launch_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Ok(launch) => launch,
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
+    };
+
     let mut wgpu_settings = WgpuSettings::default();
     // Browsers have no Vulkan; let wgpu pick (WebGL2/WebGPU) on wasm
     #[cfg(not(target_arch = "wasm32"))]
@@ -62,6 +72,11 @@ fn main() {
         .init_resource::<LODGuard>()
         .init_resource::<HeightField>()
         .init_resource::<TerrainTiles>()
+        .insert_resource(launch)
+        .insert_resource(SkyTuning {
+            shadows: launch.shadows,
+            ..default()
+        })
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -73,15 +88,14 @@ fn main() {
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)
+        // No-op without --bench; skips the main menu when enabled.
+        .add_plugins(BenchPlugin(launch.bench))
         .add_plugins(DebugUiPlugin)
         // Runtime-tunable values exposed by the debug panel (F1).
         .init_resource::<KinematicsTuning>()
         .init_resource::<BoidTuning>()
         .init_resource::<FormationTuning>()
         .init_resource::<TerrainTuning>()
-        // The atmosphere's environment-map light is the ambient source; the
-        // flat default ambient would wash it out.
-        .insert_resource(GlobalAmbientLight::NONE)
         .insert_resource(ClearColor(Color::srgb(0.38, 0.62, 0.86)))
         .init_resource::<SelectionGizmo>()
         .init_resource::<FormationSelectionGizmo>()
@@ -104,17 +118,17 @@ fn main() {
                 mouse_click_system.run_if(not(egui_wants_any_pointer_input)),
                 quick_group_system.run_if(not(egui_wants_any_keyboard_input)),
                 frontage_position_system.run_if(
-                    not(egui_wants_any_pointer_input)
-                        .and_then(not(egui_wants_any_keyboard_input)),
+                    not(egui_wants_any_pointer_input).and_then(not(egui_wants_any_keyboard_input)),
                 ),
                 height_scaled_zoom.run_if(not(egui_wants_any_pointer_input)),
                 selection_indicator_face,
                 // Tuning edits cascade: new field -> rebuilt tiles, reset
                 // grounding caches, re-seated obstacles.
                 rebuild_height_field.before(stream_terrain_tiles),
-                stream_terrain_tiles,
+                stream_terrain_tiles.run_if(launch_terrain_enabled),
                 reset_ground_caches.after(rebuild_height_field),
                 project_obstacles_onto_field.after(rebuild_height_field),
+                focus_camera_on_ground.before(RtsCameraSystemSet),
                 camera_terrain_clearance.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
             )
@@ -192,6 +206,8 @@ fn setup(
     mut mesh_list: ResMut<Meshes>,
     mut mat_list: ResMut<Materials>,
     field: Res<HeightField>,
+    launch: Res<LaunchConfig>,
+    mut ambient_light: ResMut<GlobalAmbientLight>,
     mut gizmo_store: ResMut<GizmoConfigStore>,
 ) {
     // Debug gizmos (cursor, selection box, frontage line) must read through
@@ -210,20 +226,24 @@ fn setup(
     mesh_list.cube = meshes.add(Cuboid::default());
     mesh_list.capsule = meshes.add(Capsule3d::default());
 
-    for i in 1..100 {
+    // `--boids` works in normal launches too; the default is the full
+    // historical 99x99 grid.
+    let boid_budget = launch.boids;
+    let mut boids_spawned = 0;
+    'grid: for i in 1..100 {
         for j in 1..100 {
-            let mut ent = commands
-                .spawn(BoidBundle::with_target(
-                    Target {
-                        pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
-                        dir: Default::default(),
-                    },
-                    mesh_list.capsule.clone(),
-                    mat_list.debug_material.clone(),
-                ))
-                .id();
-
-            // commands.entity(ent).insert(NoAutomaticBatching{});
+            if boids_spawned >= boid_budget {
+                break 'grid;
+            }
+            boids_spawned += 1;
+            commands.spawn(BoidBundle::with_target(
+                Target {
+                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
+                    dir: Default::default(),
+                },
+                mesh_list.capsule.clone(),
+                mat_list.debug_material.clone(),
+            ));
         }
     }
 
@@ -245,59 +265,93 @@ fn setup(
             .id();
     }
 
-    commands.spawn((
-        Camera3d::default(),
-        // Smoothed terrain-clearance lift state (see camera_terrain_clearance).
-        CameraClearance::default(),
-        Projection::Perspective(PerspectiveProjection {
-            far: CAMERA_FAR_PLANE_M,
-            ..default()
-        }),
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            // Smoothed terrain-clearance lift state (see camera_terrain_clearance).
+            CameraClearance::default(),
+            Projection::Perspective(PerspectiveProjection {
+                far: CAMERA_FAR_PLANE_M,
+                ..default()
+            }),
+            RtsCamera {
+                // 30 km ceiling: regional view over the LOD tiles (which
+                // cover a continent). height_scaled_zoom keeps
+                // low-altitude zooming at the legacy feel and accelerates
+                // with altitude.
+                bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(2_000_000.0, 2_000_000.0)),
+                height_min: 2.0,
+                height_max: 30_000.0,
+                angle: 20.0f32.to_radians(),
+                target_angle: 20.0f32.to_radians(),
+                min_angle: 20.0f32.to_radians(),
+                dynamic_angle: true,
+                smoothness: 0.3,
+                focus: Transform::IDENTITY,
+                target_focus: Transform::IDENTITY,
+                zoom: 0.0,
+                target_zoom: 0.0,
+                snap: false,
+            },
+            RtsCameraControls {
+                key_up: KeyCode::KeyW,
+                key_down: KeyCode::KeyS,
+                key_left: KeyCode::KeyA,
+                key_right: KeyCode::KeyD,
+                button_rotate: MouseButton::Middle,
+                key_rotate_left: KeyCode::KeyQ,
+                key_rotate_right: KeyCode::KeyE,
+                key_rotate_speed: 0.5,
+                lock_on_rotate: false,
+                // RMB is camera drag-pan when nothing is selected;
+                // frontage_position_system disables it while a selection
+                // exists.
+                button_drag: Option::from(MouseButton::Right),
+                lock_on_drag: false,
+                edge_pan_width: 0.00,
+                edge_pan_restrict_to_viewport: false,
+                pan_speed: 15.0,
+                // Neutralized: zoom input is ours (height_scaled_zoom),
+                // whose step is anchored in height metres and grows with
+                // altitude.
+                zoom_sensitivity: 0.0,
+                enabled: true,
+            },
+        ))
+        .id();
+
+    // Atmosphere is opt-in for now: Bevy 0.19 refilters its environment-map
+    // cubemap every frame, and the caching/on-demand fix is still open
+    // upstream. `--atmosphere` and `--env-map` work in normal launches too;
+    // the bench just inherits the same configuration.
+    let environment_map = launch.atmosphere && launch.environment_map;
+    if launch.atmosphere {
         // Enables atmosphere rendering for this view; requires HDR.
-        AtmosphereSettings::default(),
-        // Sky-driven ambient and reflections (GlobalAmbientLight is NONE).
-        AtmosphereEnvironmentMapLight::default(),
-        // Makes the SunDisk glow.
-        Bloom::default(),
-        RtsCamera {
-            // 30 km ceiling: regional view over the LOD tiles (which cover
-            // a continent). height_scaled_zoom keeps low-altitude zooming
-            // at the legacy feel and accelerates with altitude.
-            bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(2_000_000.0, 2_000_000.0)),
-            height_min: 2.0,
-            height_max: 30_000.0,
-            angle: 20.0f32.to_radians(),
-            target_angle: 20.0f32.to_radians(),
-            min_angle: 20.0f32.to_radians(),
-            dynamic_angle: true,
-            smoothness: 0.3,
-            focus: Transform::IDENTITY,
-            target_focus: Transform::IDENTITY,
-            zoom: 0.0,
-            target_zoom: 0.0,
-            snap: false,
-        },
-        RtsCameraControls {
-            key_up: KeyCode::KeyW,
-            key_down: KeyCode::KeyS,
-            key_left: KeyCode::KeyA,
-            key_right: KeyCode::KeyD,
-            button_rotate: MouseButton::Middle,
-            key_rotate_left: KeyCode::KeyQ,
-            key_rotate_right: KeyCode::KeyE,
-            key_rotate_speed: 0.5,
-            lock_on_rotate: false,
-            // RMB is camera drag-pan when nothing is selected;
-            // frontage_position_system disables it while a selection exists.
-            button_drag: Option::from(MouseButton::Right),
-            lock_on_drag: false,
-            edge_pan_width: 0.00,
-            edge_pan_restrict_to_viewport: false,
-            pan_speed: 15.0,
-            // Neutralized: zoom input is ours (height_scaled_zoom), whose
-            // step is anchored in height metres and grows with altitude.
-            zoom_sensitivity: 0.0,
-            enabled: true,
-        },
-    ));
+        commands
+            .entity(camera)
+            .insert(AtmosphereSettings::default());
+    }
+    if environment_map {
+        // Sky-driven ambient and reflections. Bevy re-renders and refilters
+        // this cubemap every frame; 128 px matches upstream's new default
+        // (bevyengine/bevy#24738).
+        commands
+            .entity(camera)
+            .insert(AtmosphereEnvironmentMapLight {
+                size: ENVIRONMENT_MAP_SIZE_PX,
+                ..default()
+            });
+        // The cubemap is the ambient source; the flat ambient would wash it out.
+        *ambient_light = GlobalAmbientLight::NONE;
+    } else {
+        // With the atmosphere probe off, the flat ambient keeps shadowed
+        // terrain readable instead of falling to black (GlobalAmbientLight's
+        // 80 cd/m² default).
+        *ambient_light = GlobalAmbientLight::default();
+    }
+
+    // Makes bright pixels glow; independent of the atmosphere stack.
+    if launch.bloom {
+        commands.entity(camera).insert(Bloom::default());
+    }
 }

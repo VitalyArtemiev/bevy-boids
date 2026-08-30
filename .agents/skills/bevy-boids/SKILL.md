@@ -61,14 +61,13 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
    `[unstable] codegen-backend = true` (cranelift for `profile.dev`).
    `rust-toolchain.toml` pins nightly and CI sets `RUSTUP_TOOLCHAIN`.
    Don't move the project to stable or reorder profiles.
-2. **Tracy and dynamic linking are native-only.** Native builds enable
-   `dynamic_linking`, `trace`, and `trace_tracy` by default under
-   `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` for a reason:
-   tracy-client-sys cannot build for wasm. The opt-in features are `tracy`
-   (same tracing, for instrumented release builds) and `tracy_mem` (adds
-   `trace_tracy_memory`) — both still pull tracy-client-sys, so neither may
-   ever be enabled for wasm targets. Keep the native/wasm dependency split
-   intact.
+2. **Dynamic linking and tracing are opt-in, native-only conveniences.**
+   No Cargo feature is enabled by default. `dynamic` adds Bevy's dylib for
+   fast iteration; `tracing` adds the base span layer; `chrome`, `tracy`, and
+   `tracy_mem` add tracing sinks. Never enable `dynamic`, `tracy`, or
+   `tracy_mem` for wasm (tracy-client-sys cannot target wasm). `dynamic` is
+   also incompatible with the LTO release profile — release builds stay
+   static by default.
 3. **wasm needs the getrandom backend cfg.** `.cargo/config.toml` sets
    `--cfg getrandom_backend="wasm_js"` for `wasm32-unknown-unknown`, matching
    the `getrandom = { features = ["wasm_js"] }` dep. Removing either breaks
@@ -82,11 +81,17 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
    the `within` branch of `VitalyArtemiev/bevy-spatial`, `kdtree` feature
    only. Selection (`within_rect`) and obstacle queries use its AABB `within`
    API, which upstream lacks. Don't "fix" the manifest back to crates.io.
-6. **wasm-bindgen-cli is version-pinned in CI (0.2.126) to match
+6. **`bevy_rts_camera` is vendored at `vendor/bevy_rts_camera`** (upstream
+   0.14.0 plus one change): the per-frame `follow_ground` mesh raycast is
+   removed because it AABB-culled the whole mesh world (~5 ms/frame with 10k
+   boid meshes). The game sets focus height analytically in
+   `terrain::camera::focus_camera_on_ground`; `Ground` only marks drag-pan
+   grab anchors. Don't swap the manifest back to crates.io.
+7. **wasm-bindgen-cli is version-pinned in CI (0.2.127) to match
    Cargo.lock.** If the lockfile moves wasm-bindgen, update the CI pin in
    `.github/workflows/ci.yaml`. The bindgen output name `bevy_boids`
    (`--out-name`) is referenced by `assets/index.html`.
-7. **Performance is a feature.** The sim aims to run ~200k boids. Never add a
+8. **Performance is a feature.** The sim aims to run ~200k boids. Never add a
    per-frame O(n²) loop over boids — use the kd-tree (`Res<NNTree>`:
    `k_nearest_neighbour`, `within_distance`, `within`) and
    `query.par_iter_mut()` like the existing systems do. There is a test with
@@ -95,12 +100,27 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 ## Commands
 
-- Dev run: `cargo run --features bevy/dynamic_linking` (dynamic linking for faster iteration).
-- Dev run with profiling: `cargo run --features tracy`.
-- Dev run with memory tracing: `cargo run --features tracy_mem`.
+- Static dev run: `cargo run` (the default; also what release uses).
+- Fast iteration dev run: `cargo run --features dynamic` (native only).
+- Base tracing spans: `cargo run --features tracing` (native only).
+- Chrome trace: `cargo run --features chrome` (native only; implies tracing).
+- Tracy: `cargo run --features tracy` (native only; implies tracing).
+- Tracy + memory: `cargo run --features tracy_mem` (native only).
+- Fast iteration with a Tracy sink: `cargo run --features dynamic,tracy`.
 - Profiling: `cargo run --release --features tracy`, connect Tracy.
+- Release run (static LTO, no dev features): `cargo run --release`.
 - Tests: `cargo test`; run perf-budget tests in release for realistic
   timings (`cargo test --release nearest_solver`).
+- Bench: `cargo run -- --bench` (plays 30 s with no main menu, camera
+  pinned at zoom 0.99 ≈ 302 m, logs FPS on exit). Bench-only values:
+  `--secs N`, `--zoom 0..1`. Scenario flags work with or without `--bench`:
+  `--boids N`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
+  `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map` (implies
+  atmosphere), `--bloom|--no-bloom`. Atmosphere is off by default (see
+  `sky.rs`).
+- Chrome trace of the bench (low-overhead: the full unfiltered trace drops
+  the run to ~8 FPS):
+  `RUST_LOG='warn,bevy_boids=trace,bevy_ecs::system::function_system=trace,bevy_ecs::schedule=trace,bevy_app=trace,bevy_render=trace,bevy_time=trace' TRACE_CHROME=trace.json cargo run --features chrome -- --bench --secs 5`
 - Wasm check: `cargo check --target wasm32-unknown-unknown`.
 - Web build (what CI deploys to Pages):
   `cargo build --profile wasm-release --target wasm32-unknown-unknown`, then
@@ -114,13 +134,16 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | Module | Contents |
 | --- | --- |
 | `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/camera/ground; the sun/sky lives in `sky.rs`) |
-| `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob` |
-| `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts, `move_step` integrator, `NNTree`/`TrackedByTree` |
+| `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
+| `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob`, `BoidTuning` |
+| `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts + `KinematicsTuning`, `move_step` integrator, `NNTree`/`TrackedByTree` |
 | `target.rs` | `Target` component, `follow_target` steering |
-| `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, most tests |
+| `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, `FormationTuning`, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
-| `sky.rs` | `SkyPlugin`: atmosphere + directional sun (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`); pure `sun_transform` helper with unit tests |
-| `terrain/` | THE terrain: `HeightField` resource (authoritative height fn, closure-backed), fBm `noise.rs`, streamed heightfield tiles in LOD rings (`tiles.rs`, 1 m cells near camera to 65 km at continental distance, Ground-marked), boid grounding (`grounding.rs`, `GroundY`), camera terrain clearance (`camera.rs`, `CameraClearance`), obstacles |
+| `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); pure `sun_transform` helper with unit tests |
+| `ui.rs` | `UiPlugin`: egui (`bevy_egui`), `GameState { MainMenu, Playing, Paused }`, main/pause menus, pause plumbing (`Time<Virtual>` + camera kill-switch) |
+| `debug_ui.rs` | `DebugUiPlugin`: F1 debug panel — sliders over the `*Tuning` resources, gizmo/LOD/sky toggles, FPS; `DebugConfig` consumed by gizmo systems |
+| `terrain/` | THE terrain: `HeightField` resource (authoritative height fn, closure-backed), fBm `noise.rs`, streamed heightfield tiles in LOD rings (`tiles.rs`, 1 m cells near camera to 65 km at continental distance), boid grounding (`grounding.rs`, `GroundY`), camera focus-follow + terrain clearance (`camera.rs`, `CameraClearance`), obstacles |
 | `resources.rs`, `util.rs` | Shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
 | `horse.rs` | Stub for future cavalry behavior |
 
@@ -128,6 +151,22 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 - Input, selection, camera, and per-frame animation run in `Update`, along
   with the variable-step integrator (`move_step`) and collisions.
+- Camera focus terrain-following is ours, not the crate's:
+  `focus_camera_on_ground` samples `HeightField` before
+  `RtsCameraSystemSet`; `camera_terrain_clearance` lifts the camera body
+  after it.
+- Everything gameplay-facing is gated `run_if(in_state(GameState::Playing))`
+  (see `main.rs`) — sim, input, and the FixedUpdate pipeline all stop in
+  menus. Input systems additionally use
+  `not(egui_wants_any_pointer_input)`/`not(egui_wants_any_keyboard_input)`
+  from `bevy_egui::input` so egui keeps clicks/keys when a panel is open.
+  Menus pause `Time<Virtual>` (via `ui.rs`) so the fixed clock doesn't
+  accumulate a catch-up storm, and disable the camera via
+  `RtsCameraControls.enabled`.
+- All egui systems live in the `EguiPrimaryContextPass` schedule (required
+  by `bevy_egui` 0.42), take `EguiContexts`, and may return `Result`. Panels
+  need a hand-built root `egui::Ui` (see `root_ui` in `ui.rs`); `Window::show`
+  takes the `&Context` directly.
 - The whole formation pipeline runs in `FixedUpdate`, explicitly chained
   (see `main.rs`): `init_formation_speed` → `propagate_formation_targets`
   (LOD `Velocity` state) → `transition_formation_orders` (task state
@@ -208,7 +247,9 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 - Headless `App` harness: `test_app()` in `formations.rs` adds `TimePlugin`
   (the plugin owns the fixed-loop runner), sets `Time::<Fixed>` to the tick
-  dt, and chains the FixedUpdate pipeline; `tick(app, dt)` drives time via
+  dt, inits the tuning resources (`FormationTuning`,
+  `KinematicsTuning`, `DebugConfig` — systems take them as `Res`), and chains
+  the FixedUpdate pipeline; `tick(app, dt)` drives time via
   `TimeUpdateStrategy::ManualDuration` so every tick runs exactly one
   FixedUpdate. Bevy's first `update()` never advances the clocks, so
   `test_app()` burns it before any entities exist — and a self-test
@@ -227,8 +268,12 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 
 - Doc comments on public types/systems explain *why* and the invariants
   (see `Formation`, `dispatch_formation_goals`) — keep that density for new ones.
-- Tuning constants live as module-level `const`s near their system, with
-  units in the name (`MAX_VELOCITY`, `DECELERATION_TIME_SEC`, `LEAD_TIME`).
+- Runtime-tunable values live in `*Tuning` resources (`KinematicsTuning`,
+  `BoidTuning`, `FormationTuning`, `SkyTuning`) next to their systems, with
+  units in field names and `Default`s derived from the module-level `const`s
+  (which stay authoritative for spawn paths and tests). Exposing a value in
+  the F1 debug panel = add the field, read it from the system, add one
+  `Slider::new` line in `debug_ui.rs`. Pure tuning stays as plain consts.
 - Comments recording measurements ("this is slower at 10k", "~7ms in
   release for 10k") are load-bearing — preserve them and add your own when
   you bench.

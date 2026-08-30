@@ -12,7 +12,7 @@ mod grounding;
 mod noise;
 mod tiles;
 
-pub use camera::{CameraClearance, camera_terrain_clearance};
+pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
 pub use noise::{TerrainNoise, TerrainTuning};
 pub use tiles::{TerrainTiles, stream_terrain_tiles};
@@ -67,10 +67,7 @@ impl HeightField {
 /// before `stream_terrain_tiles`, its change tick then cascades: tiles
 /// despawn/respawn from the new field, grounding caches reset, obstacles
 /// re-project.
-pub fn rebuild_height_field(
-    tuning: Res<TerrainTuning>,
-    mut field: ResMut<HeightField>,
-) {
+pub fn rebuild_height_field(tuning: Res<TerrainTuning>, mut field: ResMut<HeightField>) {
     if !tuning.is_changed() {
         return;
     }

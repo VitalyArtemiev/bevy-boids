@@ -1,2 +1,7 @@
 /target
 Cargo.lock
+/trace*.json
+/bench_*.json
+/.zcode/
+/cmd_run.log
+/run.log

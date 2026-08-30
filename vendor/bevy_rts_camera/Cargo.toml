@@ -1,0 +1,25 @@
+[package]
+name = "bevy_rts_camera"
+version = "0.14.0"
+authors = ["Plonq"]
+edition = "2021"
+description = "An RTS-style camera for Bevy"
+keywords = ["gamedev", "bevy", "rts", "camera"]
+categories = ["game-development"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Plonq/bevy_rts_camera"
+homepage = "https://github.com/Plonq/bevy_rts_camera"
+readme = "README.md"
+exclude = ["assets/"]
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_core_pipeline",
+    "bevy_render",
+    "bevy_window",
+    "bevy_picking",
+    "mesh_picking"
+] }
+
+[dev-dependencies]
+bevy = { version = "0.19" }

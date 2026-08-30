@@ -14,7 +14,7 @@ codegen-backend = true
 
 # Windows: force LLVM even where a profile selects cranelift. Cranelift
 # cannot emit dllimport relocations, which linking against bevy_dylib.dll
-# (dynamic_linking) requires on PE/COFF - data statics like log's
+# (--features dynamic) requires on PE/COFF - data statics like log's
 # MAX_LOG_LEVEL_FILTER come out unresolved (LNK2001/LNK1120). ELF needs
 # no dllimport, so Linux keeps cranelift. rustc honors the LAST
 # -Zcodegen-backend flag, and these rustflags come after the
