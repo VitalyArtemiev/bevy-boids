@@ -14,14 +14,15 @@ use bevy::ecs::relationship::RelationshipTarget as _;
 use bevy::ecs::world::DeferredWorld;
 use bevy::gizmos::GizmoAsset;
 use bevy::gizmos::config::GizmoLineConfig;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::math::{Isometry3d, Quat, Ray3d, Vec3};
 use bevy::prelude::{
     Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity,
-    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MouseButton,
-    Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World, default, info,
-    warn,
+    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MessageReader,
+    MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World,
+    default, info, warn,
 };
-use bevy_rts_camera::{Ground, RtsCameraControls};
+use bevy_rts_camera::{Ground, RtsCamera, RtsCameraControls};
 use std::f32::consts::FRAC_PI_2;
 
 #[derive(Resource, Default)]
@@ -586,5 +587,130 @@ pub fn selection_indicator_face(
         if dir.length_squared() > 1e-6 {
             transform.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
         }
+    }
+}
+
+/// Height-scaled zoom input: replaces the plugin's stock zoom (neutralized
+/// by `zoom_sensitivity: 0` on the camera controls).
+///
+/// Stock adds a constant zoom delta per wheel unit, which only felt right
+/// when the whole height range was 300 m; with a 30 km ceiling it would
+/// move the camera 7.5 km per notch near the ground. Instead the step is
+/// defined in HEIGHT space and anchored to the legacy feel:
+///
+/// `step(h) = ZOOM_STEP_M * max(1, h / ZOOM_ANCHOR_M)`
+///
+/// Below the anchor (= the old height ceiling) this is exactly the legacy
+/// ~75 m per wheel unit; above it the step grows linearly with altitude,
+/// so the fraction-of-altitude covered per notch keeps growing smoothly
+/// (constant-ratio "map zoom") instead of saturating. Ground -> 30 km is
+/// about ten notches.
+const ZOOM_ANCHOR_M: f32 = 300.0;
+/// Height change per wheel unit at the anchor height (the legacy feel).
+const ZOOM_STEP_M: f32 = 75.0;
+/// Pixel-unit wheel deltas are scaled down like the plugin does.
+const ZOOM_PIXEL_UNIT_SCALE: f32 = 0.001;
+
+pub fn height_scaled_zoom(
+    mut mouse_wheel: MessageReader<MouseWheel>,
+    mut cam_q: Query<(&mut RtsCamera, &RtsCameraControls)>,
+) {
+    for (mut cam, controls) in cam_q.iter_mut().filter(|(_, c)| c.enabled) {
+        let wheel = mouse_wheel
+            .read()
+            .map(|message| match message.unit {
+                MouseScrollUnit::Line => message.y,
+                MouseScrollUnit::Pixel => message.y * ZOOM_PIXEL_UNIT_SCALE,
+            })
+            .fold(0.0, |acc, val| acc + val);
+        if wheel == 0.0 {
+            continue;
+        }
+        let span = cam.height_max - cam.height_min;
+        // Positive wheel = zoom in = descend.
+        let height = cam.height_max - cam.target_zoom * span;
+        let step = ZOOM_STEP_M * (height / ZOOM_ANCHOR_M).max(1.0);
+        let target_height = (height - wheel * step).clamp(cam.height_min, cam.height_max);
+        cam.target_zoom = (cam.height_max - target_height) / span;
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+    use bevy::app::App;
+    use bevy::input::mouse::MouseScrollUnit;
+    use bevy::input::touch::TouchPhase;
+    use bevy::prelude::Update;
+
+    fn zoom_app(target_zoom: f32) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_message::<MouseWheel>()
+            .add_systems(Update, height_scaled_zoom);
+        let camera = app
+            .world_mut()
+            .spawn((
+                RtsCamera {
+                    height_min: 2.0,
+                    height_max: 30_000.0,
+                    zoom: target_zoom,
+                    target_zoom,
+                    ..Default::default()
+                },
+                RtsCameraControls::default(),
+            ))
+            .id();
+        (app, camera)
+    }
+
+    fn scroll(app: &mut App, y: f32) {
+        app.world_mut().write_message(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y,
+            window: Entity::PLACEHOLDER,
+            phase: TouchPhase::Moved,
+        });
+        app.update();
+    }
+
+    fn target_height(app: &App, camera: Entity) -> f32 {
+        let rts = app.world().get::<RtsCamera>(camera).unwrap();
+        rts.height_max - rts.target_zoom * (rts.height_max - rts.height_min)
+    }
+
+    #[test]
+    fn notch_at_ground_matches_legacy_75m_step() {
+        let (mut app, camera) = zoom_app(1.0); // h = 2 m
+        scroll(&mut app, -1.0);
+        assert!((target_height(&app, camera) - 77.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn step_is_anchored_at_the_legacy_ceiling() {
+        // h = 300 m: legacy step (75 m), same as below the anchor.
+        let (mut app, camera) = zoom_app(29_700.0 / 29_998.0);
+        scroll(&mut app, -1.0);
+        assert!((target_height(&app, camera) - 375.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn step_grows_with_altitude_at_the_top() {
+        // h = 20 km: step = 75 * (20000/300) = 5000 m.
+        let (mut app, camera) = zoom_app(10_000.0 / 29_998.0);
+        scroll(&mut app, -1.0);
+        assert!((target_height(&app, camera) - 25_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn zooming_in_at_the_ceiling_clamps_without_overshoot() {
+        let (mut app, camera) = zoom_app(0.0); // h = 30 km
+        scroll(&mut app, -5.0); // hard zoom out at max altitude
+        assert!((target_height(&app, camera) - 30_000.0).abs() < 1e-3);
+        scroll(&mut app, 20.0); // hard zoom in toward the ground
+        assert!(
+            (target_height(&app, camera) - 2.0).abs() < 1.0,
+            "must clamp at height_min"
+        );
     }
 }

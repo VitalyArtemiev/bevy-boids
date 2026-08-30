@@ -18,7 +18,7 @@ use crate::formations::{
 use crate::kinematics::*;
 use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
-    mouse_click_system, quick_group_system, selection_indicator_face,
+    height_scaled_zoom, mouse_click_system, quick_group_system, selection_indicator_face,
 };
 use crate::resources::{Materials, Meshes};
 use crate::sky::SkyPlugin;
@@ -98,6 +98,7 @@ fn main() {
                     not(egui_wants_any_pointer_input)
                         .and_then(not(egui_wants_any_keyboard_input)),
                 ),
+                height_scaled_zoom.run_if(not(egui_wants_any_pointer_input)),
                 selection_indicator_face,
                 stream_terrain_tiles,
                 camera_terrain_clearance.after(RtsCameraSystemSet),
@@ -136,10 +137,10 @@ struct Container {
 
 const X_EXTENT: f32 = 14.5;
 
-/// Camera draw distance. The default (1000 m) clipped most of the 5 km
-/// ground plane; the atmosphere's aerial perspective needs a few km of
-/// terrain to haze out over.
-const CAMERA_FAR_PLANE_M: f32 = 30_000.0;
+/// Camera draw distance. Sized for the 30 km ceiling: at that altitude the
+/// shallow-angle horizon rays meet ground hundreds of km out, and anything
+/// closer reads as an abrupt void edge over the hazy far terrain.
+const CAMERA_FAR_PLANE_M: f32 = 500_000.0;
 
 fn uv_debug_texture() -> Image {
     const TEXTURE_SIZE: usize = 8;
@@ -245,9 +246,12 @@ fn setup(
         // Makes the SunDisk glow.
         Bloom::default(),
         RtsCamera {
-            bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(10000.0, 10000.0)),
+            // 30 km ceiling: regional view over the LOD tiles (which cover
+            // a continent). height_scaled_zoom keeps low-altitude zooming
+            // at the legacy feel and accelerates with altitude.
+            bounds: Aabb2d::new(Vec2::ZERO, Vec2::new(2_000_000.0, 2_000_000.0)),
             height_min: 2.0,
-            height_max: 300.0,
+            height_max: 30_000.0,
             angle: 20.0f32.to_radians(),
             target_angle: 20.0f32.to_radians(),
             min_angle: 20.0f32.to_radians(),
@@ -276,7 +280,9 @@ fn setup(
             edge_pan_width: 0.00,
             edge_pan_restrict_to_viewport: false,
             pan_speed: 15.0,
-            zoom_sensitivity: 0.5,
+            // Neutralized: zoom input is ours (height_scaled_zoom), whose
+            // step is anchored in height metres and grows with altitude.
+            zoom_sensitivity: 0.0,
             enabled: true,
         },
     ));
