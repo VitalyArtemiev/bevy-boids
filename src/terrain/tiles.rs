@@ -160,11 +160,13 @@ pub(crate) fn tile_mesh(field: &HeightField, key: TileKey, focus_tile: IVec2) ->
     let drop = level_drop(key.level);
     let skirt = (cell * 1.5).max(8.0);
     // Rim edges: the neighbour in that direction lies outside the 5x5
-    // ring, so the adjacent level there is coarser.
-    let rim_x_plus = key.x == focus_tile.x + LEVEL_RING;
-    let rim_x_minus = key.x == focus_tile.x - LEVEL_RING;
-    let rim_z_plus = key.z == focus_tile.y + LEVEL_RING;
-    let rim_z_minus = key.z == focus_tile.y - LEVEL_RING;
+    // ring, so the adjacent level there is coarser. The TOP level's outer
+    // rim borders the void, not a coarser level — nothing to stitch to.
+    let can_stitch = (key.level as usize + 1) < LEVEL_CELL_M.len();
+    let rim_x_plus = can_stitch && key.x == focus_tile.x + LEVEL_RING;
+    let rim_x_minus = can_stitch && key.x == focus_tile.x - LEVEL_RING;
+    let rim_z_plus = can_stitch && key.z == focus_tile.y + LEVEL_RING;
+    let rim_z_minus = can_stitch && key.z == focus_tile.y - LEVEL_RING;
 
     // Interior grid heights, sampled once and reused for positions.
     let mut heights = [[0.0f32; TILE_VERTS]; TILE_VERTS];
@@ -531,6 +533,34 @@ mod tests {
             (vertex_y(16, 16) - centre_expected).abs() < 1e-4,
             "interior vertex must be un-stitched"
         );
+    }
+
+    #[test]
+    fn top_level_rim_does_not_stitch_into_the_void() {
+        // Regression: the top level's outer rim borders no coarser level;
+        // stitching used to index LEVEL_CELL_M[9] and panic at runtime.
+        // Periodic sub-scale heights, because real-amplitude fields at
+        // 2 Mm tile distances exceed f32 vertex precision in the test's
+        // exact-value comparison.
+        let field = HeightField::from_fn(|_, z| 0.001 * (z % 1000.0));
+        let key = TileKey {
+            level: (LEVEL_CELL_M.len() - 1) as u8,
+            x: 2,
+            z: 0,
+        };
+        let mesh = tile_mesh(&field, key, IVec2::ZERO); // must not panic
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
+            VertexAttributeValues::Float32x3(p) => p.clone(),
+            _ => panic!("unexpected position format"),
+        };
+        // Rim vertices stay on the plain field (minus the top level's drop).
+        let drop = level_drop(key.level);
+        let z = 5.0 * LEVEL_CELL_M[8];
+        let expected = 0.001 * (z % 1000.0) - drop;
+        let [_, y, _] = positions[5 * TILE_VERTS + TILE_QUADS] else {
+            unreachable!()
+        };
+        assert!((y - expected).abs() < 1e-2, "{y} != {expected}");
     }
 
     #[test]
