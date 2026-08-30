@@ -22,8 +22,10 @@ use crate::player::{
 use crate::resources::{Materials, Meshes};
 use crate::sky::SkyPlugin;
 use crate::target::{Target, follow_target};
-use crate::terrain::{Obstacle, ObstacleBundle, TerrainBundle};
-use crate::util::*;
+use crate::terrain::{
+    CameraClearance, HeightField, ObstacleBundle, TerrainTiles, camera_terrain_clearance,
+    ground_boids, stream_terrain_tiles,
+};
 use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
 use bevy::pbr::AtmosphereSettings;
 use bevy::post_process::bloom::Bloom;
@@ -33,7 +35,7 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin};
+use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin, RtsCameraSystemSet};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
 use rand::Rng;
 use std::time::Duration;
@@ -51,6 +53,8 @@ fn main() {
         .init_resource::<Meshes>()
         .init_resource::<Player>()
         .init_resource::<LODGuard>()
+        .init_resource::<HeightField>()
+        .init_resource::<TerrainTiles>()
         .add_plugins(
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
@@ -78,12 +82,15 @@ fn main() {
             (
                 soft_collisions,
                 move_step,
+                ground_boids.after(move_step).before(bob),
                 bob,
                 draw_cursor,
                 mouse_click_system,
                 quick_group_system,
                 frontage_position_system,
                 selection_indicator_face,
+                stream_terrain_tiles,
+                camera_terrain_clearance.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
             ),
         )
@@ -157,9 +164,11 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut mesh_list: ResMut<Meshes>,
     mut mat_list: ResMut<Materials>,
+    field: Res<HeightField>,
 ) {
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
+    mat_list.ground = materials.add(StandardMaterial::from_color(Color::srgb(0.38, 0.5, 0.3)));
     mat_list.debug_material = materials.add(StandardMaterial {
         base_color_texture: Some(images.add(uv_debug_texture())),
         ..default()
@@ -189,26 +198,24 @@ fn setup(
         let mut rng = rand::rng();
         let x = rng.random_range(-100.0..100.0);
         let z = rng.random_range(-100.0..100.0);
+        // Obstacles sit on the terrain surface (cube is 1 m, so +0.5 to
+        // its centre).
+        let y = field.height(x, z) + 0.5;
 
         let mut ent = commands
             .spawn(ObstacleBundle::new(
                 mesh_list.cube.clone(),
                 mat_list.black.clone(),
                 Vec3::from_array([1.0, 0.0, 0.0]),
-                Vec3::from_array([x as f32, 1.0, z as f32]),
+                Vec3::from_array([x, y, z]),
             ))
             .id();
     }
 
-    // ground plane
-    commands.spawn(TerrainBundle::default(
-        &mut meshes,
-        &mut images,
-        &mut materials,
-    ));
-
     commands.spawn((
         Camera3d::default(),
+        // Smoothed terrain-clearance lift state (see camera_terrain_clearance).
+        CameraClearance::default(),
         Projection::Perspective(PerspectiveProjection {
             far: CAMERA_FAR_PLANE_M,
             ..default()

@@ -5,6 +5,7 @@ use crate::formations::{
 };
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
+use crate::terrain::HeightField;
 use crate::util::within_rect;
 use bevy::color::palettes::basic::YELLOW;
 use bevy::ecs::component::{Mutable, StorageType};
@@ -13,7 +14,7 @@ use bevy::ecs::relationship::RelationshipTarget as _;
 use bevy::ecs::world::DeferredWorld;
 use bevy::gizmos::GizmoAsset;
 use bevy::gizmos::config::GizmoLineConfig;
-use bevy::math::{Isometry3d, Quat, Vec3};
+use bevy::math::{Isometry3d, Quat, Ray3d, Vec3};
 use bevy::prelude::{
     Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity,
     FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MouseButton,
@@ -149,50 +150,75 @@ impl Component for Selected {
     }
 }
 
+/// March a ray against the height field: exponential steps outward,
+/// bisection refinement at the first surface crossing. ~50 field samples
+/// typical, accurate to well under a metre at any practical range.
+fn march_ray_against_height(field: &HeightField, ray: Ray3d) -> Option<Vec3> {
+    let mut prev_t = 0.0f32;
+    let mut t = 0.5f32;
+    let mut step = 1.0f32;
+    for _ in 0..256 {
+        let p = ray.get_point(t);
+        if p.y <= field.height(p.x, p.z) {
+            // Crossed below the surface: bisect the bracket.
+            let (mut lo, mut hi) = (prev_t, t);
+            for _ in 0..16 {
+                let mid = (lo + hi) / 2.0;
+                let m = ray.get_point(mid);
+                if m.y <= field.height(m.x, m.z) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            return Some(ray.get_point(hi));
+        }
+        prev_t = t;
+        t += step;
+        step *= 1.06;
+        if t > 60_000.0 {
+            return None;
+        }
+    }
+    None
+}
+
 fn get_intersection(
+    field: &HeightField,
     cursor_position: &Vec2,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    ground_transform: &GlobalTransform,
 ) -> Option<Vec3> {
     // Calculate a ray pointing from the camera into the world based on the cursor's position.
     let ray = camera
         .viewport_to_world(camera_transform, *cursor_position)
-        .unwrap();
+        .ok()?;
 
-    // Calculate if and where the ray is hitting the ground plane.
-    let distance = ray.intersect_plane(
-        ground_transform.translation(),
-        InfinitePlane3d { normal: Dir3::Y },
-    )?;
-
-    Some(ray.get_point(distance))
+    march_ray_against_height(field, ray)
 }
 
 pub fn draw_cursor(
     camera_query: Query<(&Camera, &GlobalTransform) /*With<Player>*/>,
-    ground_query: Query<&GlobalTransform, With<Ground>>,
+    field: Res<HeightField>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
 ) {
     match camera_query.single() {
         Ok((camera, camera_transform)) => {
-            let ground = ground_query.single().unwrap();
-
             let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
                 return;
             };
 
-            let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground)
+            let Some(point) = get_intersection(&field, &cursor_position, camera, camera_transform)
             else {
                 return;
             };
 
-            // Draw a circle just above the ground plane at that position,
+            // Draw a circle just above the terrain at that position,
             // rotated to lie flat (circle default normal is +Z, ground is +Y).
             gizmos.circle(
                 Isometry3d::new(
-                    point + ground.up() * 0.01, // Up vector is already normalized.
+                    point + Vec3::Y * 0.01,
                     Quat::from_rotation_x(-FRAC_PI_2),
                 ),
                 0.2,
@@ -205,8 +231,8 @@ pub fn draw_cursor(
 
 pub fn mouse_click_system(
     mut player: ResMut<Player>,
+    field: Res<HeightField>,
     mut q_camera: Query<(&Camera, &GlobalTransform)>,
-    q_ground: Query<&GlobalTransform, With<Ground>>,
     mouse_button_input: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
@@ -216,11 +242,10 @@ pub fn mouse_click_system(
     mut commands: Commands,
 ) {
     let (camera, camera_transform) = q_camera.single_mut().unwrap();
-    let ground = q_ground.single().unwrap();
     let Some(cursor_position) = windows.single().unwrap().cursor_position() else {
         return;
     };
-    let Some(point) = get_intersection(&cursor_position, camera, camera_transform, ground) else {
+    let Some(point) = get_intersection(&field, &cursor_position, camera, camera_transform) else {
         return;
     };
 
@@ -379,8 +404,8 @@ pub fn frontage_position_system(
     mut player: ResMut<Player>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    field: Res<HeightField>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
-    q_ground: Query<&GlobalTransform, With<Ground>>,
     windows: Query<&Window>,
     q_selected_boids: Query<Entity, (With<Selected>, With<Boid>, Without<Formation>)>,
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
@@ -405,13 +430,10 @@ pub fn frontage_position_system(
     let Ok((camera, camera_transform)) = q_camera.single() else {
         return;
     };
-    let Ok(ground) = q_ground.single() else {
-        return;
-    };
     let Some(cursor) = windows.single().ok().and_then(|w| w.cursor_position()) else {
         return;
     };
-    let Some(point) = get_intersection(&cursor, camera, camera_transform, ground) else {
+    let Some(point) = get_intersection(&field, &cursor, camera, camera_transform) else {
         return;
     };
 

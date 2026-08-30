@@ -120,7 +120,8 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
 | `sky.rs` | `SkyPlugin`: atmosphere + directional sun (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`); pure `sun_transform` helper with unit tests |
-| `terrain.rs`, `resources.rs`, `util.rs` | Ground/obstacles; shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
+| `terrain/` | THE terrain: `HeightField` resource (authoritative height fn, closure-backed), fBm `noise.rs`, streamed heightfield tiles in LOD rings (`tiles.rs`, 1 m cells near camera to 65 km at continental distance, Ground-marked), boid grounding (`grounding.rs`, `GroundY`), camera terrain clearance (`camera.rs`, `CameraClearance`), obstacles |
+| `resources.rs`, `util.rs` | Shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
 | `horse.rs` | Stub for future cavalry behavior |
 
 ## Scheduling conventions

@@ -1,7 +1,7 @@
 use crate::kinematics::*;
 use crate::resources::Materials;
 use crate::target::Target;
-use crate::terrain::Obstacle;
+use crate::terrain::{GroundY, Obstacle};
 use bevy::prelude::Bundle;
 use bevy::prelude::*;
 use bevy_spatial::SpatialAccess;
@@ -19,6 +19,7 @@ pub struct BoidBundle {
     mesh: Mesh3d,
     material: MeshMaterial3d<StandardMaterial>,
     bob: Bob,
+    ground: GroundY,
     collision: SoftCollision,
     tracked: TrackedByTree,
 }
@@ -134,11 +135,19 @@ pub struct Bob {
 const BOB_AMPLITUDE: f32 = 0.1;
 const BOB_FREQ_COEF: f32 = 0.15;
 const BOB_FREQ_MIN: f32 = 0.05;
+/// Capsule3d::default() is 1 m tall; its centre rides half a metre above
+/// the terrain surface tracked by GroundY.
+const BOID_HALF_HEIGHT: f32 = 0.5;
 
-pub fn bob(mut q_boids: Query<(&mut Transform, &Velocity, &Bob), With<Boid>>, time: Res<Time>) {
-    for (mut transform, vel, bob) in &mut q_boids {
+pub fn bob(
+    mut q_boids: Query<(&mut Transform, &Velocity, &Bob, &GroundY), With<Boid>>,
+    time: Res<Time>,
+) {
+    for (mut transform, vel, bob, ground) in &mut q_boids {
         let freq = (vel.v.length() * BOB_FREQ_COEF).clamp(BOB_FREQ_MIN, BOB_FREQ_MIN * 4.);
         let time_elapsed = time.elapsed_secs();
-        transform.translation.y = BOB_AMPLITUDE * f32::sin(freq * (bob.offset + time_elapsed))
+        transform.translation.y = ground.surface
+            + BOID_HALF_HEIGHT
+            + BOB_AMPLITUDE * f32::sin(freq * (bob.offset + time_elapsed))
     }
 }

@@ -3,14 +3,6 @@ use bevy::prelude::*;
 use bevy_spatial::kdtree::KDTree3;
 use bevy_spatial::SpatialAABBAccess;
 
-pub trait BundleDefault {
-    fn default(
-        meshes: &mut ResMut<Assets<Mesh>>,
-        images: &mut ResMut<Assets<Image>>,
-        materials: &mut ResMut<Assets<StandardMaterial>>,
-    ) -> Self;
-}
-
 pub fn side(start: Vec3, end: Vec3, query: &Vec3) -> f32 {
     (end.z - start.z) * (query.x - start.x) + (-end.x + start.x) * (query.z - start.z)
 }
