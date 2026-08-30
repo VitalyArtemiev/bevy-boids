@@ -33,6 +33,7 @@ use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
 use bevy::pbr::AtmosphereSettings;
 use bevy::post_process::bloom::Bloom;
 use bevy::asset::RenderAssetUsages;
+use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
 use bevy::math::bounding::Aabb2d;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
@@ -176,7 +177,13 @@ fn setup(
     mut mesh_list: ResMut<Meshes>,
     mut mat_list: ResMut<Materials>,
     field: Res<HeightField>,
+    mut gizmo_store: ResMut<GizmoConfigStore>,
 ) {
+    // Debug gizmos (cursor, selection box, frontage line) must read through
+    // the terrain: pull them to the near plane so hills can't bury them.
+    let (gizmo_config, _) = gizmo_store.config_mut::<DefaultGizmoConfigGroup>();
+    gizmo_config.depth_bias = -1.0;
+
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
     mat_list.ground = materials.add(StandardMaterial::from_color(Color::srgb(0.38, 0.5, 0.3)));

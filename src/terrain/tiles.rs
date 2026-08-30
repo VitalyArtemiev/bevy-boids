@@ -28,10 +28,19 @@ const LEVEL_CELL_M: [f32; 9] = [
 /// Half-extent of a level's rendered square, in multiples of that level's
 /// own tile size: the 5x5 ring around the focus tile.
 const LEVEL_RING: i32 = 2;
-/// Coarser levels sit this fraction of their cell size below the field, so
-/// wherever rings overlap the finer (more accurate) surface wins depth
-/// testing instead of z-fighting.
-const LEVEL_DROP_CELL_FRACTION: f32 = 0.25;
+/// Fraction of the cell size used as the level drop, before the 1 m floor.
+const LEVEL_DROP_FRACTION: f32 = 0.25;
+
+/// Coarser levels sit below the field so wherever rings overlap the finer
+/// (more accurate) surface wins depth testing instead of z-fighting. The
+/// floor of 1 m makes the two finest levels share one drop, so their ring
+/// boundary is seamless by construction.
+fn level_drop(level: u8) -> f32 {
+    (LEVEL_CELL_M[level as usize] * LEVEL_DROP_FRACTION).max(1.0)
+}
+
+/// Parent (= next coarser) level's geometry, as seen from `level`.
+const PARENT_CELL_MULT: f32 = 4.0;
 
 /// Tile identity: LOD level + grid position at that level's tile size.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -105,17 +114,59 @@ fn covered_by_finer_level(level: u8, key: TileKey, focus: Vec2) -> bool {
         && (centre.y - focus.y).abs() + half <= finer_coverage
 }
 
+/// Parent (= next coarser) level's surface height at a boundary point:
+/// linear interpolation between the two enclosing parent grid samples
+/// along the boundary direction, minus the parent's drop. Tile edges are
+/// multiples of the parent cell, so edge endpoints coincide with parent
+/// samples and the interpolation is exact there. On corners both axes are
+/// aligned and both branches reduce to the same parent sample.
+fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
+    let parent_cell = LEVEL_CELL_M[level as usize] * PARENT_CELL_MULT;
+    let parent_drop = level_drop(level + 1);
+    let gx = x / parent_cell;
+    let gz = z / parent_cell;
+    // Whichever axis is off the parent grid is the varying one.
+    if (gz - gz.round()).abs() > 1e-4 {
+        let i = gz.floor();
+        let z0 = i * parent_cell;
+        let t = gz - i;
+        let h0 = field.height(x, z0);
+        let h1 = field.height(x, z0 + parent_cell);
+        h0 + (h1 - h0) * t - parent_drop
+    } else {
+        let i = gx.floor();
+        let x0 = i * parent_cell;
+        let t = gx - i;
+        let h0 = field.height(x0, z);
+        let h1 = field.height(x0 + parent_cell, z);
+        h0 + (h1 - h0) * t - parent_drop
+    }
+}
+
 /// Build one tile mesh: a heightfield grid with a downward skirt ring that
 /// hides cracks against neighbouring (possibly coarser) tiles.
-pub(crate) fn tile_mesh(field: &HeightField, key: TileKey) -> Mesh {
+///
+/// `focus_tile` is the focus tile's grid position at this key's level: the
+/// four outer rim edges of the 5x5 ring border a COARSER level, and their
+/// border vertices are stitched onto the parent level's linear
+/// interpolation (minus the parent's drop) — the CPU equivalent of
+/// terrain_renderer's vertex morphing, so the fine surface meets the
+/// coarse one along the exact shared boundary with no crack or step.
+pub(crate) fn tile_mesh(field: &HeightField, key: TileKey, focus_tile: IVec2) -> Mesh {
     let cell = key.cell();
     let tile_size = key.tile_size();
     let origin_x = key.x as f32 * tile_size;
     let origin_z = key.z as f32 * tile_size;
-    let drop = cell * LEVEL_DROP_CELL_FRACTION;
+    let drop = level_drop(key.level);
     let skirt = (cell * 1.5).max(8.0);
+    // Rim edges: the neighbour in that direction lies outside the 5x5
+    // ring, so the adjacent level there is coarser.
+    let rim_x_plus = key.x == focus_tile.x + LEVEL_RING;
+    let rim_x_minus = key.x == focus_tile.x - LEVEL_RING;
+    let rim_z_plus = key.z == focus_tile.y + LEVEL_RING;
+    let rim_z_minus = key.z == focus_tile.y - LEVEL_RING;
 
-    // Interior grid heights, sampled once and reused for normals.
+    // Interior grid heights, sampled once and reused for positions.
     let mut heights = [[0.0f32; TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
@@ -124,23 +175,50 @@ pub(crate) fn tile_mesh(field: &HeightField, key: TileKey) -> Mesh {
         }
     }
 
+    // Stitch rim edges onto the parent level's surface.
+    let mut stitch = |ix: usize, iz: usize| {
+        let x = origin_x + ix as f32 * cell;
+        let z = origin_z + iz as f32 * cell;
+        heights[iz][ix] = parent_lerp_height(field, key.level, x, z);
+    };
+    if rim_x_plus {
+        for iz in 0..TILE_VERTS {
+            stitch(TILE_QUADS, iz);
+        }
+    }
+    if rim_x_minus {
+        for iz in 0..TILE_VERTS {
+            stitch(0, iz);
+        }
+    }
+    if rim_z_plus {
+        for ix in 0..TILE_VERTS {
+            stitch(ix, TILE_QUADS);
+        }
+    }
+    if rim_z_minus {
+        for ix in 0..TILE_VERTS {
+            stitch(ix, 0);
+        }
+    }
+
     // Grid vertices + a duplicated border ring pushed down by `skirt`.
     let vert_count = TILE_VERTS * TILE_VERTS + 4 * TILE_VERTS;
     let mut positions = Vec::with_capacity(vert_count);
     let mut normals = Vec::with_capacity(vert_count);
-    let height_at = |ix: usize, iz: usize| heights[iz][ix];
 
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
             let x = origin_x + ix as f32 * cell;
             let z = origin_z + iz as f32 * cell;
-            positions.push([x, height_at(ix, iz), z]);
-            // Central-difference normal from neighbouring samples (clamped
-            // at borders — one cell of curl at the edge, hidden by skirts).
-            let dx = height_at((ix + 1).min(TILE_QUADS), iz)
-                - height_at(ix.saturating_sub(1), iz);
-            let dz = height_at(ix, (iz + 1).min(TILE_QUADS))
-                - height_at(ix, iz.saturating_sub(1));
+            positions.push([x, heights[iz][ix], z]);
+            // Central-difference normal sampled straight from the field at
+            // world positions - NOT from this tile's clamped grid, which
+            // gave every tile edge a one-sided normal and drew a lighting
+            // grid over the whole world. Field sampling is tile-independent,
+            // so neighbouring tiles agree exactly on shared vertices.
+            let dx = field.height(x + cell, z) - field.height(x - cell, z);
+            let dz = field.height(x, z + cell) - field.height(x, z - cell);
             normals.push(Vec3::new(-dx, 2.0 * cell, -dz).normalize().to_array());
         }
     }
@@ -254,7 +332,8 @@ pub fn stream_terrain_tiles(
         if tiles.tiles.contains_key(&key) {
             continue;
         }
-        let mesh = meshes.add(tile_mesh(&field, key));
+        let focus_tile = (focus / key.tile_size()).floor().as_ivec2();
+        let mesh = meshes.add(tile_mesh(&field, key, focus_tile));
         let entity = commands
             .spawn((
                 Mesh3d(mesh),
@@ -280,7 +359,8 @@ mod tests {
         // Backface culling uses winding: interior faces must have +y
         // geometric normals, and skirt walls must face away from the tile.
         let key = TileKey { level: 2, x: -3, z: 7 };
-        let mesh = tile_mesh(&flat_field(), key);
+        // Focus on the tile itself: no rim edges, pure interior test.
+        let mesh = tile_mesh(&flat_field(), key, IVec2::new(-3, 7));
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
             VertexAttributeValues::Float32x3(p) => p.clone(),
             _ => panic!("unexpected position format"),
@@ -404,5 +484,75 @@ mod tests {
             tiles.len()
         );
         assert!(tiles.len() > 9, "expected tiles at every level");
+    }
+
+    #[test]
+    fn rim_edges_are_stitched_to_the_parent_surface() {
+        // Nonlinear in z, so the parent chord differs from the true field:
+        // a stitched rim vertex must sit on the chord, an interior one on
+        // the field itself (minus their respective drops).
+        let field = HeightField::from_fn(|_, z| 0.001 * z * z);
+        let key = TileKey { level: 0, x: 2, z: 0 }; // +x rim of the focus ring
+        let mesh = tile_mesh(&field, key, IVec2::ZERO);
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
+            VertexAttributeValues::Float32x3(p) => p.clone(),
+            _ => panic!("unexpected position format"),
+        };
+
+        let vertex_y = |ix: usize, iz: usize| match &positions[iz * TILE_VERTS + ix] {
+            [_, y, _] => *y,
+            _ => unreachable!(),
+        };
+
+        // Level 0 and level 1 share the same drop (1 m), so a +x rim edge
+        // vertex at (x=96, z) must equal chord_lerp(h(96,z0), h(96,z0+4)) - 1.
+        assert_eq!(level_drop(0), level_drop(1), "finest two drops must match");
+        let parent_cell = LEVEL_CELL_M[0] * PARENT_CELL_MULT;
+        for iz in 0..TILE_VERTS {
+            let z = iz as f32;
+            let expected = {
+                let i = (z / parent_cell).floor();
+                let z0 = i * parent_cell;
+                let t = (z - z0) / parent_cell;
+                let h0 = 0.001 * z0 * z0;
+                let h1 = 0.001 * (z0 + parent_cell) * (z0 + parent_cell);
+                h0 + (h1 - h0) * t - level_drop(1)
+            };
+            assert!(
+                (vertex_y(TILE_QUADS, iz) - expected).abs() < 1e-4,
+                "rim vertex iz={iz}: {} != {expected}",
+                vertex_y(TILE_QUADS, iz)
+            );
+        }
+        // Interior vertices stay on the true field (minus own drop), e.g.
+        // the centre: h(80, 16) - 1.
+        let centre_expected = 0.001 * 16.0 * 16.0 - level_drop(0);
+        assert!(
+            (vertex_y(16, 16) - centre_expected).abs() < 1e-4,
+            "interior vertex must be un-stitched"
+        );
+    }
+
+    #[test]
+    fn normals_agree_across_tile_boundaries() {
+        // Normals come from the field at world positions, so the shared
+        // edge of two adjacent tiles must carry identical normals — this
+        // is what kills the per-tile lighting grid.
+        let field = HeightField::default();
+        let a = tile_mesh(&field, TileKey { level: 0, x: 0, z: 0 }, IVec2::ZERO);
+        let b = tile_mesh(&field, TileKey { level: 0, x: 1, z: 0 }, IVec2::ZERO);
+        let normals = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_NORMAL).expect("normals") {
+            VertexAttributeValues::Float32x3(n) => n.clone(),
+            _ => panic!("unexpected normal format"),
+        };
+        let (na, nb) = (normals(&a), normals(&b));
+        // Shared edge x = 32: A's ix = TILE_QUADS column, B's ix = 0.
+        for iz in 0..TILE_VERTS {
+            assert_eq!(
+                na[iz * TILE_VERTS + TILE_QUADS],
+                nb[iz * TILE_VERTS],
+                "normal mismatch on shared edge at iz={iz}"
+            );
+        }
     }
 }
