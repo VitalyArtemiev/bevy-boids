@@ -39,7 +39,7 @@ impl Plugin for UiPlugin {
                     terrain_tuning_ui.run_if(in_state(GameState::Playing)),
                 ),
             )
-            .add_systems(Update, (toggle_pause, toggle_terrain_panel))
+            .add_systems(Update, toggle_pause)
             // Pausing `Time<Virtual>` is what actually stops the fixed
             // timestep from accumulating (gating systems alone would cause a
             // catch-up storm on resume). The camera plugin's systems can't
@@ -124,25 +124,21 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// F3 toggles the terrain tuning panel. Sliders mutate [`TerrainTuning`]
-/// directly; the terrain cascade (rebuild height field -> rebuild tiles ->
-/// reset caches -> re-project obstacles) regenerates the world live.
-fn toggle_terrain_panel(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut shown: Local<bool>,
-) {
-    if keys.just_pressed(KeyCode::F3) {
-        *shown = !*shown;
-    }
-}
-
 /// The terrain tuning panel: every world-generation parameter as a live
 /// slider. Mutations propagate through change detection the same frame.
+///
+/// F3 toggles it here (not in a separate system: `Local` state is
+/// per-system, so a toggle elsewhere flips its own flag, never this one) —
+/// and the window's X button closes it through the same `Local`.
 fn terrain_tuning_ui(
     mut contexts: EguiContexts,
+    keys: Res<ButtonInput<KeyCode>>,
     mut shown: Local<bool>,
     mut tuning: ResMut<TerrainTuning>,
 ) -> Result {
+    if keys.just_pressed(KeyCode::F3) {
+        *shown = !*shown;
+    }
     if !*shown {
         return Ok(());
     }
