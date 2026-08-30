@@ -28,15 +28,26 @@ const LEVEL_CELL_M: [f32; 9] = [
 /// Half-extent of a level's rendered square, in multiples of that level's
 /// own tile size: the 5x5 ring around the focus tile.
 const LEVEL_RING: i32 = 2;
-/// Fraction of the cell size used as the level drop, before the 1 m floor.
-const LEVEL_DROP_FRACTION: f32 = 0.25;
+/// Vertical separation between adjacent levels: each level above the
+/// second sits a further half-cell below the one finer, so overlap fringes
+/// resolve by depth test even on steep terrain (chord-over-valley error is
+/// bounded by slope * fringe width, and fringes are under half a cell).
+const LEVEL_DROP_STEP_FRACTION: f32 = 0.5;
+/// The stitched fine rim sits this fraction of the parent cell BELOW the
+/// parent plane: the rim is otherwise exactly coplanar with the coarse
+/// fringe quads, which z-fights where they overlap.
+const STITCH_BIAS_CELL_FRACTION: f32 = 0.02;
 
 /// Coarser levels sit below the field so wherever rings overlap the finer
 /// (more accurate) surface wins depth testing instead of z-fighting. The
-/// floor of 1 m makes the two finest levels share one drop, so their ring
-/// boundary is seamless by construction.
+/// two finest levels share a 1 m drop, making their ring boundary seamless
+/// by construction; above that each level sinks a further half-cell.
 fn level_drop(level: u8) -> f32 {
-    (LEVEL_CELL_M[level as usize] * LEVEL_DROP_FRACTION).max(1.0)
+    let mut drop = 1.0;
+    for l in 2..=level as usize {
+        drop += LEVEL_CELL_M[l] * LEVEL_DROP_STEP_FRACTION;
+    }
+    drop
 }
 
 /// Parent (= next coarser) level's geometry, as seen from `level`.
@@ -76,10 +87,22 @@ impl TileKey {
 }
 
 /// Spawned terrain tiles, keyed for streaming (spawn/evict on focus
-/// movement).
+/// movement). The value pairs the entity with the [`TileStamp`] the mesh
+/// was baked with: rims and holes are computed from the ring position at
+/// spawn time, so a stamp mismatch (focus crossed a tile boundary) forces
+/// a respawn instead of leaving stale geometry mid-ring.
 #[derive(Resource, Default)]
 pub struct TerrainTiles {
-    tiles: HashMap<TileKey, Entity>,
+    tiles: HashMap<TileKey, (Entity, TileStamp)>,
+}
+
+/// Ring position a tile's mesh was baked with: the focus tile at the
+/// tile's own level (which edges are stitching rims) and at the finer
+/// level (where the cut-out hole lies).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TileStamp {
+    focus_tile: IVec2,
+    fine_focus_tile: IVec2,
 }
 
 impl TerrainTiles {
@@ -91,6 +114,10 @@ impl TerrainTiles {
         self.tiles.keys().copied()
     }
 
+    pub(crate) fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.tiles.values().map(|(entity, _)| *entity)
+    }
+
     /// Is this world point inside any streamed tile's footprint? The
     /// streaming guarantee: every point between the finest ring and the
     /// continental rim is covered.
@@ -99,30 +126,47 @@ impl TerrainTiles {
     }
 }
 
-/// A level's tile is redundant when the finer level's square fully
-/// contains it: the finer 5x5 ring covers +/- (LEVEL_RING + 0.5) tiles of
-/// the level below.
+/// The world-space XZ square the next-finer level's 5x5 ring actually
+/// renders around `focus`. Tile-aligned (computed from the finer focus
+/// tile), because that is exactly what is on screen — a focus-centered
+/// approximation can both over-skip (opening slit holes) and under-skip
+/// (leaving whole-tile overlap sheets) depending on where inside its tile
+/// the focus sits.
+fn finer_render_square(level: u8, focus: Vec2) -> (Vec2, Vec2) {
+    let finer_size = LEVEL_CELL_M[(level - 1) as usize] * TILE_QUADS as f32;
+    let fine_ft = (focus / finer_size).floor();
+    (
+        (fine_ft - Vec2::splat(LEVEL_RING as f32)) * finer_size,
+        (fine_ft + Vec2::splat(LEVEL_RING as f32 + 1.0)) * finer_size,
+    )
+}
+
+/// A level's tile is redundant when the finer level's rendered square
+/// fully contains it (the clipmap invariant: coarse levels render only
+/// where finer ones don't). Partially-overlapping tiles are NOT skipped —
+/// tile_mesh cuts their overlap out per-quad instead.
 fn covered_by_finer_level(level: u8, key: TileKey, focus: Vec2) -> bool {
     if level == 0 {
         return false;
     }
-    let finer_coverage = (LEVEL_RING as f32 + 0.5) * LEVEL_CELL_M[(level - 1) as usize]
-        * TILE_QUADS as f32;
+    let (min, max) = finer_render_square(level, focus);
     let half = key.tile_size() / 2.0;
-    let centre = key.centre();
-    (centre.x - focus.x).abs() + half <= finer_coverage
-        && (centre.y - focus.y).abs() + half <= finer_coverage
+    let c = key.centre();
+    c.x - half >= min.x && c.x + half <= max.x && c.y - half >= min.y && c.y + half <= max.y
 }
 
 /// Parent (= next coarser) level's surface height at a boundary point:
 /// linear interpolation between the two enclosing parent grid samples
-/// along the boundary direction, minus the parent's drop. Tile edges are
-/// multiples of the parent cell, so edge endpoints coincide with parent
-/// samples and the interpolation is exact there. On corners both axes are
-/// aligned and both branches reduce to the same parent sample.
+/// along the boundary direction, minus the parent's drop and a small bias.
+/// Tile edges are multiples of the parent cell, so edge endpoints coincide
+/// with parent samples and the interpolation is exact there. On corners
+/// both axes are aligned and both branches reduce to the same parent
+/// sample. The bias drops the stitched rim a hair below the parent plane
+/// so overlapping coarse fringe quads (same plane, by construction) win
+/// cleanly instead of z-fighting.
 fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
     let parent_cell = LEVEL_CELL_M[level as usize] * PARENT_CELL_MULT;
-    let parent_drop = level_drop(level + 1);
+    let parent_drop = level_drop(level + 1) + parent_cell * STITCH_BIAS_CELL_FRACTION;
     let gx = x / parent_cell;
     let gz = z / parent_cell;
     // Whichever axis is off the parent grid is the varying one.
@@ -152,7 +196,19 @@ fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
 /// interpolation (minus the parent's drop) — the CPU equivalent of
 /// terrain_renderer's vertex morphing, so the fine surface meets the
 /// coarse one along the exact shared boundary with no crack or step.
-pub(crate) fn tile_mesh(field: &HeightField, key: TileKey, focus_tile: IVec2) -> Mesh {
+///
+/// `hole` is the finer level's rendered square: interior quads whose
+/// centre falls inside it are CUT, so this coarse tile does not sheet a
+/// second surface underneath the finer one (the clipmap invariant —
+/// coarse renders only where fine doesn't). Quads kept by the centre rule
+/// may overlap the square by under half a cell; the level drop and stitch
+/// bias make the fine surface win that fringe.
+pub(crate) fn tile_mesh(
+    field: &HeightField,
+    key: TileKey,
+    focus_tile: IVec2,
+    hole: Option<(Vec2, Vec2)>,
+) -> Mesh {
     let cell = key.cell();
     let tile_size = key.tile_size();
     let origin_x = key.x as f32 * tile_size;
@@ -244,6 +300,14 @@ pub(crate) fn tile_mesh(field: &HeightField, key: TileKey, focus_tile: IVec2) ->
     let mut indices: Vec<u32> = Vec::with_capacity(TILE_QUADS * TILE_QUADS * 6 + border.len() * 6);
     for iz in 0..TILE_QUADS {
         for ix in 0..TILE_QUADS {
+            // Cut the hole: no coarse quads under the finer level's square.
+            if let Some((hmin, hmax)) = hole {
+                let cx = origin_x + (ix as f32 + 0.5) * cell;
+                let cz = origin_z + (iz as f32 + 0.5) * cell;
+                if cx > hmin.x && cx < hmax.x && cz > hmin.y && cz < hmax.y {
+                    continue;
+                }
+            }
             let v0 = (iz * TILE_VERTS + ix) as u32;
             // Winding so faces point UP (+y): (B - A) x (C - A) with
             // +x then +z edges gives -y, so the +z corner comes second.
@@ -282,9 +346,49 @@ pub(crate) fn tile_mesh(field: &HeightField, key: TileKey, focus_tile: IVec2) ->
     mesh
 }
 
+/// The desired tile set around a focus: one 5x5 ring per level, minus
+/// tiles the finer level fully covers, each stamped with the ring position
+/// it must be baked with. Shared by the streaming system and the tests.
+pub(crate) fn desired_tiles(focus: Vec2) -> Vec<(TileKey, TileStamp)> {
+    let mut desired = Vec::new();
+    for (level, &cell) in LEVEL_CELL_M.iter().enumerate() {
+        let level = level as u8;
+        let tile_size = cell * TILE_QUADS as f32;
+        let focus_tile = (focus / tile_size).floor().as_ivec2();
+        let fine_size = if level == 0 {
+            tile_size
+        } else {
+            LEVEL_CELL_M[(level - 1) as usize] * TILE_QUADS as f32
+        };
+        let fine_focus_tile = (focus / fine_size).floor().as_ivec2();
+        for dx in -LEVEL_RING..=LEVEL_RING {
+            for dz in -LEVEL_RING..=LEVEL_RING {
+                let key = TileKey {
+                    level,
+                    x: focus_tile.x + dx,
+                    z: focus_tile.y + dz,
+                };
+                if covered_by_finer_level(level, key, focus) {
+                    continue;
+                }
+                desired.push((
+                    key,
+                    TileStamp {
+                        focus_tile,
+                        fine_focus_tile,
+                    },
+                ));
+            }
+        }
+    }
+    desired
+}
+
 /// Stream terrain tiles around the camera focus: compute the desired tile
 /// set, spawn missing (mesh built synchronously — ~1k field samples per
-/// tile), evict the rest.
+/// tile), evict the rest. Tiles whose stamp no longer matches (focus
+/// crossed a tile boundary, moving rims/holes) are respawned, never left
+/// with stale ring-baked geometry.
 pub fn stream_terrain_tiles(
     mut commands: Commands,
     mut tiles: ResMut<TerrainTiles>,
@@ -303,49 +407,37 @@ pub fn stream_terrain_tiles(
     // desired set from the new field (~1k samples per tile, cheap enough
     // to do live while a slider is dragged).
     if field.is_changed() {
-        for (_, entity) in tiles.tiles.drain() {
+        for (_, (entity, _)) in tiles.tiles.drain() {
             commands.entity(entity).despawn();
         }
     }
 
-    let mut desired: Vec<TileKey> = Vec::new();
-    for (level, &cell) in LEVEL_CELL_M.iter().enumerate() {
-        let tile_size = cell * TILE_QUADS as f32;
-        let focus_tile = (focus / tile_size).floor().as_ivec2();
-        for dx in -LEVEL_RING..=LEVEL_RING {
-            for dz in -LEVEL_RING..=LEVEL_RING {
-                let key = TileKey {
-                    level: level as u8,
-                    x: focus_tile.x + dx,
-                    z: focus_tile.y + dz,
-                };
-                if covered_by_finer_level(level as u8, key, focus) {
-                    continue;
-                }
-                desired.push(key);
+    let desired = desired_tiles(focus);
+
+    // Evict tiles that left the desired set or whose baked ring position
+    // went stale.
+    tiles.tiles.retain(|&key, &mut (entity, stamp)| {
+        match desired.iter().find(|(k, s)| *k == key && *s == stamp) {
+            Some(_) => true,
+            None => {
+                commands.entity(entity).despawn();
+                false
             }
-        }
-    }
-
-    // Evict tiles that left the desired set.
-    let desired: Vec<TileKey> = desired;
-    tiles.tiles.retain(|&key, &mut entity| {
-        if desired.contains(&key) {
-            true
-        } else {
-            commands.entity(entity).despawn();
-            false
         }
     });
 
     // Spawn new tiles. Ground-marked so bevy_rts_camera raycasts (pan
     // focus, drag) follow the actual terrain surface.
-    for key in desired {
+    for (key, stamp) in desired {
         if tiles.tiles.contains_key(&key) {
             continue;
         }
-        let focus_tile = (focus / key.tile_size()).floor().as_ivec2();
-        let mesh = meshes.add(tile_mesh(&field, key, focus_tile));
+        let hole = if key.level == 0 {
+            None
+        } else {
+            Some(finer_render_square(key.level, focus))
+        };
+        let mesh = meshes.add(tile_mesh(&field, key, stamp.focus_tile, hole));
         let entity = commands
             .spawn((
                 Mesh3d(mesh),
@@ -354,7 +446,7 @@ pub fn stream_terrain_tiles(
                 Ground,
             ))
             .id();
-        tiles.tiles.insert(key, entity);
+        tiles.tiles.insert(key, (entity, stamp));
     }
 }
 
@@ -373,7 +465,7 @@ mod tests {
         // geometric normals, and skirt walls must face away from the tile.
         let key = TileKey { level: 2, x: -3, z: 7 };
         // Focus on the tile itself: no rim edges, pure interior test.
-        let mesh = tile_mesh(&flat_field(), key, IVec2::new(-3, 7));
+        let mesh = tile_mesh(&flat_field(), key, IVec2::new(-3, 7), None);
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
             VertexAttributeValues::Float32x3(p) => p.clone(),
             _ => panic!("unexpected position format"),
@@ -474,9 +566,7 @@ mod tests {
     fn tile_entities(app: &App) -> Vec<Entity> {
         app.world()
             .resource::<TerrainTiles>()
-            .tiles
-            .values()
-            .copied()
+            .entities()
             .collect()
     }
 
@@ -484,12 +574,16 @@ mod tests {
     fn coverage_is_continuous_from_the_camera_to_continental_distance() {
         // Ring-sampling: every point from beside the focus out to the
         // continental rim must fall inside some streamed tile — the
-        // no-annular-gaps guarantee of the skip criterion.
+        // no-annular-gaps guarantee of the skip criterion. Dense radii
+        // near the finest ring (16 m steps) so thin slit holes between
+        // levels cannot hide between samples.
         let mut covered = 0usize;
         let mut total = 0usize;
-        for radius in [
-            10.0, 100.0, 1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 4_000_000.0,
-        ] {
+        let mut radii: Vec<f32> = (1..24).map(|i| i as f32 * 16.0).collect();
+        radii.extend_from_slice(&[
+            1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 4_000_000.0,
+        ]);
+        for radius in radii {
             for angle in 0..16 {
                 let a = angle as f32 * std::f32::consts::TAU / 16.0;
                 let point = Vec2::new(a.cos(), a.sin()) * radius;
@@ -506,29 +600,102 @@ mod tests {
     /// The desired-set computation extracted for tests: which tiles would
     /// stream around this focus.
     fn desired_set_for_focus(focus: Vec2) -> Vec<TileKey> {
-        let mut desired = Vec::new();
-        for (level, &cell) in LEVEL_CELL_M.iter().enumerate() {
-            let tile_size = cell * TILE_QUADS as f32;
-            let focus_tile = (focus / tile_size).floor().as_ivec2();
-            for dx in -LEVEL_RING..=LEVEL_RING {
-                for dz in -LEVEL_RING..=LEVEL_RING {
-                    let key = TileKey {
-                        level: level as u8,
-                        x: focus_tile.x + dx,
-                        z: focus_tile.y + dz,
-                    };
-                    if covered_by_finer_level(level as u8, key, focus) {
-                        continue;
-                    }
-                    desired.push(key);
-                }
-            }
-        }
-        desired
+        desired_tiles(focus).into_iter().map(|(key, _)| key).collect()
     }
 
     fn tiles_covering_point(tiles: Vec<TileKey>, point: Vec2) -> bool {
         tiles.iter().any(|&key| key.contains(point))
+    }
+
+    #[test]
+    fn no_spawned_tile_is_fully_covered_by_the_finer_level() {
+        // The clipmap invariant at tile granularity: anything the finer
+        // square fully contains is skipped, so no coarse sheet can render
+        // unseen underneath the fine surface.
+        for focus in [Vec2::ZERO, Vec2::new(17.3, -45.6), Vec2::new(990.0, 12.5)] {
+            for key in desired_set_for_focus(focus) {
+                assert!(
+                    !covered_by_finer_level(key.level, key, focus),
+                    "level {} tile at {:?} fully covered but desired",
+                    key.level,
+                    key.centre()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coarse_tiles_cut_holes_where_the_finer_level_renders() {
+        // The clipmap invariant at quad granularity: a coarse tile
+        // straddling the finer square emits fewer quads — the overlap is
+        // cut out, not sheeted underneath (which showed as coarse mesh
+        // clipping through the fine surface over valleys).
+        let field = flat_field();
+        let focus = Vec2::new(64.0, 64.0); // level-0 square: [0, 160]^2
+        let (hmin, hmax) = finer_render_square(1, focus);
+        // A level-1 tile (128 m) straddling the square's +x edge.
+        let key = TileKey { level: 1, x: 1, z: 1 };
+        let with_hole = tile_mesh(&field, key, IVec2::new(1, 1), Some((hmin, hmax)));
+        let without_hole = tile_mesh(&field, key, IVec2::new(1, 1), None);
+        let quad_count = |mesh: &Mesh| mesh.indices().expect("indices").len() as usize;
+        assert!(
+            quad_count(&with_hole) < quad_count(&without_hole),
+            "hole not cut: {} vs {} indices",
+            quad_count(&with_hole),
+            quad_count(&without_hole)
+        );
+        // And the cut must not be everything: the part outside the square
+        // still renders.
+        assert!(quad_count(&with_hole) > 0);
+    }
+
+    #[test]
+    fn focus_movement_respawns_stale_stamped_tiles() {
+        // Rims and holes are baked from the ring position at spawn time;
+        // crossing a tile boundary must rebuild affected tiles instead of
+        // leaving stale geometry mid-ring.
+        let mut app = App::new();
+        app.insert_resource(HeightField::default())
+            .init_resource::<TerrainTiles>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<crate::resources::Materials>()
+            .add_systems(Update, stream_terrain_tiles);
+        let ground = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::from_color(Color::WHITE));
+        app.world_mut()
+            .resource_mut::<crate::resources::Materials>()
+            .ground = ground;
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
+        app.update();
+        app.update();
+        let before = tile_entities(&app);
+        assert!(!before.is_empty());
+
+        // Pan the focus across a level-0 tile boundary (32 m).
+        let mut entity = app.world_mut().get_entity_mut(camera).unwrap();
+        let mut transform = entity.get_mut::<Transform>().unwrap();
+        transform.translation.x = 40.0;
+        drop(transform);
+        let mut entity = app.world_mut().get_entity_mut(camera).unwrap();
+        let mut rts = entity.get_mut::<RtsCamera>().unwrap();
+        rts.focus.translation.x = 40.0;
+        rts.target_focus = rts.focus;
+        drop(rts);
+        app.update();
+        app.update();
+
+        let after = tile_entities(&app);
+        assert!(!after.is_empty());
+        assert!(
+            before.iter().any(|e| !after.contains(e)),
+            "no tiles were respawned after the focus crossed a tile boundary"
+        );
     }
 
     #[test]
@@ -563,7 +730,7 @@ mod tests {
         // the field itself (minus their respective drops).
         let field = HeightField::from_fn(|_, z| 0.001 * z * z);
         let key = TileKey { level: 0, x: 2, z: 0 }; // +x rim of the focus ring
-        let mesh = tile_mesh(&field, key, IVec2::ZERO);
+        let mesh = tile_mesh(&field, key, IVec2::ZERO, None);
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
             VertexAttributeValues::Float32x3(p) => p.clone(),
             _ => panic!("unexpected position format"),
@@ -587,6 +754,7 @@ mod tests {
                 let h0 = 0.001 * z0 * z0;
                 let h1 = 0.001 * (z0 + parent_cell) * (z0 + parent_cell);
                 h0 + (h1 - h0) * t - level_drop(1)
+                    - parent_cell * STITCH_BIAS_CELL_FRACTION
             };
             assert!(
                 (vertex_y(TILE_QUADS, iz) - expected).abs() < 1e-4,
@@ -616,7 +784,7 @@ mod tests {
             x: 2,
             z: 0,
         };
-        let mesh = tile_mesh(&field, key, IVec2::ZERO); // must not panic
+        let mesh = tile_mesh(&field, key, IVec2::ZERO, None); // must not panic
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
             VertexAttributeValues::Float32x3(p) => p.clone(),
             _ => panic!("unexpected position format"),
@@ -637,8 +805,8 @@ mod tests {
         // edge of two adjacent tiles must carry identical normals — this
         // is what kills the per-tile lighting grid.
         let field = HeightField::default();
-        let a = tile_mesh(&field, TileKey { level: 0, x: 0, z: 0 }, IVec2::ZERO);
-        let b = tile_mesh(&field, TileKey { level: 0, x: 1, z: 0 }, IVec2::ZERO);
+        let a = tile_mesh(&field, TileKey { level: 0, x: 0, z: 0 }, IVec2::ZERO, None);
+        let b = tile_mesh(&field, TileKey { level: 0, x: 1, z: 0 }, IVec2::ZERO, None);
         let normals = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_NORMAL).expect("normals") {
             VertexAttributeValues::Float32x3(n) => n.clone(),
             _ => panic!("unexpected normal format"),
