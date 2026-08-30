@@ -298,6 +298,16 @@ pub fn stream_terrain_tiles(
     };
     let focus = camera.focus.translation.xz();
 
+    // The height field changed (tuning edit): the entire rendered world is
+    // stale. Drop every tile — the spawn pass below then rebuilds the full
+    // desired set from the new field (~1k samples per tile, cheap enough
+    // to do live while a slider is dragged).
+    if field.is_changed() {
+        for (_, entity) in tiles.tiles.drain() {
+            commands.entity(entity).despawn();
+        }
+    }
+
     let mut desired: Vec<TileKey> = Vec::new();
     for (level, &cell) in LEVEL_CELL_M.iter().enumerate() {
         let tile_size = cell * TILE_QUADS as f32;
@@ -350,6 +360,7 @@ pub fn stream_terrain_tiles(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{rebuild_height_field, TerrainTuning};
     use super::*;
 
     fn flat_field() -> HeightField {
@@ -410,6 +421,63 @@ mod tests {
                 "skirt triangle {tri} faces inward"
             );
         }
+    }
+
+    #[test]
+    fn tuning_change_rebuilds_the_whole_tile_set() {
+        // The live-regeneration contract: mutating the tuning resource
+        // replaces every streamed tile with fresh meshes.
+        let mut app = App::new();
+        app.insert_resource(TerrainTuning::default())
+            .insert_resource(HeightField::default())
+            .init_resource::<TerrainTiles>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<crate::resources::Materials>()
+            .add_systems(
+                Update,
+                (
+                    rebuild_height_field,
+                    stream_terrain_tiles.after(rebuild_height_field),
+                ),
+            );
+        app.world_mut().spawn(Camera3d::default());
+        app.world_mut().spawn(RtsCamera::default());
+        let ground = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::from_color(Color::WHITE));
+        app.world_mut()
+            .resource_mut::<crate::resources::Materials>()
+            .ground = ground;
+        app.update();
+        app.update();
+
+        let before = tile_entities(&app);
+        assert!(!before.is_empty(), "no tiles streamed initially");
+
+        app.world_mut()
+            .resource_mut::<TerrainTuning>()
+            .ridge_max_m += 10.0;
+        app.update();
+        app.update();
+
+        let after = tile_entities(&app);
+        assert!(!after.is_empty());
+        assert!(
+            before.iter().all(|e| !after.contains(e)),
+            "tiles were not rebuilt: {} entities survived the tuning change",
+            before.iter().filter(|e| after.contains(e)).count()
+        );
+    }
+
+    fn tile_entities(app: &App) -> Vec<Entity> {
+        app.world()
+            .resource::<TerrainTiles>()
+            .tiles
+            .values()
+            .copied()
+            .collect()
     }
 
     #[test]

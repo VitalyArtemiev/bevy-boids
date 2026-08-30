@@ -13,8 +13,8 @@ mod noise;
 mod tiles;
 
 pub use camera::{CameraClearance, camera_terrain_clearance};
-pub use grounding::{GroundY, ground_boids};
-pub use noise::TerrainNoise;
+pub use grounding::{GroundY, ground_boids, reset_ground_caches};
+pub use noise::{TerrainNoise, TerrainTuning};
 pub use tiles::{TerrainTiles, stream_terrain_tiles};
 
 use bevy::prelude::*;
@@ -27,7 +27,9 @@ use std::sync::Arc;
 /// deltas instead of replacing it.
 ///
 /// Backed by a boxed closure so tests (and later, edited worlds) can
-/// substitute synthetic fields.
+/// substitute synthetic fields. Rebuilt from [`TerrainTuning`] by
+/// [`rebuild_height_field`] whenever the tuning changes, which cascades
+/// into tile rebuilds and cache resets via change detection.
 #[derive(Resource, Clone)]
 pub struct HeightField {
     sampler: Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>,
@@ -61,11 +63,29 @@ impl HeightField {
     }
 }
 
+/// Rebuild the height field when the tuning resource changes. Running
+/// before `stream_terrain_tiles`, its change tick then cascades: tiles
+/// despawn/respawn from the new field, grounding caches reset, obstacles
+/// re-project.
+pub fn rebuild_height_field(
+    tuning: Res<TerrainTuning>,
+    mut field: ResMut<HeightField>,
+) {
+    if !tuning.is_changed() {
+        return;
+    }
+    *field = HeightField::from_noise(TerrainNoise::from_tuning(&tuning));
+}
+
 // ---------------------------------------------------------------------------
 // Obstacles
 // ---------------------------------------------------------------------------
 
 use crate::kinematics::{HardCollision, TrackedByTree};
+
+/// Cuboid obstacles are 1 m; their centre rides half a metre above the
+/// surface. Shared with `project_obstacles_onto_field`.
+pub(crate) const OBSTACLE_HALF_HEIGHT: f32 = 0.5;
 
 #[derive(Component, Default)]
 pub struct Obstacle {
@@ -97,5 +117,20 @@ impl ObstacleBundle {
             material: MeshMaterial3d(material),
             transform: Transform::from_xyz(pos.x, pos.y, pos.z),
         }
+    }
+}
+
+/// Re-seat obstacles on the terrain after the field changed (tuning edits).
+/// Runs every frame but pays nothing unless the field's change tick moved.
+pub fn project_obstacles_onto_field(
+    mut query: Query<(&mut Transform, &Obstacle)>,
+    field: Res<HeightField>,
+) {
+    if !field.is_changed() {
+        return;
+    }
+    for (mut transform, _obstacle) in &mut query {
+        let t = transform.translation;
+        transform.translation.y = field.height(t.x, t.z) + OBSTACLE_HALF_HEIGHT;
     }
 }

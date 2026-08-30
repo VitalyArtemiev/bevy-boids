@@ -12,6 +12,8 @@ use bevy_egui::egui;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_rts_camera::RtsCameraControls;
 
+use crate::terrain::TerrainTuning;
+
 /// App-wide flow state. The simulation and gameplay input only run in
 /// [`GameState::Playing`]; menus pause both the fixed timestep (via
 /// `Time<Virtual>`) and the camera controls.
@@ -34,9 +36,10 @@ impl Plugin for UiPlugin {
                 (
                     main_menu_ui.run_if(in_state(GameState::MainMenu)),
                     pause_menu_ui.run_if(in_state(GameState::Paused)),
+                    terrain_tuning_ui.run_if(in_state(GameState::Playing)),
                 ),
             )
-            .add_systems(Update, toggle_pause)
+            .add_systems(Update, (toggle_pause, toggle_terrain_panel))
             // Pausing `Time<Virtual>` is what actually stops the fixed
             // timestep from accumulating (gating systems alone would cause a
             // catch-up storm on resume). The camera plugin's systems can't
@@ -119,6 +122,92 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     )
+}
+
+/// F3 toggles the terrain tuning panel. Sliders mutate [`TerrainTuning`]
+/// directly; the terrain cascade (rebuild height field -> rebuild tiles ->
+/// reset caches -> re-project obstacles) regenerates the world live.
+fn toggle_terrain_panel(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut shown: Local<bool>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        *shown = !*shown;
+    }
+}
+
+/// The terrain tuning panel: every world-generation parameter as a live
+/// slider. Mutations propagate through change detection the same frame.
+fn terrain_tuning_ui(
+    mut contexts: EguiContexts,
+    mut shown: Local<bool>,
+    mut tuning: ResMut<TerrainTuning>,
+) -> Result {
+    if !*shown {
+        return Ok(());
+    }
+    let ctx = contexts.ctx_mut()?;
+    egui::Window::new("Terrain tuning").open(&mut *shown).show(ctx, |ui| {
+        let tuning: &mut TerrainTuning = &mut *tuning;
+        ui.label("World regenerates live while you drag.");
+        ui.add_space(6.0);
+
+        ui.heading("Seed");
+        ui.add(egui::DragValue::new(&mut tuning.seed).speed(1));
+
+        ui.heading("Base (rolling hills)");
+        amplitude_wavelength(
+            ui,
+            &mut tuning.base_amplitude_m,
+            &mut tuning.base_wavelength_m,
+            60.0,
+            2000.0,
+        );
+
+        ui.heading("Mountains");
+        ui.add(egui::Slider::new(&mut tuning.ridge_max_m, 0.0..=150.0).text("ridge height (m)"));
+        ui.add(
+            egui::Slider::new(&mut tuning.ridge_wavelength_m, 100.0..=3000.0)
+                .text("ridge wavelength (m)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut tuning.mask_wavelength_m, 200.0..=5000.0)
+                .text("range spacing (m)"),
+        );
+
+        ui.heading("Domain warp (meander)");
+        amplitude_wavelength(
+            ui,
+            &mut tuning.warp_amplitude_m,
+            &mut tuning.warp_wavelength_m,
+            500.0,
+            3000.0,
+        );
+
+        ui.heading("Detail (surface texture)");
+        amplitude_wavelength(
+            ui,
+            &mut tuning.detail_amplitude_m,
+            &mut tuning.detail_wavelength_m,
+            5.0,
+            200.0,
+        );
+    });
+    Ok(())
+}
+
+/// Paired amplitude + wavelength sliders with metre suffixes.
+fn amplitude_wavelength(
+    ui: &mut egui::Ui,
+    amplitude: &mut f32,
+    wavelength: &mut f32,
+    amplitude_max: f32,
+    wavelength_max: f32,
+) {
+    ui.add(egui::Slider::new(amplitude, 0.0..=amplitude_max).text("amplitude (m)"));
+    ui.add(
+        egui::Slider::new(wavelength, 10.0..=wavelength_max).text("wavelength (m)"),
+    );
 }
 
 /// Escape toggles between playing and paused.

@@ -48,3 +48,16 @@ pub fn ground_boids(
         vel.a.y = 0.0;
     });
 }
+
+/// Clear every boid's cached column after the height field changed (tuning
+/// edit), forcing a resample on the next grounding pass. Runs only on
+/// field changes, so the normal per-frame cost is one change-tick check.
+pub fn reset_ground_caches(mut query: Query<&mut GroundY>, field: Res<HeightField>) {
+    if !field.is_changed() {
+        return;
+    }
+    for mut ground in &mut query {
+        // Sentinel column: forces a resample in ground_boids.
+        ground.col = (i32::MIN, i32::MIN);
+    }
+}

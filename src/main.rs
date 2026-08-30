@@ -1,4 +1,5 @@
 mod boid;
+mod debug_ui;
 mod formations;
 mod horse;
 mod kinematics;
@@ -11,8 +12,9 @@ mod ui;
 mod util;
 
 use crate::boid::*;
+use crate::debug_ui::DebugUiPlugin;
 use crate::formations::{
-    LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
+    FormationTuning, LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
     plan_formation_goals, propagate_formation_targets, transition_formation_orders,
 };
 use crate::kinematics::*;
@@ -24,8 +26,9 @@ use crate::resources::{Materials, Meshes};
 use crate::sky::SkyPlugin;
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, HeightField, ObstacleBundle, TerrainTiles, camera_terrain_clearance,
-    ground_boids, stream_terrain_tiles,
+    CameraClearance, HeightField, ObstacleBundle, TerrainTiles, TerrainTuning,
+    camera_terrain_clearance, ground_boids, project_obstacles_onto_field, rebuild_height_field,
+    reset_ground_caches, stream_terrain_tiles,
 };
 use crate::ui::{GameState, UiPlugin};
 use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
@@ -70,6 +73,12 @@ fn main() {
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)
+        .add_plugins(DebugUiPlugin)
+        // Runtime-tunable values exposed by the debug panel (F1).
+        .init_resource::<KinematicsTuning>()
+        .init_resource::<BoidTuning>()
+        .init_resource::<FormationTuning>()
+        .init_resource::<TerrainTuning>()
         // The atmosphere's environment-map light is the ambient source; the
         // flat default ambient would wash it out.
         .insert_resource(GlobalAmbientLight::NONE)
@@ -100,7 +109,12 @@ fn main() {
                 ),
                 height_scaled_zoom.run_if(not(egui_wants_any_pointer_input)),
                 selection_indicator_face,
+                // Tuning edits cascade: new field -> rebuilt tiles, reset
+                // grounding caches, re-seated obstacles.
+                rebuild_height_field.before(stream_terrain_tiles),
                 stream_terrain_tiles,
+                reset_ground_caches.after(rebuild_height_field),
+                project_obstacles_onto_field.after(rebuild_height_field),
                 camera_terrain_clearance.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
             )
