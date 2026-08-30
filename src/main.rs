@@ -7,6 +7,7 @@ mod resources;
 mod sky;
 mod target;
 mod terrain;
+mod ui;
 mod util;
 
 use crate::boid::*;
@@ -26,6 +27,8 @@ use crate::terrain::{
     CameraClearance, HeightField, ObstacleBundle, TerrainTiles, camera_terrain_clearance,
     ground_boids, stream_terrain_tiles,
 };
+use crate::ui::{GameState, UiPlugin};
+use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
 use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
 use bevy::pbr::AtmosphereSettings;
 use bevy::post_process::bloom::Bloom;
@@ -65,6 +68,7 @@ fn main() {
         )
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
+        .add_plugins(UiPlugin)
         // The atmosphere's environment-map light is the ambient source; the
         // flat default ambient would wash it out.
         .insert_resource(GlobalAmbientLight::NONE)
@@ -85,14 +89,20 @@ fn main() {
                 ground_boids.after(move_step).before(bob),
                 bob,
                 draw_cursor,
-                mouse_click_system,
-                quick_group_system,
-                frontage_position_system,
+                // Input-consuming systems stand down while egui has the
+                // pointer/keyboard (an open menu or text field).
+                mouse_click_system.run_if(not(egui_wants_any_pointer_input)),
+                quick_group_system.run_if(not(egui_wants_any_keyboard_input)),
+                frontage_position_system.run_if(
+                    not(egui_wants_any_pointer_input)
+                        .and_then(not(egui_wants_any_keyboard_input)),
+                ),
                 selection_indicator_face,
                 stream_terrain_tiles,
                 camera_terrain_clearance.after(RtsCameraSystemSet),
                 hard_collisions.after(soft_collisions),
-            ),
+            )
+                .run_if(in_state(GameState::Playing)),
         )
         // The whole executor pipeline runs on the fixed timestep, chained:
         // speed init -> LOD state -> order transitions -> slot re-mapping ->
@@ -110,7 +120,8 @@ fn main() {
                 dispatch_formation_goals,
                 follow_target,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(GameState::Playing)),
         )
         .run();
 }

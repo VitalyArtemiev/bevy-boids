@@ -14,6 +14,11 @@ tracy_mem = ["bevy/trace", "bevy/trace_tracy", "bevy/trace_tracy_memory"]
 [dependencies]
 bevy = { version = "0.19" }
 
+# UI stack: all menus, debug panels and the radial menu are egui
+# (immediate mode); key remapping runs through enhanced input actions.
+bevy_egui = "0.42"
+bevy_enhanced_input = "0.26"
+
 bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch = "within", default-features = false, features = ["kdtree"] }
 bevy_rts_camera = "0.14.0"
 fastnoise-lite = "1.1"

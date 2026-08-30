@@ -76,7 +76,7 @@ jobs:
           key: wasm
       # Must match the wasm-bindgen version in Cargo.lock
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
       - name: Build release wasm
         run: cargo build --profile wasm-release --target wasm32-unknown-unknown
       - name: Run wasm-bindgen
