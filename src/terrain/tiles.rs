@@ -8,13 +8,16 @@
 //! overlap, the coarser level sits slightly lower (per-level height bias)
 //! so the finer surface wins the depth test. Level transitions hide their
 //! step behind skirts. Heights come from [`HeightField`], so meshes,
-//! grounding, and camera clearance agree by construction.
+//! grounding, and camera clearance agree by construction; the same field
+//! samples tint the tiles (rock/grass/dirt by slope and altitude,
+//! drainage streaks from the erosion ridge map).
 
-use super::HeightField;
+use super::{HeightField, TerrainSample};
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy_rts_camera::{Ground, RtsCamera};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// Tile resolution: 32x32 quads per tile, any level.
 const TILE_QUADS: usize = 32;
@@ -103,6 +106,27 @@ pub struct TerrainTiles {
 pub struct TileStamp {
     focus_tile: IVec2,
     fine_focus_tile: IVec2,
+}
+
+/// Per-frame meshing budget for streaming. A tuning edit respawns every
+/// tile at once, and with the erosion filter each tile mesh costs several
+/// times more field work — instead of freezing one frame, the rebuild
+/// spreads across frames and the new world floods outward from the
+/// camera. Absent resource means unlimited (tests, loading screens).
+#[derive(Resource, Clone, Copy)]
+pub struct StreamBudget {
+    pub mesh_millis: u64,
+}
+
+impl Default for StreamBudget {
+    fn default() -> Self {
+        StreamBudget { mesh_millis: 2 }
+    }
+}
+
+impl StreamBudget {
+    // No UNLIMITED constant: an absent resource already means unlimited
+    // (tests, loading screens) — see `stream_terrain_tiles`.
 }
 
 impl TerrainTiles {
@@ -224,12 +248,18 @@ pub(crate) fn tile_mesh(
     let rim_z_plus = can_stitch && key.z == focus_tile.y + LEVEL_RING;
     let rim_z_minus = can_stitch && key.z == focus_tile.y - LEVEL_RING;
 
-    // Interior grid heights, sampled once and reused for positions.
+    // Interior grid: one field sample per vertex feeds positions, normals
+    // and colors. `heights` is what the mesh shows (drop applied, rims
+    // re-stitched); `samples` keeps the unstitched world-space fields for
+    // shading, since altitude gates must not see LOD drop offsets.
     let mut heights = [[0.0f32; TILE_VERTS]; TILE_VERTS];
+    let mut samples = [[TerrainSample::default(); TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
-            heights[iz][ix] =
-                field.height(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell) - drop;
+            let sample =
+                field.sample(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell);
+            heights[iz][ix] = sample.height - drop;
+            samples[iz][ix] = sample;
         }
     }
 
@@ -264,20 +294,22 @@ pub(crate) fn tile_mesh(
     let vert_count = TILE_VERTS * TILE_VERTS + 4 * TILE_VERTS;
     let mut positions = Vec::with_capacity(vert_count);
     let mut normals = Vec::with_capacity(vert_count);
+    let mut colors = Vec::with_capacity(vert_count);
+    let palette = ground_palette();
 
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
             let x = origin_x + ix as f32 * cell;
             let z = origin_z + iz as f32 * cell;
             positions.push([x, heights[iz][ix], z]);
-            // Central-difference normal sampled straight from the field at
-            // world positions - NOT from this tile's clamped grid, which
-            // gave every tile edge a one-sided normal and drew a lighting
-            // grid over the whole world. Field sampling is tile-independent,
-            // so neighbouring tiles agree exactly on shared vertices.
-            let dx = field.height(x + cell, z) - field.height(x - cell, z);
-            let dz = field.height(x, z + cell) - field.height(x, z - cell);
-            normals.push(Vec3::new(-dx, 2.0 * cell, -dz).normalize().to_array());
+            // Normal from the field's analytic slope: field sampling is
+            // tile-independent, so neighbouring tiles agree exactly on
+            // shared vertices (sampling this tile's clamped grid instead
+            // drew a lighting grid over the whole world), and the gullies
+            // carve the lighting with no extra field samples.
+            let slope = samples[iz][ix].slope;
+            normals.push(Vec3::new(-slope.x, 1.0, -slope.y).normalize().to_array());
+            colors.push(ground_color(&palette, samples[iz][ix]).to_array());
         }
     }
 
@@ -295,6 +327,7 @@ pub(crate) fn tile_mesh(
         let [x, y, z] = positions[v];
         positions.push([x, y - skirt, z]);
         normals.push([0.0, 1.0, 0.0]);
+        colors.push(colors[v]);
     }
 
     let mut indices: Vec<u32> = Vec::with_capacity(TILE_QUADS * TILE_QUADS * 6 + border.len() * 6);
@@ -342,8 +375,51 @@ pub(crate) fn tile_mesh(
         Mesh::ATTRIBUTE_NORMAL,
         VertexAttributeValues::Float32x3(normals),
     );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, VertexAttributeValues::Float32x4(colors));
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+/// The terrain palette as linear RGBA — sRGB values from the erosion
+/// reference demo's texturing: [grass low, grass high, dirt, cliff,
+/// drainage chalk, snow]. Converted once per mesh, not per vertex.
+fn ground_palette() -> [Vec4; 6] {
+    [
+        Color::srgb(0.15, 0.30, 0.10),
+        Color::srgb(0.40, 0.50, 0.20),
+        Color::srgb(0.60, 0.50, 0.40),
+        Color::srgb(0.22, 0.20, 0.20),
+        Color::srgb(0.82, 0.76, 0.62),
+        Color::srgb(0.92, 0.94, 0.96),
+    ]
+    .map(|c| {
+        let l = c.to_linear();
+        Vec4::new(l.red, l.green, l.blue, l.alpha)
+    })
+}
+
+/// Per-vertex tint from one field sample — the CPU adaptation of the
+/// reference demo's per-fragment material: grass two-tone by altitude,
+/// dirt then cliff as steeps rise, chalky drainage streaks where the
+/// ridge map marks gully creases, snow on the highest ridges.
+fn ground_color(palette: &[Vec4; 6], sample: TerrainSample) -> Vec4 {
+    // Slope is m/m: grass holds to ~31°, sheer cliff past ~45°.
+    let steepness = sample.slope.length();
+    let grass = Vec4::lerp(palette[0], palette[1], smoothstep(4.0, 28.0, sample.height));
+    let mut c = Vec4::lerp(grass, palette[2], smoothstep(0.3, 0.55, steepness));
+    c = Vec4::lerp(c, palette[3], smoothstep(0.55, 1.0, steepness));
+    // ridge_map ≈ -1 at crease centres; only the narrow core band paints
+    // the stream beds, or the chalk speckles over every slope (tuned on
+    // screen: 0.3 fired as isolated dots).
+    let ridgemap = (sample.ridge_map * 0.5 + 0.5).clamp(0.0, 1.0);
+    let drainage = (1.0 - ridgemap / 0.15).clamp(0.0, 1.0);
+    c = Vec4::lerp(c, palette[4], drainage);
+    Vec4::lerp(c, palette[5], smoothstep(55.0, 70.0, sample.height))
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The desired tile set around a focus: one 5x5 ring per level, minus
@@ -386,9 +462,10 @@ pub(crate) fn desired_tiles(focus: Vec2) -> Vec<(TileKey, TileStamp)> {
 
 /// Stream terrain tiles around the camera focus: compute the desired tile
 /// set, spawn missing (mesh built synchronously — ~1k field samples per
-/// tile), evict the rest. Tiles whose stamp no longer matches (focus
-/// crossed a tile boundary, moving rims/holes) are respawned, never left
-/// with stale ring-baked geometry.
+/// tile, at most a [`StreamBudget`] worth of meshes per frame), evict the
+/// rest. Tiles whose stamp no longer matches (focus crossed a tile
+/// boundary, moving rims/holes) are respawned, never left with stale
+/// ring-baked geometry.
 pub fn stream_terrain_tiles(
     mut commands: Commands,
     mut tiles: ResMut<TerrainTiles>,
@@ -396,6 +473,7 @@ pub fn stream_terrain_tiles(
     field: Res<HeightField>,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<crate::resources::Materials>,
+    budget: Option<Res<StreamBudget>>,
 ) {
     let Ok(camera) = cameras.single() else {
         return;
@@ -403,9 +481,9 @@ pub fn stream_terrain_tiles(
     let focus = camera.focus.translation.xz();
 
     // The height field changed (tuning edit): the entire rendered world is
-    // stale. Drop every tile — the spawn pass below then rebuilds the full
-    // desired set from the new field (~1k samples per tile, cheap enough
-    // to do live while a slider is dragged).
+    // stale. Drop every tile — the spawn pass below then rebuilds the
+    // desired set from the new field, spreading the meshes across frames
+    // under the budget so a slider drag never freezes the frame.
     if field.is_changed() {
         for (_, (entity, _)) in tiles.tiles.drain() {
             commands.entity(entity).despawn();
@@ -426,12 +504,22 @@ pub fn stream_terrain_tiles(
         }
     });
 
-    // Spawn new tiles. Camera focus-following samples the HeightField
-    // directly (terrain::camera); the Ground marker remains for drag-pan's
-    // grab-point raycast.
+    // Spawn new tiles (budgeted). Camera focus-following samples the
+    // HeightField directly (terrain::camera); the Ground marker remains
+    // for drag-pan's grab-point raycast.
+    let deadline = match budget.as_deref() {
+        Some(b) => Instant::now() + Duration::from_millis(b.mesh_millis),
+        None => Instant::now(),
+    };
+    let mut built = 0usize;
     for (key, stamp) in desired {
         if tiles.tiles.contains_key(&key) {
             continue;
+        }
+        // Always build at least one tile per frame so streaming makes
+        // progress no matter how small the budget.
+        if built > 0 && Instant::now() >= deadline {
+            break;
         }
         let hole = if key.level == 0 {
             None
@@ -448,6 +536,7 @@ pub fn stream_terrain_tiles(
             ))
             .id();
         tiles.tiles.insert(key, (entity, stamp));
+        built += 1;
     }
 }
 
@@ -843,5 +932,74 @@ mod tests {
                 "normal mismatch on shared edge at iz={iz}"
             );
         }
+    }
+
+    #[test]
+    fn colors_match_terrain_shape() {
+        // Shading must agree with the fields it comes from: steepness
+        // loses the grass green for cliff, creases brighten into chalky
+        // drainage streaks.
+        let palette = ground_palette();
+        let sample = |slope: Vec2, ridge: f32| {
+            ground_color(
+                &palette,
+                TerrainSample {
+                    height: 10.0,
+                    slope,
+                    ridge_map: ridge,
+                },
+            )
+        };
+        let grass = sample(Vec2::ZERO, 1.0);
+        let cliff = sample(Vec2::new(1.5, 0.0), 1.0);
+        assert!(
+            cliff.y < grass.y,
+            "cliff must lose the grass green: {cliff} vs {grass}"
+        );
+        let crease = sample(Vec2::ZERO, -1.0);
+        assert!(
+            crease.x > grass.x && crease.y > grass.y,
+            "drainage brightens creases: {crease} vs {grass}"
+        );
+    }
+
+    #[test]
+    fn streaming_respects_the_per_frame_budget() {
+        // Zero budget: exactly one tile per frame (the progress
+        // guarantee), and the full desired set eventually lands.
+        let mut app = App::new();
+        app.insert_resource(HeightField::default())
+            .insert_resource(StreamBudget { mesh_millis: 0 })
+            .init_resource::<TerrainTiles>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<crate::resources::Materials>()
+            .add_systems(Update, stream_terrain_tiles);
+        let ground = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::from_color(Color::WHITE));
+        app.world_mut()
+            .resource_mut::<crate::resources::Materials>()
+            .ground = ground;
+        app.world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()));
+        app.update();
+
+        let first = tile_entities(&app).len();
+        assert_eq!(first, 1, "zero budget must build exactly one tile per frame");
+
+        let total = desired_tiles(Vec2::ZERO).len();
+        for _ in 0..(4 * total) {
+            app.update();
+            if tile_entities(&app).len() == total {
+                break;
+            }
+        }
+        assert_eq!(
+            tile_entities(&app).len(),
+            total,
+            "budgeted streaming never finished the desired set"
+        );
     }
 }

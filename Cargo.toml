@@ -19,10 +19,12 @@ tracy_mem = ["tracing", "bevy/trace_tracy_memory"]
 dynamic = ["bevy/dynamic_linking"]
 
 [dependencies]
-bevy = { version = "0.19" }
+bevy = { version = "0.19", features = ["bevy_settings"] }
 
 # UI stack: all menus, debug panels and the radial menu are egui
 # (immediate mode); key remapping runs through enhanced input actions.
+# `bevy_settings` is Bevy's first-party settings-file framework (TOML on
+# disk, browser localStorage on wasm) backing the Options menu.
 bevy_egui = "0.42"
 bevy_enhanced_input = "0.26"
 
@@ -32,6 +34,12 @@ bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch 
 # analytic HeightField instead (terrain::camera::focus_camera_on_ground).
 bevy_rts_camera = { path = "vendor/bevy_rts_camera" }
 fastnoise-lite = "1.1"
+
+# Rune Skovbo Johansen's "Advanced Terrain Erosion Filter" (MPL-2.0
+# shadertoy), pure-Rust port by korbindeman. `default-features = false`
+# drops the crate's Bevy dependency; the terrain height function only
+# calls the glam-only `cpu` module (see src/terrain/noise.rs).
+bevy_erosion_filter = { version = "0.2", default-features = false }
 rand = "0.9.1"
 derive_more = { version = "2.0.1", features = ["full"] }
 lazy_static = "1.5.0"

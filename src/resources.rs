@@ -12,6 +12,7 @@ pub struct Materials {
     pub debug_material: Handle<StandardMaterial>,
     pub black: Handle<StandardMaterial>,
     pub white: Handle<StandardMaterial>,
-    /// Terrain tiles; tinted to read as landscape under the sky's light.
+    /// Terrain tiles; vertex-colored from the erosion fields (tiles.rs
+    /// `ground_color`), so the material itself stays white.
     pub ground: Handle<StandardMaterial>,
 }

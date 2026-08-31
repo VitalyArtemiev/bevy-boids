@@ -28,7 +28,7 @@ use crate::resources::{Materials, Meshes};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, HeightField, ObstacleBundle, TerrainTiles, TerrainTuning,
+    CameraClearance, HeightField, ObstacleBundle, StreamBudget, TerrainTiles, TerrainTuning,
     camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
     rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
 };
@@ -72,6 +72,9 @@ fn main() {
         .init_resource::<LODGuard>()
         .init_resource::<HeightField>()
         .init_resource::<TerrainTiles>()
+        // Budgeted tile meshing: a tuning edit floods the world back in
+        // over a few frames instead of hitching one.
+        .init_resource::<StreamBudget>()
         .insert_resource(launch)
         .insert_resource(SkyTuning {
             shadows: launch.shadows,
@@ -217,7 +220,14 @@ fn setup(
 
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
-    mat_list.ground = materials.add(StandardMaterial::from_color(Color::srgb(0.38, 0.5, 0.3)));
+    // Terrain tiles carry per-vertex colors (rock/grass/drainage from the
+    // erosion fields, see tiles::ground_color); Bevy multiplies the vertex
+    // color into base_color whenever the mesh has a COLOR attribute, so
+    // the material stays white and the vertex tint is the whole story.
+    mat_list.ground = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        ..default()
+    });
     mat_list.debug_material = materials.add(StandardMaterial {
         base_color_texture: Some(images.add(uv_debug_texture())),
         ..default()

@@ -14,8 +14,8 @@ mod tiles;
 
 pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
-pub use noise::{TerrainNoise, TerrainTuning};
-pub use tiles::{TerrainTiles, stream_terrain_tiles};
+pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
+pub use tiles::{StreamBudget, TerrainTiles, stream_terrain_tiles};
 
 use bevy::prelude::*;
 use std::sync::Arc;
@@ -26,24 +26,33 @@ use std::sync::Arc;
 /// layer (later milestone) will wrap the base sampler with sparse height
 /// deltas instead of replacing it.
 ///
-/// Backed by a boxed closure so tests (and later, edited worlds) can
-/// substitute synthetic fields. Rebuilt from [`TerrainTuning`] by
-/// [`rebuild_height_field`] whenever the tuning changes, which cascades
-/// into tile rebuilds and cache resets via change detection.
+/// The closure returns the full [`TerrainSample`] (height, slope, ridge
+/// map) because tile meshes shade from the same evaluation they displace
+/// with; height-only callers just discard the rest. Backed by a boxed
+/// closure so tests (and later, edited worlds) can substitute synthetic
+/// fields. Rebuilt from [`TerrainTuning`] by [`rebuild_height_field`]
+/// whenever the tuning changes, which cascades into tile rebuilds and
+/// cache resets via change detection.
 #[derive(Resource, Clone)]
 pub struct HeightField {
-    sampler: Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>,
+    sampler: Arc<dyn Fn(f32, f32) -> TerrainSample + Send + Sync>,
 }
 
 impl HeightField {
     pub fn from_noise(noise: TerrainNoise) -> Self {
         HeightField {
-            sampler: Arc::new(move |x, z| noise.height(x, z)),
+            sampler: Arc::new(move |x, z| noise.sample(x, z)),
         }
     }
 
-    /// Height in metres at world (x, z). Cheap: one noise-cascade sample.
+    /// Height in metres at world (x, z).
     pub fn height(&self, x: f32, z: f32) -> f32 {
+        (self.sampler)(x, z).height
+    }
+
+    /// Height plus the slope and ridge map, in one evaluation. Tile
+    /// meshing uses this so shading and displacement never disagree.
+    pub fn sample(&self, x: f32, z: f32) -> TerrainSample {
         (self.sampler)(x, z)
     }
 }
@@ -55,10 +64,22 @@ impl Default for HeightField {
 }
 
 impl HeightField {
-    /// Test helper: a synthetic field from a plain function.
+    /// Test helper: a synthetic field from a plain height function. The
+    /// slope is finite-differenced (real fields report it analytically)
+    /// and the ridge map stays neutral, so test meshes shade plausibly.
     pub fn from_fn(f: impl Fn(f32, f32) -> f32 + Send + Sync + 'static) -> Self {
         HeightField {
-            sampler: Arc::new(f),
+            sampler: Arc::new(move |x, z| {
+                const EPS: f32 = 0.5;
+                TerrainSample {
+                    height: f(x, z),
+                    slope: Vec2::new(
+                        (f(x + EPS, z) - f(x - EPS, z)) / (2.0 * EPS),
+                        (f(x, z + EPS) - f(x, z - EPS)) / (2.0 * EPS),
+                    ),
+                    ridge_map: 0.0,
+                }
+            }),
         }
     }
 }
