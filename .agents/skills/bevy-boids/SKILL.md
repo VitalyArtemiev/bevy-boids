@@ -141,7 +141,7 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, `FormationTuning`, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
 | `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); pure `sun_transform` helper with unit tests |
-| `ui.rs` | `UiPlugin`: egui (`bevy_egui`), `GameState { MainMenu, Playing, Paused }`, main/pause menus, pause plumbing (`Time<Virtual>` + camera kill-switch) |
+| `ui.rs` | `UiPlugin`: egui (`bevy_egui`), `GameState { MainMenu, Playing, Paused }`, main/pause menus, Options menu (`OptionsSettings` persisted via bevy-settings, `apply_options` pushes to live values), terrain-tuning panel on F3, pause plumbing (`Time<Virtual>` + camera kill-switch) |
 | `debug_ui.rs` | `DebugUiPlugin`: F1 debug panel — sliders over the `*Tuning` resources, gizmo/LOD/sky toggles, FPS; `DebugConfig` consumed by gizmo systems |
 | `terrain/` | THE terrain: `HeightField` resource (authoritative height fn, closure-backed), fBm `noise.rs`, streamed heightfield tiles in LOD rings (`tiles.rs`, 1 m cells near camera to 65 km at continental distance), boid grounding (`grounding.rs`, `GroundY`), camera focus-follow + terrain clearance (`camera.rs`, `CameraClearance`), obstacles |
 | `resources.rs`, `util.rs` | Shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
@@ -167,6 +167,17 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   by `bevy_egui` 0.42), take `EguiContexts`, and may return `Result`. Panels
   need a hand-built root `egui::Ui` (see `root_ui` in `ui.rs`); `Window::show`
   takes the `&Context` directly.
+- **egui panels over `ResMut` must bypass change detection**: any `&mut`
+  through a `ResMut`/`Mut` (even an unused reborrow like `&mut *res` to
+  satisfy widget signatures) marks the resource/component changed every
+  frame the panel is open. With change-detection-driven consumers
+  (`resource_changed` conditions, `is_changed()` early-returns) that means
+  per-frame rebuilds — the F3 terrain panel was regenerating the entire
+  world at frame rate this way. Pattern (see `tuned()` in `debug_ui.rs`,
+  `terrain_tuning_ui`/`options_ui` in `ui.rs`):
+  `res.bypass_change_detection()` for the widgets, accumulate
+  `Response::changed()` from every widget, call `res.set_changed()` only if
+  something actually changed.
 - The whole formation pipeline runs in `FixedUpdate`, explicitly chained
   (see `main.rs`): `init_formation_speed` → `propagate_formation_targets`
   (LOD `Velocity` state) → `transition_formation_orders` (task state
@@ -269,11 +280,23 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 - Doc comments on public types/systems explain *why* and the invariants
   (see `Formation`, `dispatch_formation_goals`) — keep that density for new ones.
 - Runtime-tunable values live in `*Tuning` resources (`KinematicsTuning`,
-  `BoidTuning`, `FormationTuning`, `SkyTuning`) next to their systems, with
-  units in field names and `Default`s derived from the module-level `const`s
-  (which stay authoritative for spawn paths and tests). Exposing a value in
-  the F1 debug panel = add the field, read it from the system, add one
-  `Slider::new` line in `debug_ui.rs`. Pure tuning stays as plain consts.
+  `BoidTuning`, `FormationTuning`, `SkyTuning`, `TerrainTuning`) next to
+  their systems, with units in field names and `Default`s derived from the
+  module-level `const`s (which stay authoritative for spawn paths and
+  tests). Exposing a value in the F1 debug panel = add the field, read it
+  from the system, add one `Slider::new` line in `debug_ui.rs`. Pure tuning
+  stays as plain consts.
+- **User-facing options** (`OptionsSettings` in `ui.rs`) are separate from
+  dev tuning and persisted by Bevy's first-party `bevy-settings` crate
+  (`bevy = { features = ["bevy_settings"] }`): TOML at
+  `%LOCALAPPDATA%/<app name>/settings.toml` (browser localStorage on wasm).
+  Gotchas: settings structs need `#[derive(Resource, Reflect, SettingsGroup)]`
+  with **`#[reflect(Default, Resource)]`** (the `Resource` reflect attribute
+  attaches type data bevy-settings unwraps on; missing it panics at startup),
+  and the type must be registered *before* `SettingsPlugin` builds. Flow is
+  one-way: options → live resources (`apply_options`, gated on
+  `resource_changed`); debug-panel edits to live values don't persist. Save
+  is explicit: `SaveSettingsDeferred` after UI changes.
 - Comments recording measurements ("this is slower at 10k", "~7ms in
   release for 10k") are load-bearing — preserve them and add your own when
   you bench.

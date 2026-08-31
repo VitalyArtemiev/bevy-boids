@@ -23,7 +23,7 @@ const SUN_AZIMUTH_DEG: f32 = 125.0;
 
 /// Runtime-tunable sky parameters; exposed as sliders by the debug UI.
 /// Defaults mirror the consts above.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct SkyTuning {
     /// Sun elevation above the horizon, degrees.
     pub sun_elevation_deg: f32,

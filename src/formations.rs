@@ -731,7 +731,7 @@ pub const ARRIVE_TOLERANCE: f32 = 2.0;
 /// Runtime-tunable formation geometry; exposed as sliders by the debug UI.
 /// Defaults mirror the consts (which stay authoritative for docs and
 /// `Formation::default`).
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct FormationTuning {
     /// Spacing between neighbouring slots, metres (`FormationKind::SPACING`).
     pub spacing_m: f32,

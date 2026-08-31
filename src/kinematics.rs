@@ -19,7 +19,7 @@ pub const DECELERATION_TIME_SEC: f32 = 1.0;
 /// Runtime-tunable movement limits, exposed as sliders by the debug UI.
 /// Defaults mirror the consts above, which stay authoritative for spawn
 /// paths and tests.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct KinematicsTuning {
     /// Hard cap on boid speed, m/s (`MAX_VELOCITY`).
     pub max_velocity_mps: f32,

@@ -69,7 +69,7 @@ const REPEL_COEF: f32 = 0.05;
 
 /// Runtime-tunable separation/bob parameters; defaults mirror the consts
 /// above, which stay authoritative for comments and docs.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct BoidTuning {
     /// Fraction of current acceleration reused as the repulsion cap.
     pub repel_coef: f32,
