@@ -1,0 +1,5 @@
+#!/bin/sh
+# Repo-shared pre-commit hook (activate once per clone with:
+#   git config core.hooksPath .githooks
+# ). Fast invariants only — anything that runs cargo lives in CI.
+exec "$(git rev-parse --show-toplevel)/scripts/check-wasm-bindgen-pin.sh"

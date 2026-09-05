@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 /trace*.json
 /bench_*.json
 /.zcode/

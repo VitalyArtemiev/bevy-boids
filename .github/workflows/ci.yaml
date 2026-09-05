@@ -23,6 +23,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # Same check as .githooks/pre-commit: fails in seconds with a clear
+      # message instead of the deploy dying at the wasm-bindgen step.
+      - name: Check wasm-bindgen pin
+        run: ./scripts/check-wasm-bindgen-pin.sh
       - uses: dtolnay/rust-toolchain@nightly
         with:
           # For `cargo check --target wasm32-unknown-unknown` below
@@ -42,9 +46,9 @@ jobs:
           libwayland-dev libxkbcommon-dev libasound2-dev libudev-dev
       - uses: Swatinem/rust-cache@v2
       - name: Check native
-        run: cargo check
+        run: cargo check --locked
       - name: Check wasm
-        run: cargo check --target wasm32-unknown-unknown
+        run: cargo check --locked --target wasm32-unknown-unknown
 
   deploy-pages:
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
@@ -74,11 +78,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm
-      # Must match the wasm-bindgen version in Cargo.lock
+      # Must match the wasm-bindgen version in Cargo.lock (committed; CI builds
+      # with --locked so a drift fails loudly instead of silently breaking deploy)
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
       - name: Build release wasm
-        run: cargo build --profile wasm-release --target wasm32-unknown-unknown
+        run: cargo build --locked --profile wasm-release --target wasm32-unknown-unknown
       - name: Run wasm-bindgen
         # --out-name pins the output basename (default derives from the input
         # wasm filename); index.html imports ./bevy_boids.js

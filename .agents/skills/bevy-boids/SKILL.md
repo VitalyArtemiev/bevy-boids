@@ -87,9 +87,17 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
    boid meshes). The game sets focus height analytically in
    `terrain::camera::focus_camera_on_ground`; `Ground` only marks drag-pan
    grab anchors. Don't swap the manifest back to crates.io.
-7. **wasm-bindgen-cli is version-pinned in CI (0.2.127) to match
-   Cargo.lock.** If the lockfile moves wasm-bindgen, update the CI pin in
-   `.github/workflows/ci.yaml`. The bindgen output name `bevy_boids`
+7. **wasm-bindgen-cli is version-pinned in CI (0.2.128) to match
+   Cargo.lock.** Cargo.lock is committed and CI cargo invocations use
+   `--locked`, so local and CI resolve identical versions. wasm-bindgen moves
+   as a lockstep family (wasm-bindgen, wasm-bindgen-futures, js-sys, web-sys
+   exact-pin each other): update all four together
+   (`cargo update -p wasm-bindgen -p wasm-bindgen-futures -p js-sys
+   -p web-sys`), and update the CI CLI pin in `.github/workflows/ci.yaml` in
+   the same change. `scripts/check-wasm-bindgen-pin.sh` enforces the invariant:
+   it runs as `.githooks/pre-commit` (activate per clone with
+   `git config core.hooksPath .githooks`) and as the first step of CI's check
+   job. The bindgen output name `bevy_boids`
    (`--out-name`) is referenced by `assets/index.html`.
 8. **Performance is a feature.** The sim aims to run ~200k boids. Never add a
    per-frame O(n²) loop over boids — use the kd-tree (`Res<NNTree>`:
@@ -139,11 +147,12 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts + `KinematicsTuning`, `move_step` integrator, `NNTree`/`TrackedByTree` |
 | `target.rs` | `Target` component, `follow_target` steering |
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, `FormationTuning`, most tests |
-| `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks |
+| `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks, `height_scaled_zoom` (constant-ratio wheel steps: `max(h × 0.125, 0.5 m)` per notch × the Options zoom-speed multiplier; easing into max zoom; tuned by feel, half the original 0.25 ratio). The crate's own zoom MUST stay neutralized (`zoom_sensitivity: 0`, see `apply_options`) — its constant-units step (7.5 km/notch) stacks on top of ours and dominates near the ground |
 | `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); pure `sun_transform` helper with unit tests |
-| `ui.rs` | `UiPlugin`: egui (`bevy_egui`), `GameState { MainMenu, Playing, Paused }`, main/pause menus, Options menu (`OptionsSettings` persisted via bevy-settings, `apply_options` pushes to live values), terrain-tuning panel on F3, pause plumbing (`Time<Virtual>` + camera kill-switch) |
+| `ui.rs` | `UiPlugin`: egui (`bevy_egui`), `GameState { MainMenu, Playing, Paused }`, main/pause menus, Options menu (`OptionsSettings` persisted via bevy-settings, `apply_options` pushes to live values), terrain-tuning panel on F3 (world-gen sliders + the `LodMode` and `CameraMode` debug toggles), pause plumbing (`Time<Virtual>` + camera kill-switch) |
 | `debug_ui.rs` | `DebugUiPlugin`: F1 debug panel — sliders over the `*Tuning` resources, gizmo/LOD/sky toggles, FPS; `DebugConfig` consumed by gizmo systems |
-| `terrain/` | THE terrain: `HeightField` resource (authoritative height fn, closure-backed, returns `TerrainSample` with height/slope/ridge map), erosion-filtered heights in `noise.rs` (runevision's Advanced Terrain Erosion Filter via the `bevy_erosion_filter` cpu port over an IQ fBm base + fastnoise ridged mountains), streamed vertex-colored tiles in LOD rings (`tiles.rs`, 1 m cells near camera to 65 km at continental distance, `StreamBudget`-throttled meshing), boid grounding (`grounding.rs`, `GroundY`), camera focus-follow + terrain clearance (`camera.rs`, `CameraClearance`), obstacles |
+| `freecam.rs` | `CameraMode { Rts, Free }` resource (F3 toggle) + `Freecam`: free-fly camera. `apply_camera_mode` (gated `resource_changed`) swaps by component presence — freecam removes `RtsCamera`/`RtsCameraControls` (standing the crate's systems down) parked on `Freecam::saved` for restoration; `freecam_move` is WASD/QE/RMB-drag/wheel input, inert without a `Freecam` camera |
+| `terrain/` | THE terrain: `HeightField` resource (authoritative height fn, closure-backed, returns `TerrainSample` with height/slope/ridge map), erosion-filtered heights in `noise.rs` (runevision's Advanced Terrain Erosion Filter via the `bevy_erosion_filter` cpu port over an IQ fBm base + fastnoise ridged mountains), streamed vertex-colored tiles in LOD rings (`tiles.rs`, 1 m cells near camera to 65 km at continental distance; rings always centre on the RTS focus — centring on the camera body thrashes the stamps because the RTS camera slides ~11 km in XZ per zoom gesture — while `LodMode` gates the finest rendered level by camera distance, `FinestAtFocus` being the F3 debug mode). Streaming never opens holes: stale tiles render until their replacement spawns in the same frame (atomic swap), and gate-dropped tiles wait until a current tile renders over them. A tile mesh costs ~2 ms of field sampling serially, so `stream_terrain_tiles` meshes `StreamBudget`-capped waves of tiles in parallel via `std::thread::scope` (serial fallback on wasm), and retired meshes park in the `TileMeshCache` LRU (256 tiles) for zero-cost re-spawn. Also boid grounding (`grounding.rs`, `GroundY`), camera focus-follow + terrain clearance (`camera.rs`, `CameraClearance`), obstacles |
 | `resources.rs`, `util.rs` | Shared-handle Resources (`Meshes`, `Materials`); geometry helpers (`within_rect`) |
 | `horse.rs` | Stub for future cavalry behavior |
 
