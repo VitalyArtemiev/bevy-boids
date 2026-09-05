@@ -1,8 +1,10 @@
 //! The terrain: streamed heightfield tiles in LOD rings.
 //!
-//! Each LOD level is a 5x5 ring of tiles around the camera focus, with
-//! cell size growing ×4 per level (1 m near the camera to 65 km at
-//! continental distance). Coverage is continuous by construction: a
+//! Each LOD level is a 5x5 ring of tiles around the RTS camera's focus
+//! (the camera's ground position in freecam), with cell size growing ×4
+//! per level (1 m near the camera to 65 km at continental distance); the
+//! finest rendered level is gated by the camera's distance (see
+//! [`LodMode`]). Coverage is continuous by construction: a
 //! coarser tile is skipped only when the finer level's square fully
 //! contains it, so there are no annular gaps between levels; where rings
 //! overlap, the coarser level sits slightly lower (per-level height bias)
@@ -91,21 +93,85 @@ impl TileKey {
 
 /// Spawned terrain tiles, keyed for streaming (spawn/evict on focus
 /// movement). The value pairs the entity with the [`TileStamp`] the mesh
-/// was baked with: rims and holes are computed from the ring position at
-/// spawn time, so a stamp mismatch (focus crossed a tile boundary) forces
-/// a respawn instead of leaving stale geometry mid-ring.
+/// was baked with and its [`Handle`](bevy::asset::Handle): rims and holes
+/// are computed from the ring position at spawn time, so a stamp mismatch
+/// (focus crossed a tile boundary) queues a replacement — the old mesh
+/// keeps rendering until the replacement spawns, so streaming never opens
+/// a hole (see `stream_terrain_tiles`).
 #[derive(Resource, Default)]
 pub struct TerrainTiles {
-    tiles: HashMap<TileKey, (Entity, TileStamp)>,
+    tiles: HashMap<TileKey, (Entity, TileStamp, Handle<Mesh>)>,
 }
 
 /// Ring position a tile's mesh was baked with: the focus tile at the
-/// tile's own level (which edges are stitching rims) and at the finer
-/// level (where the cut-out hole lies).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// tile's own level (which edges are stitching rims), at the finer level
+/// (where the cut-out hole lies), and whether this tile's mesh actually
+/// cuts that hole (the finer level renders AND this tile's footprint
+/// overlaps its square — the distance gate, [`LodMode`], lifts whole fine
+/// levels in and out). Only a flip of what the mesh depends on forces a
+/// respawn; tiles whose geometry is unchanged by a ring move keep their
+/// stamp and are not rebuilt.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TileStamp {
     focus_tile: IVec2,
     fine_focus_tile: IVec2,
+    cuts_hole: bool,
+}
+
+/// Retired tile meshes, kept for instant re-spawn. Zooming and panning
+/// back over ground you just left re-uses the baked mesh instead of
+/// re-running the erosion-filtered field ~1k times — a cache hit costs no
+/// mesh time and no [`StreamBudget`]. Bounded: the least-recently-used
+/// meshes beyond [`TILE_CACHE_TILES`] are dropped from `Assets<Mesh>`
+/// (live tiles are never cached, so nothing referenced is freed).
+#[derive(Resource, Default)]
+pub struct TileMeshCache {
+    entries: HashMap<(TileKey, TileStamp), (Handle<Mesh>, u64)>,
+    clock: u64,
+}
+
+/// Cache capacity in tiles. ~75 KB of vertex/index data per tile →
+/// ~20 MB; a full desired set is ~120-150 tiles, so a zoom gate cycle or
+/// a pan detour fits whole.
+const TILE_CACHE_TILES: usize = 256;
+
+impl TileMeshCache {
+    /// Take a mesh out of the cache for re-spawn, if present.
+    fn take(&mut self, key: TileKey, stamp: TileStamp) -> Option<Handle<Mesh>> {
+        self.clock += 1;
+        self.entries.remove(&(key, stamp)).map(|(handle, _)| handle)
+    }
+
+    /// Park a retired tile's mesh in the cache; evict the LRU overflow
+    /// (freeing its asset).
+    fn put(
+        &mut self,
+        key: TileKey,
+        stamp: TileStamp,
+        handle: Handle<Mesh>,
+        meshes: &mut Assets<Mesh>,
+    ) {
+        self.clock += 1;
+        let clock = self.clock;
+        self.entries.insert((key, stamp), (handle, clock));
+        while self.entries.len() > TILE_CACHE_TILES {
+            let Some((&oldest, _)) = self.entries.iter().min_by_key(|(_, (_, used))| *used)
+            else {
+                break;
+            };
+            if let Some((handle, _)) = self.entries.remove(&oldest) {
+                meshes.remove(&handle);
+            }
+        }
+    }
+
+    /// Drop every cached mesh (the height field changed; the meshes are
+    /// baked from the old field).
+    fn drain(&mut self, meshes: &mut Assets<Mesh>) {
+        for (_, (handle, _)) in self.entries.drain() {
+            meshes.remove(&handle);
+        }
+    }
 }
 
 /// Per-frame meshing budget for streaming. A tuning edit respawns every
@@ -129,6 +195,58 @@ impl StreamBudget {
     // (tests, loading screens) — see `stream_terrain_tiles`.
 }
 
+/// How the finest rendered LOD level is chosen. Toggled from the F3 panel.
+///
+/// `CameraDistance` (the default) is correct LOD: levels whose cells are
+/// too fine for the camera's distance to the ring centre are not
+/// rendered, so detail scales with how far the camera actually is — a
+/// camera 30 km up never streams 1 m cells, one 2 m off the ground does.
+///
+/// The rings themselves always centre on the RTS focus, which zoom does
+/// not move. Centring them on the camera body — the literal reading of
+/// "distance from the camera" — is unworkable with this RTS camera: its
+/// XZ position slides ~11 km over one zoom gesture (the body trails the
+/// focus by `height · tan(pitch)` and the pitch widens as you zoom in),
+/// which re-invalidates every fine tile's stamp at frame rate, starves
+/// the [`StreamBudget`] (the spawn queue is finest-first) and leaves
+/// voids until seconds after the gesture ends.
+///
+/// `FinestAtFocus` is the debug mode this shipped with: the finest level
+/// always renders at the ring centre regardless of camera distance —
+/// full detail wherever you look, at any altitude.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LodMode {
+    #[default]
+    CameraDistance,
+    FinestAtFocus,
+}
+
+/// Quads across the near view at the finest level — the screen-error
+/// budget of the distance gate. 256: walking height keeps the 1 m cells,
+/// ~300 m altitude keeps 4 m cells, the 30 km ceiling keeps 256 m cells.
+const LOD_CELLS_PER_VIEW: f32 = 256.0;
+
+/// The finest level worth rendering at this camera-to-centre distance:
+/// the first level whose cell size subtends at most
+/// [`LOD_CELLS_PER_VIEW`] quads across the near view. Distance 0 (or the
+/// debug mode) keeps level 0.
+fn finest_level(camera_distance_m: f32) -> u8 {
+    let min_cell_m = camera_distance_m / LOD_CELLS_PER_VIEW;
+    LEVEL_CELL_M
+        .iter()
+        .position(|&cell| cell >= min_cell_m)
+        .unwrap_or(0) as u8
+}
+
+/// The XZ point the LOD rings centre on: the RTS focus — the projection
+/// of the camera's view ray onto the terrain — or, without an RTS camera
+/// (freecam), the camera's own ground position.
+fn ring_center(rts_camera: Option<&RtsCamera>, camera_xz: Vec2) -> Vec2 {
+    rts_camera
+        .map(|camera| camera.focus.translation.xz())
+        .unwrap_or(camera_xz)
+}
+
 impl TerrainTiles {
     pub fn tile_count(&self) -> usize {
         self.tiles.len()
@@ -139,7 +257,7 @@ impl TerrainTiles {
     }
 
     pub(crate) fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.tiles.values().map(|(entity, _)| *entity)
+        self.tiles.values().map(|&(entity, _, _)| entity)
     }
 
     /// Is this world point inside any streamed tile's footprint? The
@@ -150,30 +268,49 @@ impl TerrainTiles {
     }
 }
 
-/// The world-space XZ square the next-finer level's 5x5 ring actually
-/// renders around `focus`. Tile-aligned (computed from the finer focus
-/// tile), because that is exactly what is on screen — a focus-centered
-/// approximation can both over-skip (opening slit holes) and under-skip
-/// (leaving whole-tile overlap sheets) depending on where inside its tile
-/// the focus sits.
-fn finer_render_square(level: u8, focus: Vec2) -> (Vec2, Vec2) {
+/// World-space XZ square a coarse level's mesh cuts out: where the finer
+/// level's 5x5 ring renders, ±[`LEVEL_RING`] finer tiles around the finer
+/// focus tile. Tile-aligned (computed from the finer centre tile), because
+/// that is exactly what is on screen — a centre-centred approximation can
+/// both over-skip (opening slit holes) and under-skip (leaving whole-tile
+/// overlap sheets) depending on where inside its tile the centre sits.
+fn hole_square(level: u8, fine_focus_tile: IVec2) -> (Vec2, Vec2) {
     let finer_size = LEVEL_CELL_M[(level - 1) as usize] * TILE_QUADS as f32;
-    let fine_ft = (focus / finer_size).floor();
     (
-        (fine_ft - Vec2::splat(LEVEL_RING as f32)) * finer_size,
-        (fine_ft + Vec2::splat(LEVEL_RING as f32 + 1.0)) * finer_size,
+        (fine_focus_tile - LEVEL_RING).as_vec2() * finer_size,
+        (fine_focus_tile + LEVEL_RING + 1).as_vec2() * finer_size,
     )
+}
+
+/// The hole square for a ring centre: [`hole_square`] at the centre's
+/// finer-level focus tile.
+fn finer_render_square(level: u8, center: Vec2) -> (Vec2, Vec2) {
+    let finer_size = LEVEL_CELL_M[(level - 1) as usize] * TILE_QUADS as f32;
+    hole_square(level, (center / finer_size).floor().as_ivec2())
+}
+
+/// Does this tile's baked mesh render the ground at `point`? False where
+/// the tile is absent or its cut-out hole swallows the point — the mesh
+/// cuts quads whose centre is strictly inside the hole square.
+fn renders_at(level: u8, stamp: &TileStamp, point: Vec2) -> bool {
+    if !stamp.cuts_hole {
+        return true;
+    }
+    let (hmin, hmax) = hole_square(level, stamp.fine_focus_tile);
+    !(hmin.x < point.x && point.x < hmax.x && hmin.y < point.y && point.y < hmax.y)
 }
 
 /// A level's tile is redundant when the finer level's rendered square
 /// fully contains it (the clipmap invariant: coarse levels render only
-/// where finer ones don't). Partially-overlapping tiles are NOT skipped —
+/// where finer ones don't). At or below `min_level` (the distance-gated
+/// finest level) nothing finer renders, so those levels are never
+/// covered-and-skipped. Partially-overlapping tiles are NOT skipped —
 /// tile_mesh cuts their overlap out per-quad instead.
-fn covered_by_finer_level(level: u8, key: TileKey, focus: Vec2) -> bool {
-    if level == 0 {
+fn covered_by_finer_level(level: u8, key: TileKey, center: Vec2, min_level: u8) -> bool {
+    if level <= min_level {
         return false;
     }
-    let (min, max) = finer_render_square(level, focus);
+    let (min, max) = finer_render_square(level, center);
     let half = key.tile_size() / 2.0;
     let c = key.centre();
     c.x - half >= min.x && c.x + half <= max.x && c.y - half >= min.y && c.y + half <= max.y
@@ -422,36 +559,59 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The desired tile set around a focus: one 5x5 ring per level, minus
-/// tiles the finer level fully covers, each stamped with the ring position
-/// it must be baked with. Shared by the streaming system and the tests.
-pub(crate) fn desired_tiles(focus: Vec2) -> Vec<(TileKey, TileStamp)> {
+/// The desired tile set around a ring centre with `min_level` as the
+/// finest level that renders (the camera-distance gate; 0 = the full
+/// stack): one 5x5 ring per level from there up, minus tiles the finer
+/// level fully covers, each stamped with the ring position it must be
+/// baked with. Shared by the streaming system and the tests.
+pub(crate) fn desired_tiles(center: Vec2, min_level: u8) -> Vec<(TileKey, TileStamp)> {
     let mut desired = Vec::new();
     for (level, &cell) in LEVEL_CELL_M.iter().enumerate() {
         let level = level as u8;
+        if level < min_level {
+            continue;
+        }
         let tile_size = cell * TILE_QUADS as f32;
-        let focus_tile = (focus / tile_size).floor().as_ivec2();
+        let center_tile = (center / tile_size).floor().as_ivec2();
         let fine_size = if level == 0 {
             tile_size
         } else {
             LEVEL_CELL_M[(level - 1) as usize] * TILE_QUADS as f32
         };
-        let fine_focus_tile = (focus / fine_size).floor().as_ivec2();
+        let fine_center_tile = (center / fine_size).floor().as_ivec2();
+        // The hole this level's tiles cut: the finer square, but only
+        // where it exists (level > min_level) and only on tiles whose
+        // footprint actually overlaps it — a ring move or gate flip then
+        // restamps just the tiles whose mesh really changed.
+        let hole = if level > min_level {
+            Some(finer_render_square(level, center))
+        } else {
+            None
+        };
         for dx in -LEVEL_RING..=LEVEL_RING {
             for dz in -LEVEL_RING..=LEVEL_RING {
                 let key = TileKey {
                     level,
-                    x: focus_tile.x + dx,
-                    z: focus_tile.y + dz,
+                    x: center_tile.x + dx,
+                    z: center_tile.y + dz,
                 };
-                if covered_by_finer_level(level, key, focus) {
+                if covered_by_finer_level(level, key, center, min_level) {
                     continue;
                 }
+                let cuts_hole = hole.is_some_and(|(hmin, hmax)| {
+                    let half = tile_size / 2.0;
+                    let c = key.centre();
+                    c.x + half > hmin.x
+                        && c.x - half < hmax.x
+                        && c.y + half > hmin.y
+                        && c.y - half < hmax.y
+                });
                 desired.push((
                     key,
                     TileStamp {
-                        focus_tile,
-                        fine_focus_tile,
+                        focus_tile: center_tile,
+                        fine_focus_tile: fine_center_tile,
+                        cuts_hole,
                     },
                 ));
             }
@@ -460,84 +620,221 @@ pub(crate) fn desired_tiles(focus: Vec2) -> Vec<(TileKey, TileStamp)> {
     desired
 }
 
-/// Stream terrain tiles around the camera focus: compute the desired tile
-/// set, spawn missing (mesh built synchronously — ~1k field samples per
-/// tile, at most a [`StreamBudget`] worth of meshes per frame), evict the
-/// rest. Tiles whose stamp no longer matches (focus crossed a tile
-/// boundary, moving rims/holes) are respawned, never left with stale
-/// ring-baked geometry.
+/// Stream terrain tiles: compute the desired tile set, spawn missing
+/// (mesh built synchronously — ~1k field samples per tile, at most a
+/// [`StreamBudget`] worth of *builds* per frame; [`TileMeshCache`] hits
+/// are free), retire the rest. The rings centre on the RTS focus (the
+/// camera's ground position in freecam) and the finest level is gated by
+/// the camera's distance to that centre — see [`LodMode`].
+///
+/// Streaming never opens a hole in the ground. Stale tiles (their ring
+/// position moved, or the distance gate flipped their hole) keep
+/// rendering until their replacement spawns in the same frame — an atomic
+/// swap, not a despawn-then-build. Tiles dropped from the desired set
+/// (gate lifted their whole level, focus moved on) keep rendering until a
+/// current tile actually renders over their ground: the coarse ring's
+/// baked hole would otherwise expose the void beneath. A stale rim or a
+/// few frames of coarse-over-fine overlap beat a hole every time.
 pub fn stream_terrain_tiles(
     mut commands: Commands,
     mut tiles: ResMut<TerrainTiles>,
-    cameras: Query<&RtsCamera>,
+    mut cache: ResMut<TileMeshCache>,
+    cameras: Query<(&Transform, Option<&RtsCamera>), With<Camera3d>>,
+    lod_mode: Option<Res<LodMode>>,
     field: Res<HeightField>,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<crate::resources::Materials>,
     budget: Option<Res<StreamBudget>>,
 ) {
-    let Ok(camera) = cameras.single() else {
+    let Ok((camera_transform, rts_camera)) = cameras.single() else {
         return;
     };
-    let focus = camera.focus.translation.xz();
+    let center = ring_center(rts_camera, camera_transform.translation.xz());
+    // The camera-to-centre distance gates the finest level. The RTS focus
+    // already sits on the field (focus_camera_on_ground); a freecam has no
+    // focus, so sample the field under the camera.
+    let center_ground_y = rts_camera
+        .map(|camera| camera.focus.translation.y)
+        .unwrap_or_else(|| field.height(center.x, center.y));
+    let camera_distance = match lod_mode.as_deref().copied().unwrap_or_default() {
+        LodMode::CameraDistance => camera_transform
+            .translation
+            .distance(Vec3::new(center.x, center_ground_y, center.y)),
+        LodMode::FinestAtFocus => 0.0,
+    };
+    let min_level = finest_level(camera_distance);
 
     // The height field changed (tuning edit): the entire rendered world is
-    // stale. Drop every tile — the spawn pass below then rebuilds the
-    // desired set from the new field, spreading the meshes across frames
-    // under the budget so a slider drag never freezes the frame.
+    // stale, cached meshes included. Drop it all — the spawn pass below
+    // then rebuilds the desired set from the new field, spreading the
+    // meshes across frames under the budget so a slider drag never
+    // freezes the frame.
     if field.is_changed() {
-        for (_, (entity, _)) in tiles.tiles.drain() {
+        for (_, (entity, ..)) in tiles.tiles.drain() {
+            commands.entity(entity).despawn();
+        }
+        cache.drain(&mut meshes);
+    }
+
+    let desired = desired_tiles(center, min_level);
+
+    // Half-extent of everything the desired set can ever cover (the top
+    // ring): beyond it, a dropped tile will never be covered — retire it
+    // immediately instead of leaking it.
+    let top_tile = LEVEL_CELL_M[LEVEL_CELL_M.len() - 1] * TILE_QUADS as f32;
+    let continental_reach = (LEVEL_RING as f32 + 0.5) * top_tile;
+
+    // Retire pass. Current and stale-stamped tiles stay (the spawn pass
+    // swaps the stale ones atomically); dropped keys — the gate lifted
+    // their whole level, or the focus moved on — stay until current tiles
+    // render over their centre, then retire into the cache.
+    let mut retired: Vec<TileKey> = Vec::new();
+    for (&key, _) in tiles.tiles.iter() {
+        if desired.iter().any(|(k, _)| *k == key) {
+            continue; // current or stale: the spawn pass owns it
+        }
+        // Dropped: nothing will ever cover it out at the continental rim,
+        // and the desired set always covers everything closer, so the
+        // wait is bounded.
+        let centre = key.centre();
+        if (centre - center).abs().max_element() > continental_reach {
+            retired.push(key);
+            continue;
+        }
+        let covered = desired.iter().any(|(cover_key, cover_stamp)| {
+            cover_key.contains(centre)
+                && matches!(
+                    tiles.tiles.get(cover_key),
+                    Some((_, live, _)) if *live == *cover_stamp
+                )
+                && renders_at(cover_key.level, cover_stamp, centre)
+        });
+        if covered {
+            retired.push(key);
+        }
+    }
+    for key in retired {
+        if let Some((entity, stamp, handle)) = tiles.tiles.remove(&key) {
+            cache.put(key, stamp, handle, &mut meshes);
             commands.entity(entity).despawn();
         }
     }
 
-    let desired = desired_tiles(focus);
-
-    // Evict tiles that left the desired set or whose baked ring position
-    // went stale.
-    tiles.tiles.retain(|&key, &mut (entity, stamp)| {
-        match desired.iter().find(|(k, s)| *k == key && *s == stamp) {
-            Some(_) => true,
-            None => {
-                commands.entity(entity).despawn();
-                false
-            }
-        }
-    });
-
-    // Spawn new tiles (budgeted). Camera focus-following samples the
-    // HeightField directly (terrain::camera); the Ground marker remains
-    // for drag-pan's grab-point raycast.
-    let deadline = match budget.as_deref() {
-        Some(b) => Instant::now() + Duration::from_millis(b.mesh_millis),
-        None => Instant::now(),
-    };
+    // Spawn pass. Cache hits apply free; misses are meshed in parallel
+    // waves — one tile costs ~2 ms of field sampling serially (see the
+    // `tile_mesh` perf test), so a 2 ms budget buys several tiles only
+    // across cores. Camera focus-following samples the HeightField
+    // directly (terrain::camera); the Ground marker remains for
+    // drag-pan's grab-point raycast. Absent budget means unlimited
+    // (tests, loading screens).
+    let deadline = budget
+        .as_deref()
+        .map(|b| Instant::now() + Duration::from_millis(b.mesh_millis));
     let mut built = 0usize;
-    for (key, stamp) in desired {
-        if tiles.tiles.contains_key(&key) {
-            continue;
-        }
-        // Always build at least one tile per frame so streaming makes
-        // progress no matter how small the budget.
-        if built > 0 && Instant::now() >= deadline {
+    let mut index = 0usize;
+    while index < desired.len() {
+        if built > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
-        let hole = if key.level == 0 {
-            None
-        } else {
-            Some(finer_render_square(key.level, focus))
-        };
-        let mesh = meshes.add(tile_mesh(&field, key, stamp.focus_tile, hole));
-        let entity = commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(materials.ground.clone()),
-                Transform::IDENTITY,
-                Ground,
-            ))
-            .id();
-        tiles.tiles.insert(key, (entity, stamp));
-        built += 1;
+        // Assemble the next wave: misses to mesh (a full parallel wave,
+        // or a single guaranteed-progress tile when the budget is already
+        // spent), cache hits passing straight through.
+        let spent = deadline.is_some_and(|d| Instant::now() >= d);
+        let wave_cap = if spent { 1 } else { parallelism().max(1) };
+        let mut wave: Vec<(TileKey, TileStamp, Option<Handle<Mesh>>)> = Vec::new();
+        while index < desired.len() && wave.len() < wave_cap {
+            let (key, stamp) = desired[index];
+            index += 1;
+            if let Some((_, live, _)) = tiles.tiles.get(&key) {
+                if *live == stamp {
+                    continue; // current
+                }
+            }
+            wave.push((key, stamp, cache.take(key, stamp)));
+        }
+        if wave.is_empty() {
+            continue;
+        }
+        let fresh = mesh_wave(&field, &wave);
+        built += fresh.len();
+        for (i, mesh) in fresh {
+            let handle = meshes.add(mesh);
+            wave[i].2 = Some(handle);
+        }
+        for (key, stamp, mesh) in wave {
+            // Every wave entry has a handle by now: cache hit or fresh.
+            let mesh = mesh.expect("wave entry left unmeshed");
+            // Atomic swap: the replacement enters the map this frame; the
+            // retired mesh parks in the cache.
+            let entity = commands
+                .spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(materials.ground.clone()),
+                    Transform::IDENTITY,
+                    Ground,
+                ))
+                .id();
+            if let Some((old_entity, old_stamp, old_handle)) =
+                tiles.tiles.insert(key, (entity, stamp, mesh))
+            {
+                cache.put(key, old_stamp, old_handle, &mut meshes);
+                commands.entity(old_entity).despawn();
+            }
+        }
     }
+}
+
+/// Usable cores for the meshing waves (wasm reports 1; the serial
+/// fallback there needs no threads).
+fn parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Mesh this wave's cache misses across cores, returning `(wave index,
+/// mesh)` pairs. Every tile costs about the same (~equal vertex counts),
+/// so even slices need no work stealing. Single-core falls back to
+/// serial — `std::thread::scope` needs real threads, which wasm does not
+/// have.
+fn mesh_wave(
+    field: &HeightField,
+    wave: &[(TileKey, TileStamp, Option<Handle<Mesh>>)],
+) -> Vec<(usize, Mesh)> {
+    let to_build: Vec<usize> = wave
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, cached))| cached.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    let build = |indexes: &[usize]| -> Vec<(usize, Mesh)> {
+        indexes
+            .iter()
+            .map(|&i| {
+                let (key, stamp, _) = wave[i];
+                let hole = if stamp.cuts_hole {
+                    Some(hole_square(key.level, stamp.fine_focus_tile))
+                } else {
+                    None
+                };
+                (i, tile_mesh(field, key, stamp.focus_tile, hole))
+            })
+            .collect()
+    };
+    let workers = parallelism().min(to_build.len()).max(1);
+    if workers <= 1 || to_build.len() <= 1 {
+        return build(&to_build);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = to_build
+            .chunks(to_build.len().div_ceil(workers))
+            .map(|chunk| scope.spawn(move || build(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("tile meshing panicked"))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -617,6 +914,7 @@ mod tests {
         app.insert_resource(TerrainTuning::default())
             .insert_resource(HeightField::default())
             .init_resource::<TerrainTiles>()
+            .init_resource::<TileMeshCache>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<crate::resources::Materials>()
@@ -627,8 +925,11 @@ mod tests {
                     stream_terrain_tiles.after(rebuild_height_field),
                 ),
             );
-        app.world_mut().spawn(Camera3d::default());
-        app.world_mut().spawn(RtsCamera::default());
+        // One camera entity: streaming keys the ring centre off the
+        // Camera3d entity's transform (plus its RtsCamera focus in Focus
+        // mode) via `cameras.single()`.
+        app.world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()));
         let ground = app
             .world_mut()
             .resource_mut::<Assets<StandardMaterial>>()
@@ -665,29 +966,135 @@ mod tests {
         // continental rim must fall inside some streamed tile — the
         // no-annular-gaps guarantee of the skip criterion. Dense radii
         // near the finest ring (16 m steps) so thin slit holes between
-        // levels cannot hide between samples.
-        let mut covered = 0usize;
-        let mut total = 0usize;
-        let mut radii: Vec<f32> = (1..24).map(|i| i as f32 * 16.0).collect();
-        radii.extend_from_slice(&[1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 4_000_000.0]);
-        for radius in radii {
-            for angle in 0..16 {
-                let a = angle as f32 * std::f32::consts::TAU / 16.0;
-                let point = Vec2::new(a.cos(), a.sin()) * radius;
-                total += 1;
-                covered += tiles_covering_point(desired_set_for_focus(Vec2::ZERO), point) as usize;
+        // levels cannot hide between samples. The guarantee must hold at
+        // any distance-gated finest level, not just the full stack.
+        for min_level in [0u8, 2, 4] {
+            let mut covered = 0usize;
+            let mut total = 0usize;
+            let mut radii: Vec<f32> = (1..24).map(|i| i as f32 * 16.0).collect();
+            radii.extend_from_slice(&[1_000.0, 10_000.0, 100_000.0, 1_000_000.0, 4_000_000.0]);
+            for radius in radii {
+                for angle in 0..16 {
+                    let a = angle as f32 * std::f32::consts::TAU / 16.0;
+                    let point = Vec2::new(a.cos(), a.sin()) * radius;
+                    total += 1;
+                    covered +=
+                        tiles_covering_point(desired_set_around(Vec2::ZERO, min_level), point)
+                            as usize;
+                }
             }
+            assert_eq!(covered, total, "min_level {min_level}: uncovered points");
         }
-        assert_eq!(covered, total, "some ring points are not covered");
     }
 
     /// The desired-set computation extracted for tests: which tiles would
-    /// stream around this focus.
-    fn desired_set_for_focus(focus: Vec2) -> Vec<TileKey> {
-        desired_tiles(focus)
+    /// stream around this ring centre at this finest level.
+    fn desired_set_around(center: Vec2, min_level: u8) -> Vec<TileKey> {
+        desired_tiles(center, min_level)
             .into_iter()
             .map(|(key, _)| key)
             .collect()
+    }
+
+    #[test]
+    fn ring_center_prefers_the_rts_focus() {
+        // Rings follow the focus (which zoom never moves); only a freecam
+        // — no RTS camera — centres on the camera's own ground position.
+        let camera_xz = Vec2::new(100.0, -200.0);
+        let rts = RtsCamera {
+            focus: Transform::from_translation(Vec3::new(5_000.0, 3.0, 5_000.0)),
+            ..Default::default()
+        };
+        assert_eq!(
+            ring_center(Some(&rts), camera_xz),
+            Vec2::new(5_000.0, 5_000.0)
+        );
+        assert_eq!(ring_center(None, camera_xz), camera_xz);
+    }
+
+    #[test]
+    fn finest_level_grows_with_camera_distance() {
+        assert_eq!(finest_level(0.0), 0);
+        // Walking height keeps 1 m cells; a few hundred metres needs 4 m
+        // cells; the 30 km ceiling's slant distance keeps 256 m cells.
+        assert_eq!(finest_level(10.0), 0);
+        assert_eq!(finest_level(400.0), 1);
+        assert_eq!(finest_level(30_000.0 / 20f32.to_radians().cos()), 4);
+        // Monotone across the range.
+        let mut last = 0;
+        for distance in [0.0, 1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0] {
+            let level = finest_level(distance);
+            assert!(level >= last, "not monotone at {distance}");
+            last = level;
+        }
+    }
+
+    #[test]
+    fn camera_distance_gates_the_finest_rings() {
+        // With the gate at level 2: no finer tiles stream, the gate level
+        // covers the centre un-cut, and exactly the tiles overlapping the
+        // hole carry it in their stamp — ring corners don't, so a gate
+        // flip restamps only the affected tiles.
+        let tiles = desired_set_around(Vec2::ZERO, 2);
+        assert!(
+            tiles.iter().all(|key| key.level >= 2),
+            "levels finer than the gate streamed"
+        );
+        assert!(
+            tiles
+                .iter()
+                .any(|key| key.level == 2 && key.contains(Vec2::ZERO)),
+            "gate level must cover the centre"
+        );
+
+        let gated = desired_tiles(Vec2::ZERO, 2);
+        assert!(
+            gated
+                .iter()
+                .filter(|(key, _)| key.level == 2)
+                .all(|(_, stamp)| !stamp.cuts_hole),
+            "gate level must be un-cut"
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|(key, stamp)| key.level == 3 && stamp.cuts_hole),
+            "the level above must cut where it overlaps the gate ring"
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|(key, stamp)| key.level == 3 && !stamp.cuts_hole),
+            "ring corners away from the hole must not cut"
+        );
+
+        // Lowering the gate one level flips only the overlapping tiles'
+        // stamps; a corner tile above the gate stamps byte-identical, or
+        // the flip would respawn the whole ring for nothing.
+        let lower = desired_tiles(Vec2::ZERO, 1);
+        let stamp_of = |set: &[(TileKey, TileStamp)], key: TileKey| {
+            set.iter().find(|(k, _)| *k == key).map(|(_, s)| *s)
+        };
+        let corner = TileKey {
+            level: 3,
+            x: -2,
+            z: -2,
+        };
+        assert_eq!(stamp_of(&lower, corner), stamp_of(&gated, corner));
+        let centre = TileKey {
+            level: 2,
+            x: 0,
+            z: 0,
+        };
+        assert_eq!(
+            stamp_of(&gated, centre).map(|s| s.cuts_hole),
+            Some(false)
+        );
+        assert_eq!(
+            stamp_of(&lower, centre).map(|s| s.cuts_hole),
+            Some(true),
+            "the newly-holed tile must restamp, or its stale un-cut mesh would sheet the fine level"
+        );
     }
 
     fn tiles_covering_point(tiles: Vec<TileKey>, point: Vec2) -> bool {
@@ -700,9 +1107,9 @@ mod tests {
         // square fully contains is skipped, so no coarse sheet can render
         // unseen underneath the fine surface.
         for focus in [Vec2::ZERO, Vec2::new(17.3, -45.6), Vec2::new(990.0, 12.5)] {
-            for key in desired_set_for_focus(focus) {
+            for key in desired_set_around(focus, 0) {
                 assert!(
-                    !covered_by_finer_level(key.level, key, focus),
+                    !covered_by_finer_level(key.level, key, focus, 0),
                     "level {} tile at {:?} fully covered but desired",
                     key.level,
                     key.centre()
@@ -748,6 +1155,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(HeightField::default())
             .init_resource::<TerrainTiles>()
+            .init_resource::<TileMeshCache>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<crate::resources::Materials>()
@@ -768,7 +1176,9 @@ mod tests {
         let before = tile_entities(&app);
         assert!(!before.is_empty());
 
-        // Pan the focus across a level-0 tile boundary (32 m).
+        // Pan across a level-0 tile boundary (32 m): move both the camera
+        // body and its focus — the centre follows the focus, the distance
+        // gate reads the body.
         let mut entity = app.world_mut().get_entity_mut(camera).unwrap();
         let mut transform = entity.get_mut::<Transform>().unwrap();
         transform.translation.x = 40.0;
@@ -791,7 +1201,7 @@ mod tests {
 
     #[test]
     fn finest_level_streams_at_the_focus() {
-        let tiles = desired_set_for_focus(Vec2::new(123.4, -45.6));
+        let tiles = desired_set_around(Vec2::new(123.4, -45.6), 0);
         assert!(
             tiles
                 .iter()
@@ -802,7 +1212,7 @@ mod tests {
 
     #[test]
     fn tile_budget_stays_bounded() {
-        let tiles = desired_set_for_focus(Vec2::ZERO);
+        let tiles = desired_set_around(Vec2::ZERO, 0);
         // Hard bound: 25 tiles per level. With the focus on a tile corner
         // (the origin is one) even a coarse centre tile pokes out of the
         // finer square, so nothing is skipped; mid-tile focuses skip more.
@@ -971,6 +1381,7 @@ mod tests {
         app.insert_resource(HeightField::default())
             .insert_resource(StreamBudget { mesh_millis: 0 })
             .init_resource::<TerrainTiles>()
+            .init_resource::<TileMeshCache>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<crate::resources::Materials>()
@@ -989,7 +1400,7 @@ mod tests {
         let first = tile_entities(&app).len();
         assert_eq!(first, 1, "zero budget must build exactly one tile per frame");
 
-        let total = desired_tiles(Vec2::ZERO).len();
+        let total = desired_tiles(Vec2::ZERO, 0).len();
         for _ in 0..(4 * total) {
             app.update();
             if tile_entities(&app).len() == total {
@@ -1000,6 +1411,171 @@ mod tests {
             tile_entities(&app).len(),
             total,
             "budgeted streaming never finished the desired set"
+        );
+    }
+
+    /// A streaming test app: the system plus the resources it needs, one
+    /// RTS camera at the origin. `budget_millis: None` = no budget
+    /// (unlimited builds per frame).
+    fn streaming_app(budget_millis: Option<u64>) -> (App, Entity) {
+        let mut app = App::new();
+        app.insert_resource(HeightField::default())
+            .init_resource::<TerrainTiles>()
+            .init_resource::<TileMeshCache>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<crate::resources::Materials>()
+            .add_systems(Update, stream_terrain_tiles);
+        if let Some(millis) = budget_millis {
+            app.insert_resource(StreamBudget { mesh_millis: millis });
+        }
+        let ground = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::from_color(Color::WHITE));
+        app.world_mut()
+            .resource_mut::<crate::resources::Materials>()
+            .ground = ground;
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
+        (app, camera)
+    }
+
+    /// Move the camera body and its focus together (a pan); both the ring
+    /// centre and the distance gate read them.
+    fn pan_camera(app: &mut App, camera: Entity, x: f32) {
+        let mut entity = app.world_mut().get_entity_mut(camera).unwrap();
+        entity.get_mut::<Transform>().unwrap().translation.x = x;
+        let mut rts = entity.get_mut::<RtsCamera>().unwrap();
+        rts.focus.translation.x = x;
+        rts.target_focus = rts.focus;
+    }
+
+    fn converge(app: &mut App, total: usize) {
+        for _ in 0..(4 * total + 8) {
+            app.update();
+        }
+    }
+
+    #[test]
+    fn stale_tiles_render_until_their_replacement_spawns() {
+        // The no-void invariant: crossing a tile boundary restamps the
+        // rings, but the old meshes stay in the world until each
+        // replacement lands (zero budget = one build per frame, so the
+        // overlap window is long) — and the streamed set keeps covering
+        // the focus throughout.
+        let (mut app, camera) = streaming_app(Some(0));
+        let total = desired_tiles(Vec2::ZERO, 0).len();
+        converge(&mut app, total);
+        assert_eq!(tile_entities(&app).len(), total);
+        let before = tile_entities(&app);
+
+        pan_camera(&mut app, camera, 40.0);
+        app.update(); // exactly one replacement built this frame
+
+        let alive = |app: &App, entity: Entity| app.world().get_entity(entity).is_ok();
+        let survivors = before.iter().filter(|e| alive(&app, **e)).count();
+        assert!(
+            survivors > before.len() / 2,
+            "old meshes vanished before their replacements: {survivors}/{}",
+            before.len()
+        );
+        assert!(
+            app.world()
+                .resource::<TerrainTiles>()
+                .covers(Vec2::new(40.0, 0.0)),
+            "the new focus is not covered mid-transition"
+        );
+
+        converge(&mut app, total);
+        assert_eq!(tile_entities(&app).len(), total);
+    }
+
+    #[test]
+    fn dropped_level_tiles_wait_until_covered() {
+        // Zooming out lifts the finest levels (the distance gate): their
+        // tiles must not vanish while the coarser ring still cuts the
+        // hole that exposed them — the cover has to land first.
+        let (mut app, _camera) = streaming_app(Some(0));
+        let total = desired_tiles(Vec2::ZERO, 0).len();
+        converge(&mut app, total);
+
+        // Lift the camera 40 km (focus stays): distance gates the finest
+        // level up to L4, dropping the L0..L3 rings.
+        app.world_mut()
+            .get_entity_mut(_camera)
+            .unwrap()
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(0.0, 40_000.0, 0.0);
+        app.update(); // one build: the un-holed covers have not landed
+
+        let l0 = app
+            .world()
+            .resource::<TerrainTiles>()
+            .tiles
+            .keys()
+            .filter(|key| key.level == 0)
+            .count();
+        assert!(l0 > 0, "dropped L0 tiles vanished before their cover landed");
+
+        converge(&mut app, total);
+        let l0 = app
+            .world()
+            .resource::<TerrainTiles>()
+            .tiles
+            .keys()
+            .filter(|key| key.level == 0)
+            .count();
+        assert_eq!(l0, 0, "dropped L0 tiles never retired");
+    }
+
+    #[test]
+    fn recycled_tiles_reuse_cached_meshes() {
+        // Panning away and back re-spawns from the mesh cache: the return
+        // trip creates no new Assets<Mesh> entries.
+        let (mut app, camera) = streaming_app(None);
+        let total = desired_tiles(Vec2::ZERO, 0).len();
+        converge(&mut app, total);
+
+        let asset_count =
+            |app: &App| app.world().resource::<Assets<Mesh>>().iter().count();
+        pan_camera(&mut app, camera, 200.0);
+        converge(&mut app, total);
+        let away = asset_count(&app);
+
+        pan_camera(&mut app, camera, 0.0);
+        converge(&mut app, total);
+        assert_eq!(
+            asset_count(&app),
+            away,
+            "returning over visited ground built new meshes instead of cache hits"
+        );
+        assert_eq!(tile_entities(&app).len(), total);
+    }
+
+    #[test]
+    fn tile_mesh_builds_in_about_a_millisecond() {
+        // Pins the SERIAL cost of one tile build — the field sampling is
+        // ~2 ms (release ~2 ms, dev/cranelift a touch more) and the spawn
+        // pass meshes whole waves of them in parallel (see `mesh_wave`).
+        // A noise/erosion regression that multiplies this starves
+        // streaming even across cores. Wall-clock like
+        // `nearest_solver_scales_to_10k_members`; run in release for the
+        // real number.
+        let field = HeightField::default();
+        let set = desired_tiles(Vec2::new(123.4, -45.6), 0);
+        let start = Instant::now();
+        for (key, stamp) in &set {
+            let _ = tile_mesh(&field, *key, stamp.focus_tile, None);
+        }
+        let per_tile = start.elapsed() / set.len() as u32;
+        eprintln!("tile_mesh: {per_tile:?}/tile over {} tiles", set.len());
+        assert!(
+            per_tile < Duration::from_millis(4),
+            "tile mesh avg {per_tile:?} — parallel waves assume ~2 ms serial builds"
         );
     }
 }

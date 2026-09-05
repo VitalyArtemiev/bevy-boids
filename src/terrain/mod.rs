@@ -15,7 +15,9 @@ mod tiles;
 pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
 pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
-pub use tiles::{StreamBudget, TerrainTiles, stream_terrain_tiles};
+pub use tiles::{
+    LodMode, StreamBudget, TerrainTiles, TileMeshCache, stream_terrain_tiles,
+};
 
 use bevy::prelude::*;
 use std::sync::Arc;

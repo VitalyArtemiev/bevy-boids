@@ -1,6 +1,7 @@
 mod boid;
 mod debug_ui;
 mod formations;
+mod freecam;
 mod horse;
 mod kinematics;
 mod launch;
@@ -18,6 +19,7 @@ use crate::formations::{
     FormationTuning, LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
     plan_formation_goals, propagate_formation_targets, transition_formation_orders,
 };
+use crate::freecam::{CameraMode, apply_camera_mode, freecam_move};
 use crate::kinematics::*;
 use crate::launch::{BenchPlugin, LaunchConfig, launch_terrain_enabled, parse_launch_args};
 use crate::player::{
@@ -28,9 +30,9 @@ use crate::resources::{Materials, Meshes};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, HeightField, ObstacleBundle, StreamBudget, TerrainTiles, TerrainTuning,
-    camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
-    rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
+    CameraClearance, HeightField, LodMode, ObstacleBundle, StreamBudget, TerrainTiles,
+    TileMeshCache, TerrainTuning, camera_terrain_clearance, focus_camera_on_ground, ground_boids,
+    project_obstacles_onto_field, rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
 };
 use crate::ui::{GameState, UiPlugin};
 use bevy::asset::RenderAssetUsages;
@@ -72,6 +74,13 @@ fn main() {
         .init_resource::<LODGuard>()
         .init_resource::<HeightField>()
         .init_resource::<TerrainTiles>()
+        // Retired tile meshes kept for instant re-spawn (pan/zoom back).
+        .init_resource::<TileMeshCache>()
+        // Finest rendered LOD level gated by camera distance (correct);
+        // the F3 panel can force finest-at-focus for debugging.
+        .init_resource::<LodMode>()
+        // RTS camera vs freecam, toggled from the F3 panel.
+        .init_resource::<CameraMode>()
         // Budgeted tile meshing: a tuning edit floods the world back in
         // over a few frames instead of hitching one.
         .init_resource::<StreamBudget>()
@@ -133,6 +142,14 @@ fn main() {
                 project_obstacles_onto_field.after(rebuild_height_field),
                 focus_camera_on_ground.before(RtsCameraSystemSet),
                 camera_terrain_clearance.after(RtsCameraSystemSet),
+                // Freecam (F3 toggle) takes the camera over by component
+                // swap when the mode resource changes; the move system is
+                // inert without a Freecam camera.
+                apply_camera_mode.run_if(resource_changed::<CameraMode>),
+                freecam_move.run_if(
+                    not(egui_wants_any_pointer_input)
+                        .and_then(not(egui_wants_any_keyboard_input)),
+                ),
                 hard_collisions.after(soft_collisions),
             )
                 .run_if(in_state(GameState::Playing)),

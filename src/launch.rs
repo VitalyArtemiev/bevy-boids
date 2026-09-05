@@ -17,8 +17,8 @@ use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraSystemSet};
 use crate::ui::GameState;
 
 /// Bench zoom expressed in `RtsCamera` units, where 0.0 = `height_max`
-/// (30 km) and 1.0 = `height_min` (2 m). 0.99 lerps to ~302 m: the
-/// `ZOOM_ANCHOR_M` altitude the zoom-speed curve treats as the legacy feel.
+/// (30 km) and 1.0 = `height_min` (2 m). 0.99 lerps to ~302 m, the legacy
+/// pre-continental camera height the bench baseline was measured at.
 const BENCH_ZOOM: f32 = 0.99;
 const BENCH_DURATION_SECS: f32 = 30.0;
 pub const DEFAULT_BOIDS: usize = 99 * 99;

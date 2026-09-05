@@ -600,25 +600,32 @@ pub fn selection_indicator_face(
 /// Stock adds a constant zoom delta per wheel unit, which only felt right
 /// when the whole height range was 300 m; with a 30 km ceiling it would
 /// move the camera 7.5 km per notch near the ground. Instead the step is
-/// defined in HEIGHT space and anchored to the legacy feel:
+/// a constant FRACTION of the current height (constant-ratio "map zoom"):
 ///
-/// `step(h) = ZOOM_STEP_M * max(1, h / ZOOM_ANCHOR_M)`
+/// `step(h) = max(h * ZOOM_STEP_FRACTION, ZOOM_STEP_MIN_M)`
 ///
-/// Below the anchor (= the old height ceiling) this is exactly the legacy
-/// ~75 m per wheel unit; above it the step grows linearly with altitude,
-/// so the fraction-of-altitude covered per notch keeps growing smoothly
-/// (constant-ratio "map zoom") instead of saturating. Ground -> 30 km is
-/// about ten notches.
-const ZOOM_ANCHOR_M: f32 = 300.0;
-/// Height change per wheel unit at the anchor height (the legacy feel).
-const ZOOM_STEP_M: f32 = 75.0;
+/// Every notch covers the same fraction of the remaining altitude, so the
+/// camera decelerates smoothly into the ground (the legacy flat 75 m step
+/// below 300 m slammed 97% of the altitude in one notch near max zoom).
+/// Tuned by feel on the near-ground zoom: half the original 0.25 ratio.
+/// Ground -> 30 km is ~72 notches.
+const ZOOM_STEP_FRACTION: f32 = 0.125;
+/// Step floor so a notch stays meaningful at walking height (max zoom).
+const ZOOM_STEP_MIN_M: f32 = 0.5;
 /// Pixel-unit wheel deltas are scaled down like the plugin does.
 const ZOOM_PIXEL_UNIT_SCALE: f32 = 0.001;
 
 pub fn height_scaled_zoom(
     mut mouse_wheel: MessageReader<MouseWheel>,
-    mut cam_q: Query<(&mut RtsCamera, &RtsCameraControls)>,
+    options: Option<Res<crate::ui::OptionsSettings>>,
+    mut cam_q: Query<(&mut RtsCamera, &mut RtsCameraControls)>,
 ) {
+    // The Options "zoom speed" knob, 1.0 without the resource (tests,
+    // headless). It scales our step ONLY — the crate's own zoom stays
+    // neutralized (`zoom_sensitivity: 0`), see `apply_options`.
+    let zoom_speed = options
+        .map(|settings| settings.camera_zoom_sensitivity)
+        .unwrap_or(1.0);
     for (mut cam, controls) in cam_q.iter_mut().filter(|(_, c)| c.enabled) {
         let wheel = mouse_wheel
             .read()
@@ -633,7 +640,7 @@ pub fn height_scaled_zoom(
         let span = cam.height_max - cam.height_min;
         // Positive wheel = zoom in = descend.
         let height = cam.height_max - cam.target_zoom * span;
-        let step = ZOOM_STEP_M * (height / ZOOM_ANCHOR_M).max(1.0);
+        let step = (height * ZOOM_STEP_FRACTION * zoom_speed).max(ZOOM_STEP_MIN_M);
         let target_height = (height - wheel * step).clamp(cam.height_min, cam.height_max);
         cam.target_zoom = (cam.height_max - target_height) / span;
     }
@@ -684,26 +691,57 @@ mod zoom_tests {
     }
 
     #[test]
-    fn notch_at_ground_matches_legacy_75m_step() {
-        let (mut app, camera) = zoom_app(1.0); // h = 2 m
+    fn notch_at_max_zoom_eases_in_with_the_height_floor() {
+        // h = 2 m: step = max(0.5, 0.125 × 2) = 0.5 m — the camera
+        // decelerates into the ground instead of the legacy flat 75 m
+        // slam.
+        let (mut app, camera) = zoom_app(1.0);
         scroll(&mut app, -1.0);
-        assert!((target_height(&app, camera) - 77.0).abs() < 1e-3);
+        assert!((target_height(&app, camera) - 2.5).abs() < 1e-3);
     }
 
     #[test]
-    fn step_is_anchored_at_the_legacy_ceiling() {
-        // h = 300 m: legacy step (75 m), same as below the anchor.
+    fn options_zoom_speed_scales_the_step() {
+        // The Options knob is a multiplier over the height fraction:
+        // 2× doubles the 12.5 m step at h = 100 m to 25 m. (The knob
+        // must scale OUR step only — see `apply_options`, which keeps the
+        // crate's constant-units zoom disarmed.)
+        let (mut app, camera) = zoom_app(29_900.0 / 29_998.0);
+        app.insert_resource(crate::ui::OptionsSettings {
+            camera_zoom_sensitivity: 2.0,
+            ..Default::default()
+        });
+        scroll(&mut app, -1.0);
+        assert!((target_height(&app, camera) - 125.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn notch_is_a_constant_fraction_of_the_height() {
+        // h = 100 m: step = 12.5 m (half the original 25 m feel — one
+        // notch covers an eighth of the altitude). The step compounds on
+        // the new height, so a second notch adds 12.5% of 112.5.
+        let (mut app, camera) = zoom_app(29_900.0 / 29_998.0);
+        scroll(&mut app, -1.0);
+        assert!((target_height(&app, camera) - 112.5).abs() < 1e-3);
+        scroll(&mut app, -1.0);
+        assert!((target_height(&app, camera) - 126.5625).abs() < 1e-2);
+    }
+
+    #[test]
+    fn step_scales_up_with_altitude_at_mid_range() {
+        // h = 300 m (the old ceiling): step = 37.5 m — the ratio holds
+        // everywhere above the floor.
         let (mut app, camera) = zoom_app(29_700.0 / 29_998.0);
         scroll(&mut app, -1.0);
-        assert!((target_height(&app, camera) - 375.0).abs() < 1.0);
+        assert!((target_height(&app, camera) - 337.5).abs() < 1.0);
     }
 
     #[test]
     fn step_grows_with_altitude_at_the_top() {
-        // h = 20 km: step = 75 * (20000/300) = 5000 m.
+        // h = 20 km: step = 20 000 × 0.125 = 2500 m.
         let (mut app, camera) = zoom_app(10_000.0 / 29_998.0);
         scroll(&mut app, -1.0);
-        assert!((target_height(&app, camera) - 25_000.0).abs() < 1.0);
+        assert!((target_height(&app, camera) - 22_500.0).abs() < 1.0);
     }
 
     #[test]

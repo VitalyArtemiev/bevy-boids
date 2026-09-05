@@ -210,7 +210,11 @@ fn debug_panel(
 
             // The camera controls are a component on the camera entity, not
             // a tuning resource, but the don't-flag-changes-without-edits
-            // rule is the same.
+            // rule is the same. No zoom slider here: the crate's
+            // `zoom_sensitivity` is deliberately neutralized (`0` in
+            // `setup`) — its constant-units step stacks on top of
+            // `height_scaled_zoom`; the Options "zoom speed" knob scales
+            // our step instead.
             let mut controls_changed = false;
             egui::CollapsingHeader::new("Camera")
                 .default_open(false)
@@ -218,22 +222,13 @@ fn debug_panel(
                     if let Ok(mut controls) = q_controls.single_mut() {
                         let controls: &mut RtsCameraControls =
                             controls.bypass_change_detection();
-                        let mut changed = false;
-                        changed |= slider(
+                        controls_changed |= slider(
                             ui,
                             &mut controls.pan_speed,
                             1.0..=100.0,
                             "pan speed",
                         )
                         .changed();
-                        changed |= slider(
-                            ui,
-                            &mut controls.zoom_sensitivity,
-                            0.05..=2.0,
-                            "zoom sensitivity",
-                        )
-                        .changed();
-                        controls_changed |= changed;
                     }
                 });
             if controls_changed {

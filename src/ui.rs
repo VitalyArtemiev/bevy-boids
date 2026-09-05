@@ -15,8 +15,9 @@ use bevy_egui::input::egui_wants_any_keyboard_input;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_rts_camera::RtsCameraControls;
 
+use crate::freecam::CameraMode;
 use crate::sky::SkyTuning;
-use crate::terrain::TerrainTuning;
+use crate::terrain::{LodMode, TerrainTuning};
 use std::ops::RangeInclusive;
 
 /// App-wide flow state. The simulation and gameplay input only run in
@@ -47,7 +48,12 @@ pub struct OptionsSettings {
     pub bloom: bool,
     /// Camera pan speed, m/s at the reference height.
     pub camera_pan_speed: f32,
-    /// Camera scroll zoom sensitivity.
+    /// Zoom speed multiplier over the height-scaled step
+    /// (`height_scaled_zoom`): 0.5 halves it, 2.0 doubles it. Must NEVER
+    /// feed the crate's `zoom_sensitivity` — the crate's zoom is
+    /// deliberately neutralized (`0` in `setup`) because its
+    /// constant-height step (7.5 km per notch at any altitude) stacks on
+    /// top of ours and dominates near the ground.
     pub camera_zoom_sensitivity: f32,
 }
 
@@ -57,7 +63,7 @@ impl Default for OptionsSettings {
             shadows: true,
             bloom: true,
             camera_pan_speed: 15.0,
-            camera_zoom_sensitivity: 0.5,
+            camera_zoom_sensitivity: 1.0,
         }
     }
 }
@@ -219,8 +225,8 @@ fn options_ui(
                 .changed();
             changed |= ui
                 .add(
-                    egui::Slider::new(&mut settings.camera_zoom_sensitivity, 0.05..=2.0)
-                        .text("zoom sensitivity"),
+                    egui::Slider::new(&mut settings.camera_zoom_sensitivity, 0.25..=4.0)
+                        .text("zoom speed"),
                 )
                 .changed();
             ui.add_space(6.0);
@@ -262,7 +268,11 @@ fn apply_options(
     }
     for mut controls in &mut q_controls {
         controls.pan_speed = settings.camera_pan_speed;
-        controls.zoom_sensitivity = settings.camera_zoom_sensitivity;
+        // Zoom sensitivity is deliberately NOT pushed: `setup` neutralizes
+        // the crate's zoom (`zoom_sensitivity: 0`) because its
+        // constant-height step stacks on top of `height_scaled_zoom` and
+        // dominates near the ground. The options knob scales our step
+        // instead, inside `height_scaled_zoom`.
     }
 }
 
@@ -289,6 +299,8 @@ fn terrain_tuning_ui(
     keys: Res<ButtonInput<KeyCode>>,
     mut shown: Local<bool>,
     mut tuning: ResMut<TerrainTuning>,
+    mut lod_mode: ResMut<LodMode>,
+    mut camera_mode: ResMut<CameraMode>,
 ) -> Result {
     if keys.just_pressed(KeyCode::F3) {
         *shown = !*shown;
@@ -301,11 +313,45 @@ fn terrain_tuning_ui(
     // every frame the window is open, rebuilding the whole terrain at frame
     // rate; bypass the flag and re-arm it only for real edits.
     let mut changed = false;
+    // Same bypass for the two debug toggles: `apply_camera_mode` is gated
+    // on `resource_changed::<CameraMode>`.
+    let mut lod_changed = false;
+    let mut mode_changed = false;
     egui::Window::new("Terrain tuning")
         .open(&mut *shown)
         .show(ctx, |ui| {
             let tuning: &mut TerrainTuning = tuning.bypass_change_detection();
+            let lod_mode = lod_mode.bypass_change_detection();
+            let camera_mode = camera_mode.bypass_change_detection();
             ui.label("World regenerates live while you drag.");
+            ui.add_space(6.0);
+
+            ui.heading("Debug");
+            ui.horizontal(|ui| {
+                ui.label("LOD:");
+                let r_distance = ui.selectable_value(
+                    lod_mode,
+                    LodMode::CameraDistance,
+                    "by camera distance (correct)",
+                );
+                let r_focus = ui.selectable_value(
+                    lod_mode,
+                    LodMode::FinestAtFocus,
+                    "finest at focus (debug)",
+                );
+                lod_changed |= r_distance.changed() | r_focus.changed();
+            });
+            let mut free = *camera_mode == CameraMode::Free;
+            if ui
+                .checkbox(
+                    &mut free,
+                    "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
+                )
+                .changed()
+            {
+                *camera_mode = if free { CameraMode::Free } else { CameraMode::Rts };
+                mode_changed = true;
+            }
             ui.add_space(6.0);
 
             changed |= ui
@@ -420,6 +466,12 @@ fn terrain_tuning_ui(
     if changed {
         tuning.set_changed();
     }
+    if lod_changed {
+        lod_mode.set_changed();
+    }
+    if mode_changed {
+        camera_mode.set_changed();
+    }
     Ok(())
 }
 
@@ -508,6 +560,46 @@ fn pause_virtual_time(mut time: ResMut<Time<Virtual>>) {
 
 fn unpause_virtual_time(mut time: ResMut<Time<Virtual>>) {
     time.unpause();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The crate's zoom must stay disarmed: pushing the options knob into
+    /// `RtsCameraControls::zoom_sensitivity` re-armed the crate's
+    /// constant-units zoom (7.5 km per notch at any altitude) on top of
+    /// `height_scaled_zoom` — one scroll out near the ground rocketed the
+    /// camera to the sky.
+    #[test]
+    fn apply_options_keeps_the_crate_zoom_disarmed() {
+        let mut app = App::new();
+        app.insert_resource(OptionsSettings::default())
+            .init_resource::<SkyTuning>()
+            .add_systems(Update, apply_options);
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                RtsCameraControls {
+                    zoom_sensitivity: 0.0,
+                    pan_speed: 0.0,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        app.update(); // the resource insert counts as a change
+
+        let controls = app.world().get::<RtsCameraControls>(camera).unwrap();
+        assert_eq!(
+            controls.pan_speed, 15.0,
+            "the pan speed option no longer applies"
+        );
+        assert_eq!(
+            controls.zoom_sensitivity, 0.0,
+            "the crate's constant-units zoom got re-armed on top of height_scaled_zoom"
+        );
+    }
 }
 
 fn disable_camera_controls(mut controls: Query<&mut RtsCameraControls>) {
