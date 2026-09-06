@@ -16,6 +16,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_rts_camera::RtsCameraControls;
 
 use crate::freecam::CameraMode;
+use crate::terrain::{DemoTerrain, ViewMode};
 use crate::sky::SkyTuning;
 use std::ops::RangeInclusive;
 
@@ -287,13 +288,16 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// The F3 debug panel (was the terrain tuning panel; the world
-/// regenerator is gone with the LOD terrain). Keeps the freecam toggle.
+/// The F3 panel: the erosion-demo controls (the `bevy_erosion_filter`
+/// example's panel — filter params, terrain scales, view modes) plus the
+/// freecam toggle. Edits mark the terrain dirty; the mesh rebuilds when
+/// the drag releases (see `terrain::demo::rebuild_terrain`).
 fn debug_panel_ui(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
     mut shown: Local<bool>,
     mut camera_mode: ResMut<CameraMode>,
+    mut demo: ResMut<DemoTerrain>,
 ) -> Result {
     if keys.just_pressed(KeyCode::F3) {
         *shown = !*shown;
@@ -303,28 +307,123 @@ fn debug_panel_ui(
     }
     let ctx = contexts.ctx_mut()?;
     let mut mode_changed = false;
-    egui::Window::new("Debug").open(&mut *shown).show(ctx, |ui| {
-        // Bypass the change flag (apply_camera_mode is gated on
-        // resource_changed::<CameraMode>) and re-arm only for real edits.
-        let camera_mode = camera_mode.bypass_change_detection();
-        let mut free = *camera_mode == CameraMode::Free;
-        if ui
-            .checkbox(
-                &mut free,
-                "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
-            )
-            .changed()
-        {
-            *camera_mode = if free { CameraMode::Free } else { CameraMode::Rts };
-            mode_changed = true;
-        }
-    });
+    let mut dirty = false;
+    egui::Window::new("Erosion terrain")
+        .open(&mut *shown)
+        .show(ctx, |ui| {
+            // Bypass the change flags and re-arm only for real edits.
+            let camera_mode = camera_mode.bypass_change_detection();
+            let demo = demo.bypass_change_detection();
+
+            ui.horizontal(|ui| {
+                dirty |= ui.checkbox(&mut demo.erosion_enabled, "erosion").changed();
+                if ui.button("reset").clicked() {
+                    *demo = DemoTerrain::default();
+                    dirty = true;
+                }
+            });
+            ui.add_space(6.0);
+
+            ui.heading("View");
+            ui.horizontal(|ui| {
+                for mode in [
+                    ViewMode::Terrain,
+                    ViewMode::ErosionDelta,
+                    ViewMode::RidgeMap,
+                    ViewMode::DebugFade,
+                ] {
+                    dirty |= ui
+                        .selectable_value(&mut demo.view_mode, mode, view_label(mode))
+                        .changed();
+                }
+            });
+            ui.add_space(6.0);
+
+            let mut free = *camera_mode == CameraMode::Free;
+            if ui
+                .checkbox(
+                    &mut free,
+                    "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
+                )
+                .changed()
+            {
+                *camera_mode = if free { CameraMode::Free } else { CameraMode::Rts };
+                mode_changed = true;
+            }
+            ui.add_space(6.0);
+
+            dirty |= section(ui, "Filter", |ui| {
+                let e = &mut demo.erosion;
+                let mut c = slider(ui, &mut e.scale, 0.04..=0.32, "gully size").changed();
+                c |= slider(ui, &mut e.strength, 0.0..=0.42, "strength").changed();
+                c |= slider(ui, &mut e.gully_weight, 0.0..=1.0, "gully depth").changed();
+                c |= slider(ui, &mut e.detail, 0.2..=4.0, "high-slope spread").changed();
+                c |= slider(ui, &mut e.cell_scale, 0.25..=4.0, "cell density").changed();
+                c |= slider(ui, &mut e.normalization, 0.0..=1.0, "wave normalization").changed();
+                c |= slider(ui, &mut e.octaves, 1..=8, "octaves").changed();
+                c |= slider(ui, &mut e.lacunarity, 1.5..=3.0, "lacunarity").changed();
+                c |= slider(ui, &mut e.gain, 0.1..=0.9, "gain").changed();
+                let mut rounding = e.rounding.to_array();
+                c |= component_sliders(
+                    ui,
+                    &mut rounding,
+                    0.0..=4.0,
+                    &["round ridges", "ridge falloff", "round creases", "crease falloff"],
+                );
+                e.rounding = Vec4::from_array(rounding);
+                let mut onset = e.onset.to_array();
+                c |= component_sliders(
+                    ui,
+                    &mut onset,
+                    0.0..=4.0,
+                    &["onset slope 1", "onset slope 2", "ridge mask", "ridge fade"],
+                );
+                e.onset = Vec4::from_array(onset);
+                let mut assumed_slope = e.assumed_slope.to_array();
+                c |= component_sliders(
+                    ui,
+                    &mut assumed_slope,
+                    0.0..=2.0,
+                    &["pretend slope", "pretend blend"],
+                );
+                e.assumed_slope = Vec2::from_array(assumed_slope);
+                c
+            });
+
+            dirty |= section(ui, "Terrain", |ui| {
+                let mut c = slider(ui, &mut demo.height_offset, -1.1..=0.25, "height offset").changed();
+                c |= slider(ui, &mut demo.map_scale, 0.8..=3.6, "range scale").changed();
+                c |= slider(ui, &mut demo.water_level, -3.0..=1.0, "water level").changed();
+                c
+            });
+        });
+    if dirty {
+        demo.set_changed();
+        demo.bypass_change_detection().dirty = true;
+    }
     if mode_changed {
         camera_mode.set_changed();
     }
     Ok(())
 }
 
+fn view_label(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::Terrain => "Terrain",
+        ViewMode::ErosionDelta => "Erosion",
+        ViewMode::RidgeMap => "Ridges",
+        ViewMode::DebugFade => "Debug",
+    }
+}
+
+/// A collapsing section whose body reports whether it changed anything.
+fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+    egui::CollapsingHeader::new(title)
+        .default_open(true)
+        .show(ui, body)
+        .body_returned
+        .unwrap_or(false)
+}
 
 fn slider<T: egui::emath::Numeric>(
     ui: &mut egui::Ui,
@@ -334,6 +433,25 @@ fn slider<T: egui::emath::Numeric>(
 ) -> egui::Response {
     ui.add(egui::Slider::new(value, range).text(label))
 }
+
+/// One slider per array component — the erosion filter's shader vectors
+/// (rounding/onset/assumed slope) bind component-wise.
+fn component_sliders(
+    ui: &mut egui::Ui,
+    values: &mut [f32],
+    range: RangeInclusive<f32>,
+    labels: &[&str],
+) -> bool {
+    let mut changed = false;
+    for (value, label) in values.iter_mut().zip(labels) {
+        changed |= ui
+            .add(egui::Slider::new(value, range.clone()).text(*label))
+            .changed();
+    }
+    changed
+}
+
+
 
 /// One slider per array component — the erosion filter's shader vectors
 

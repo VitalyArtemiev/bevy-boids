@@ -30,7 +30,8 @@ use crate::resources::{Materials, Meshes};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, HeightField, ObstacleBundle, TerrainMesh, camera_terrain_clearance,
+    CameraClearance, ErosionDemoPlugin, HeightField, ObstacleBundle, TerrainMesh,
+    camera_terrain_clearance,
     focus_camera_on_ground, ground_boids, project_obstacles_onto_field, reset_ground_caches,
     spawn_ground,
 };
@@ -93,8 +94,10 @@ fn main() {
                 }),
         )
         .add_plugins(RtsCameraPlugin)
-        // The 1 km² ground mesh (needs Assets<Mesh> from the plugins).
+        // The 1 km² ground mesh (needs Assets<Mesh> from the plugins)
+        // and the erosion-demo settings/water/rebuild wiring.
         .init_resource::<TerrainMesh>()
+        .add_plugins(ErosionDemoPlugin)
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)
         // No-op without --bench; skips the main menu when enabled.

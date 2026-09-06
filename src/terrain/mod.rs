@@ -10,10 +10,16 @@ use bevy::render::mesh::{Indices, Mesh};
 use bevy_rts_camera::Ground;
 
 mod camera;
+pub mod demo;
 mod grounding;
 
 pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
+pub use demo::{DemoTerrain, ErosionDemoPlugin, ViewMode};
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
+
+/// The water plane riding `DemoTerrain::water_level`.
+#[derive(Component)]
+pub struct WaterPlane;
 
 /// The playable square's side, in metres.
 pub const TERRAIN_EXTENT_M: f32 = 1000.0;
@@ -114,7 +120,12 @@ pub fn spawn_ground(
 ) {
     commands.spawn((
         Mesh3d(terrain.handle.clone()),
-        MeshMaterial3d(materials.add(StandardMaterial::default())),
+        // The grid's COLOR_0 attribute arms vertex coloring; the demo's
+        // albedo rides it.
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            ..default()
+        })),
         Transform::IDENTITY,
         Ground,
     ));
