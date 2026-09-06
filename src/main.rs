@@ -60,6 +60,10 @@ fn main() {
         }
     };
 
+    // Read out the scalar flags the plugin chain needs before `launch`
+    // moves into the resource.
+    let (bench, shadows) = (launch.bench, launch.shadows);
+
     let mut wgpu_settings = WgpuSettings::default();
     // Browsers have no Vulkan; let wgpu pick (WebGL2/WebGPU) on wasm
     #[cfg(not(target_arch = "wasm32"))]
@@ -86,7 +90,7 @@ fn main() {
         .init_resource::<StreamBudget>()
         .insert_resource(launch)
         .insert_resource(SkyTuning {
-            shadows: launch.shadows,
+            shadows,
             ..default()
         })
         .add_plugins(
@@ -101,7 +105,7 @@ fn main() {
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)
         // No-op without --bench; skips the main menu when enabled.
-        .add_plugins(BenchPlugin(launch.bench))
+        .add_plugins(BenchPlugin(bench))
         .add_plugins(DebugUiPlugin)
         // Runtime-tunable values exposed by the debug panel (F1).
         .init_resource::<KinematicsTuning>()

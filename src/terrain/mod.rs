@@ -15,6 +15,7 @@ mod tiles;
 pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
 pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
+pub(crate) use noise::VERTICAL_BIAS;
 pub use tiles::{
     LodMode, StreamBudget, TerrainTiles, TileMeshCache, stream_terrain_tiles,
 };
@@ -37,25 +38,46 @@ use std::sync::Arc;
 /// cache resets via change detection.
 #[derive(Resource, Clone)]
 pub struct HeightField {
-    sampler: Arc<dyn Fn(f32, f32) -> TerrainSample + Send + Sync>,
+    sampler: Arc<dyn Fn(f32, f32, u8) -> TerrainSample + Send + Sync>,
+    /// Coloring reference relief (the mountain scale): consumers that
+    /// gate on unit height (the demo's coloring thresholds) convert back
+    /// with this, so snow crowns only real mountains. The live terrain's
+    /// relief varies per point with the tectonic field.
+    relief_m: f32,
 }
 
 impl HeightField {
     pub fn from_noise(noise: TerrainNoise) -> Self {
         HeightField {
-            sampler: Arc::new(move |x, z| noise.sample(x, z)),
+            relief_m: noise.relief_m(),
+            sampler: Arc::new(move |x, z, level| noise.sample_lod(x, z, level)),
         }
     }
 
-    /// Height in metres at world (x, z).
-    pub fn height(&self, x: f32, z: f32) -> f32 {
-        (self.sampler)(x, z).height
+    /// World metres of relief per unit height (`TerrainTuning::relief_m`).
+    pub fn relief_m(&self) -> f32 {
+        self.relief_m
     }
 
-    /// Height plus the slope and ridge map, in one evaluation. Tile
-    /// meshing uses this so shading and displacement never disagree.
+    /// Height in metres at world (x, z), full detail (gameplay-facing:
+    /// grounding, camera and obstacles must see the same ground no
+    /// matter what the rendered LOD shows).
+    pub fn height(&self, x: f32, z: f32) -> f32 {
+        (self.sampler)(x, z, 0).height
+    }
+
+    /// Height plus the slope and ridge map, in one evaluation, full
+    /// detail.
     pub fn sample(&self, x: f32, z: f32) -> TerrainSample {
-        (self.sampler)(x, z)
+        (self.sampler)(x, z, 0)
+    }
+
+    /// LOD sample: `level` truncates every octave ladder to what that
+    /// tile's cell size can resolve, so coarse rings don't alias the
+    /// sub-cell octaves into speckle. Gameplay callers use
+    /// [`Self::sample`]/[`Self::height`].
+    pub fn sample_lod(&self, x: f32, z: f32, level: u8) -> TerrainSample {
+        (self.sampler)(x, z, level)
     }
 }
 
@@ -69,9 +91,12 @@ impl HeightField {
     /// Test helper: a synthetic field from a plain height function. The
     /// slope is finite-differenced (real fields report it analytically)
     /// and the ridge map stays neutral, so test meshes shade plausibly.
+    /// Relief defaults to the tuning's mountain scale so unit-height
+    /// color gates behave like the real world's.
     pub fn from_fn(f: impl Fn(f32, f32) -> f32 + Send + Sync + 'static) -> Self {
         HeightField {
-            sampler: Arc::new(move |x, z| {
+            relief_m: TerrainTuning::default().tectonics.mountain_relief_m,
+            sampler: Arc::new(move |x, z, _level| {
                 const EPS: f32 = 0.5;
                 TerrainSample {
                     height: f(x, z),

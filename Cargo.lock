@@ -392,7 +392,6 @@ dependencies = [
  "bevy_rts_camera",
  "bevy_spatial",
  "derive_more",
- "fastnoise-lite",
  "getrandom 0.3.4",
  "lazy_static",
  "quickcheck",
@@ -2747,15 +2746,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "fastnoise-lite"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e5f3c3cc9081e5d0e18bcd50e80cd33cba47fc22f88a9da9c33ecd1c87ea5c0"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]

@@ -83,6 +83,18 @@ fn setup_sky(
         SunDisk::EARTH,
         sun_transform(tuning.sun_elevation_deg, tuning.sun_azimuth_deg),
     ));
+
+    // Sky ambient at ~15% of the sun: the reference erosion demo keeps
+    // every steep face readable with a strong half-Lambert bounce term
+    // (~30% of its sun); with Bevy's near-zero default ambient, shadowed
+    // 45°+ mountain faces collapse to black and the terrain reads as
+    // high-contrast noise. Tinted sky-blue because the fill comes from
+    // the sky dome.
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.75, 0.8, 0.9),
+        brightness: 0.07 * lux::FULL_DAYLIGHT,
+        affects_lightmapped_meshes: true,
+    });
 }
 
 /// Applies [`SkyTuning`] to the sun light. Runs only when the tuning

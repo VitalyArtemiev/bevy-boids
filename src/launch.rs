@@ -25,7 +25,7 @@ pub const DEFAULT_BOIDS: usize = 99 * 99;
 
 /// Parsed command-line configuration, inserted before the plugins so every
 /// startup system (world spawn, sky, camera, terrain streaming) can read it.
-#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct LaunchConfig {
     /// Skip the main menu, pin the camera, and exit after `duration`.
     pub bench: bool,
@@ -33,6 +33,14 @@ pub struct LaunchConfig {
     pub duration: Duration,
     /// Bench-only: camera zoom pinned for the whole run (0.0 high, 1.0 low).
     pub zoom: f32,
+    /// Bench-only: write one screenshot here near the end of the run —
+    /// self-contained visual verification with no desktop capture tooling
+    /// (works over ssh and on locked/occluded sessions).
+    pub shot: Option<std::path::PathBuf>,
+    /// Bench-only: park the camera focus at this world XZ instead of the
+    /// origin, so terrain verification can look at a specific spot (e.g.
+    /// a mountain range).
+    pub focus: Option<bevy::math::Vec2>,
     /// How many boids `setup` spawns (0 isolates terrain/sky cost).
     pub boids: usize,
     /// Whether the directional light casts shadows (`SkyTuning.shadows`).
@@ -55,6 +63,8 @@ impl Default for LaunchConfig {
             bench: false,
             duration: Duration::from_secs_f32(BENCH_DURATION_SECS),
             zoom: BENCH_ZOOM,
+            shot: None,
+            focus: None,
             boids: DEFAULT_BOIDS,
             shadows: true,
             terrain: true,
@@ -87,8 +97,9 @@ fn value(
     Ok(value.clone())
 }
 
-/// Parses `--bench`, `--secs <s>`, `--zoom <z>`, `--boids <n>`,
-/// `--shadows|--no-shadows`, `--terrain|--no-terrain`,
+/// Parses `--bench`, `--secs <s>`, `--zoom <z>`, `--shot <path>`,
+/// `--focus <x,z>`,
+/// `--boids <n>`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
 /// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`, and
 /// `--bloom|--no-bloom`. Later flags win. Unrelated arguments are ignored so
 /// other tooling can pass through.
@@ -124,6 +135,19 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
                     return Err(format!("{flag} must be within 0.0..=1.0, got {parsed}"));
                 }
                 config.zoom = parsed;
+            }
+            "--shot" => {
+                config.shot = Some(value(args, &mut i, flag, inline_value)?.into());
+            }
+            "--focus" => {
+                let raw = value(args, &mut i, flag, inline_value)?;
+                let (x, z) = raw.split_once(',').ok_or("--focus wants <x>,<z>")?;
+                let parse = |v: &str| {
+                    v.trim()
+                        .parse::<f32>()
+                        .map_err(|_| format!("--focus: {v:?} is not a number"))
+                };
+                config.focus = Some(bevy::math::Vec2::new(parse(x)?, parse(z)?));
             }
             "--boids" => {
                 let raw = value(args, &mut i, flag, inline_value)?;
@@ -188,6 +212,7 @@ impl Plugin for BenchPlugin {
             Update,
             (
                 pin_bench_camera.before(RtsCameraSystemSet),
+                bench_screenshot,
                 exit_bench_when_elapsed,
             )
                 .chain()
@@ -210,6 +235,12 @@ fn pin_bench_camera(
     for (mut camera, mut controls) in &mut cameras {
         camera.zoom = config.zoom;
         camera.target_zoom = config.zoom;
+        if let Some(focus) = config.focus {
+            camera.focus.translation.x = focus.x;
+            camera.focus.translation.z = focus.y;
+            camera.target_focus.translation.x = focus.x;
+            camera.target_focus.translation.z = focus.y;
+        }
         controls.enabled = false;
     }
     *pinned = true;
@@ -224,6 +255,34 @@ fn pin_bench_camera(
         config.environment_map,
         config.bloom
     );
+}
+
+/// Capture one screenshot near the end of a bench run — tiles streamed,
+/// camera settled — and write it to the `--shot` path. The capture is the
+/// renderer's own framebuffer readback, so it needs no desktop capture
+/// tooling and works regardless of window visibility (a Wayland compositor
+/// throttles occluded windows to a crawl, but frames still happen).
+fn bench_screenshot(
+    config: Res<LaunchConfig>,
+    time: Res<Time>,
+    mut elapsed: Local<Duration>,
+    mut taken: Local<bool>,
+    mut commands: Commands,
+) {
+    let Some(path) = &config.shot else {
+        return;
+    };
+    *elapsed += time.delta();
+    // Late in the run, but with a few seconds of margin so the async
+    // readback completes and saves before `AppExit`.
+    let at = config.duration.saturating_sub(Duration::from_secs(5));
+    if !*taken && *elapsed >= at {
+        *taken = true;
+        info!("bench: capturing screenshot to {}", path.display());
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(path.clone()));
+    }
 }
 
 /// Play for the configured duration, then exit gracefully — a clean
@@ -306,6 +365,27 @@ mod tests {
         let config = parse_launch_args(&args(&["--atmosphere", "--no-atmosphere"])).unwrap();
         assert!(!config.atmosphere);
         assert!(!config.environment_map);
+    }
+
+    #[test]
+    fn focus_flag_parses_xz() {
+        let config = parse_launch_args(&args(&["--focus=100,-50"])).unwrap();
+        assert_eq!(config.focus, Some(bevy::math::Vec2::new(100.0, -50.0)));
+        assert!(parse_launch_args(&args(&["--focus", "100"])).is_err());
+        assert!(parse_launch_args(&args(&["--focus=abc,0"])).is_err());
+    }
+
+    #[test]
+    fn shot_flag_parses_a_path() {
+        let config = parse_launch_args(&args(&["--bench", "--shot=/tmp/shot.png"])).unwrap();
+        assert_eq!(
+            config.shot.as_deref(),
+            Some(std::path::Path::new("/tmp/shot.png"))
+        );
+        assert_eq!(
+            parse_launch_args(&args(&["--shot"])).unwrap_err(),
+            "--shot needs a value"
+        );
     }
 
     #[test]

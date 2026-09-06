@@ -361,57 +361,102 @@ fn terrain_tuning_ui(
                 })
                 .inner;
 
-            changed |= section(ui, "Base (rolling hills)", |ui| {
-                let mut c = amplitude_wavelength(
+            changed |= section(ui, "Tectonics", |ui| {
+                let t = &mut tuning.tectonics;
+                let mut c =
+                    slider(ui, &mut t.plate_size_m, 2000.0..=30_000.0, "plate size (m)").changed();
+                c |= slider(ui, &mut t.drift_speed, 0.25..=4.0, "drift speed").changed();
+                c |= slider(ui, &mut t.mountain_width, 0.1..=0.8, "mountain width").changed();
+                c |= slider(ui, &mut t.rift_depth_m, 0.0..=400.0, "rift depth (m)").changed();
+                c |= slider(ui, &mut t.plains_relief_m, 0.0..=200.0, "plains relief (m)").changed();
+                c |= slider(ui, &mut t.hills_relief_m, 0.0..=400.0, "hills relief (m)").changed();
+                c |= slider(
                     ui,
-                    &mut tuning.base_amplitude_m,
-                    &mut tuning.base_wavelength_m,
-                    60.0,
-                    2000.0,
-                );
-                c |= slider(ui, &mut tuning.base_octaves, 1..=8, "octaves").changed();
+                    &mut t.mountain_relief_m,
+                    0.0..=1200.0,
+                    "mountain relief (m)",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut t.plains_feature_m,
+                    50.0..=2000.0,
+                    "plains feature (m)",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut t.mountain_feature_m,
+                    50.0..=2000.0,
+                    "mountain feature (m)",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut t.boundary_curvature,
+                    0.0..=1.0,
+                    "boundary curvature",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut t.boundary_curvature_wavelength,
+                    1.0..=10.0,
+                    "curvature wavelength (plates)",
+                )
+                .changed();
+                c |= slider(ui, &mut t.range_pulse, 0.0..=1.0, "range pulse").changed();
+                c |= slider(
+                    ui,
+                    &mut t.range_pulse_wavelength,
+                    1.0..=10.0,
+                    "pulse wavelength (plates)",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut t.macro_amplitude_m,
+                    0.0..=600.0,
+                    "massif amplitude (m)",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut t.macro_wavelength_m,
+                    300.0..=6000.0,
+                    "massif wavelength (m)",
+                )
+                .changed();
+                c |= slider(ui, &mut t.macro_octaves, 1..=8, "massif octaves").changed();
                 c
             });
 
-            changed |= section(ui, "Mountains", |ui| {
+            changed |= section(ui, "Landform", |ui| {
                 let mut c = slider(
                     ui,
-                    &mut tuning.ridge_max_m,
-                    0.0..=150.0,
-                    "ridge height (m)",
+                    &mut tuning.height_offset,
+                    -1.1..=0.25,
+                    "height offset",
                 )
                 .changed();
                 c |= slider(
                     ui,
-                    &mut tuning.ridge_wavelength_m,
-                    100.0..=3000.0,
-                    "ridge wavelength (m)",
+                    &mut tuning.base_wavelength_m,
+                    20.0..=2000.0,
+                    "hill wavelength (m)",
                 )
                 .changed();
-                c |= slider(
-                    ui,
-                    &mut tuning.mask_wavelength_m,
-                    200.0..=5000.0,
-                    "range spacing (m)",
-                )
-                .changed();
-                c |= amplitude_wavelength(
-                    ui,
-                    &mut tuning.warp_amplitude_m,
-                    &mut tuning.warp_wavelength_m,
-                    500.0,
-                    3000.0,
-                );
+                c |= slider(ui, &mut tuning.base_octaves, 1..=8, "hill octaves").changed();
                 c
             });
 
             changed |= section(ui, "Erosion (gullies)", |ui| {
                 let e = &mut tuning.erosion;
                 let mut c =
-                    slider(ui, &mut e.strength, 0.0..=0.5, "strength (0 = off)").changed();
+                    slider(ui, &mut e.strength, 0.0..=0.42, "strength (0 = off)").changed();
                 c |= slider(ui, &mut e.gully_weight, 0.0..=1.0, "gully depth").changed();
                 c |= slider(ui, &mut e.scale, 0.04..=0.32, "gully size").changed();
-                c |= slider(ui, &mut e.detail, 0.1..=4.0, "high-slope spread").changed();
+                c |= slider(ui, &mut e.detail, 0.2..=4.0, "high-slope spread").changed();
                 c |= slider(ui, &mut e.cell_scale, 0.25..=4.0, "cell density").changed();
                 c |= slider(
                     ui,
@@ -423,9 +468,12 @@ fn terrain_tuning_ui(
                 c |= slider(ui, &mut e.octaves, 1..=8, "octaves").changed();
                 c |= slider(ui, &mut e.lacunarity, 1.5..=3.0, "lacunarity").changed();
                 c |= slider(ui, &mut e.gain, 0.1..=0.9, "gain").changed();
+                // Fixed-size shader vectors round-trip through arrays so
+                // each component binds to a slider directly.
+                let mut rounding = e.rounding.to_array();
                 c |= component_sliders(
                     ui,
-                    &mut e.rounding,
+                    &mut rounding,
                     0.0..=4.0,
                     &[
                         "round ridges",
@@ -434,26 +482,23 @@ fn terrain_tuning_ui(
                         "crease falloff",
                     ],
                 );
+                e.rounding = Vec4::from_array(rounding);
+                let mut onset = e.onset.to_array();
                 c |= component_sliders(
                     ui,
-                    &mut e.onset,
+                    &mut onset,
                     0.0..=4.0,
                     &["onset slope 1", "onset slope 2", "ridge mask", "ridge fade"],
                 );
+                e.onset = Vec4::from_array(onset);
+                let mut assumed_slope = e.assumed_slope.to_array();
                 c |= component_sliders(
                     ui,
-                    &mut e.assumed_slope,
+                    &mut assumed_slope,
                     0.0..=2.0,
                     &["pretend slope", "pretend blend"],
                 );
-                c |= slider(
-                    ui,
-                    &mut e.feature_size_m,
-                    5.0..=500.0,
-                    "feature size (m)",
-                )
-                .changed();
-                c |= slider(ui, &mut e.fade_fraction, 0.2..=2.0, "fade range").changed();
+                e.assumed_slope = Vec2::from_array(assumed_slope);
                 c
             });
 
@@ -508,20 +553,6 @@ fn component_sliders(
             .changed();
     }
     changed
-}
-
-/// Paired amplitude + wavelength sliders with metre suffixes. Returns
-/// whether either value actually changed.
-fn amplitude_wavelength(
-    ui: &mut egui::Ui,
-    amplitude: &mut f32,
-    wavelength: &mut f32,
-    amplitude_max: f32,
-    wavelength_max: f32,
-) -> bool {
-    let a = ui.add(egui::Slider::new(amplitude, 0.0..=amplitude_max).text("amplitude (m)"));
-    let w = ui.add(egui::Slider::new(wavelength, 10.0..=wavelength_max).text("wavelength (m)"));
-    a.changed() | w.changed()
 }
 
 /// Escape pauses/resumes; with the Options window open it closes that

@@ -33,7 +33,6 @@ bevy_spatial = { git = "https://github.com/VitalyArtemiev/bevy-spatial", branch 
 # raycast cost ~5 ms/frame with 10k boid meshes; the game samples the
 # analytic HeightField instead (terrain::camera::focus_camera_on_ground).
 bevy_rts_camera = { path = "vendor/bevy_rts_camera" }
-fastnoise-lite = "1.1"
 
 # Rune Skovbo Johansen's "Advanced Terrain Erosion Filter" (MPL-2.0
 # shadertoy), pure-Rust port by korbindeman. `default-features = false`

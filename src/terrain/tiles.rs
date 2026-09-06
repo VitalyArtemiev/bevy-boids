@@ -14,12 +14,12 @@
 //! samples tint the tiles (rock/grass/dirt by slope and altitude,
 //! drainage streaks from the erosion ridge map).
 
-use super::{HeightField, TerrainSample};
+use super::{HeightField, TerrainSample, VERTICAL_BIAS};
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy_rts_camera::{Ground, RtsCamera};
-use std::collections::HashMap;
 use bevy::platform::time::Instant; // web-time on wasm: std's Instant::now() panics ("time not implemented on this platform")
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Tile resolution: 32x32 quads per tile, any level.
@@ -38,7 +38,7 @@ const LEVEL_RING: i32 = 2;
 /// second sits a further half-cell below the one finer, so overlap fringes
 /// resolve by depth test even on steep terrain (chord-over-valley error is
 /// bounded by slope * fringe width, and fringes are under half a cell).
-const LEVEL_DROP_STEP_FRACTION: f32 = 0.5;
+const LEVEL_DROP_STEP_FRACTION: f32 = 0.3;
 /// The stitched fine rim sits this fraction of the parent cell BELOW the
 /// parent plane: the rim is otherwise exactly coplanar with the coarse
 /// fringe quads, which z-fights where they overlap.
@@ -394,8 +394,11 @@ pub(crate) fn tile_mesh(
     let mut samples = [[TerrainSample::default(); TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
-            let sample =
-                field.sample(origin_x + ix as f32 * cell, origin_z + iz as f32 * cell);
+            let sample = field.sample_lod(
+                origin_x + ix as f32 * cell,
+                origin_z + iz as f32 * cell,
+                key.level,
+            );
             heights[iz][ix] = sample.height - drop;
             samples[iz][ix] = sample;
         }
@@ -435,19 +438,100 @@ pub(crate) fn tile_mesh(
     let mut colors = Vec::with_capacity(vert_count);
     let palette = ground_palette();
 
+    let relief_m = field.relief_m();
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
             let x = origin_x + ix as f32 * cell;
             let z = origin_z + iz as f32 * cell;
             positions.push([x, heights[iz][ix], z]);
-            // Normal from the field's analytic slope: field sampling is
-            // tile-independent, so neighbouring tiles agree exactly on
-            // shared vertices (sampling this tile's clamped grid instead
-            // drew a lighting grid over the whole world), and the gullies
-            // carve the lighting with no extra field samples.
-            let slope = samples[iz][ix].slope;
+            // NORMAL and COLOR from a 3x3-blurred neighborhood: on 50°
+            // carved terrain the exact per-vertex slope flips shading
+            // and color thresholds between adjacent facets every cell —
+            // a shattered-glass speckle (the reference shades per-
+            // fragment from interpolated values). The blur is a free
+            // low-pass — all nine samples are already in the grid — and
+            // geometry keeps the exact height, so only shading softens.
+            // Field sampling is tile-independent, so neighbouring tiles
+            // still agree exactly on shared vertices.
+            let (mut slope, mut h, mut rg) = (Vec2::ZERO, 0.0, 0.0);
+            for dz in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    let (jx, jz) = (ix as i32 + dx, iz as i32 + dz);
+                    let s = if jx >= 0 && jx <= TILE_QUADS as i32 && jz >= 0 && jz <= TILE_QUADS as i32
+                    {
+                        samples[jz as usize][jx as usize]
+                    } else {
+                        // Border vertices blur into the neighbour tile's
+                        // grid positions: sampling the field at the same
+                        // world points keeps the blur — like the exact
+                        // slope — tile-independent, so shared vertices
+                        // shade identically from both sides.
+                        field.sample_lod(
+                            origin_x + jx as f32 * cell,
+                            origin_z + jz as f32 * cell,
+                            key.level,
+                        )
+                    };
+                    slope += s.slope;
+                    h += s.height;
+                    rg += s.ridge_map;
+                }
+            }
+            let slope = slope / 9.0;
             normals.push(Vec3::new(-slope.x, 1.0, -slope.y).normalize().to_array());
-            colors.push(ground_color(&palette, samples[iz][ix]).to_array());
+            colors.push(
+                ground_color(
+                    &palette,
+                    slope.length(),
+                    h / 9.0 / relief_m.max(1.0) + VERTICAL_BIAS,
+                    rg / 9.0,
+                    1.0 + 0.7 * key.level as f32,
+                )
+                .to_array(),
+            );
+        }
+    }
+
+    // Ring-edge color morph: each LOD ring jumps 4x in cell size, and
+    // even with level-widened color bands the two rings' vertices read
+    // differently — the streaming rectangle showed up as a hard color
+    // boundary. Vertices on the tile's ring-facing edges fade toward the
+    // tile average, turning the boundary into a gradient. Geometry keeps
+    // its skirt; only shading blends. Strength grows with level (fine
+    // rings near the camera keep their detail).
+    let can_morph = can_stitch;
+    if can_morph && (rim_x_plus || rim_x_minus || rim_z_plus || rim_z_minus) {
+        let mut avg = Vec4::ZERO;
+        for c in colors[..TILE_VERTS * TILE_VERTS].iter() {
+            avg += Vec4::from(*c);
+        }
+        avg /= (TILE_VERTS * TILE_VERTS) as f32;
+        let strength = (0.15 * key.level as f32).min(0.65);
+        for iz in 0..TILE_VERTS {
+            for ix in 0..TILE_VERTS {
+                let u = ix as f32 / TILE_QUADS as f32;
+                let v = iz as f32 / TILE_QUADS as f32;
+                let mut d = 1.0f32;
+                if rim_x_plus {
+                    d = d.min(u);
+                }
+                if rim_x_minus {
+                    d = d.min(1.0 - u);
+                }
+                if rim_z_plus {
+                    d = d.min(v);
+                }
+                if rim_z_minus {
+                    d = d.min(1.0 - v);
+                }
+                if d < 1.0 {
+                    let t = smoothstep(0.0, 0.35, d);
+                    let i = iz * TILE_VERTS + ix;
+                    colors[i] = Vec4::from_array(colors[i])
+                        .lerp(avg, (1.0 - t) * strength)
+                        .to_array();
+                }
+            }
         }
     }
 
@@ -526,7 +610,7 @@ fn ground_palette() -> [Vec4; 6] {
         Color::srgb(0.15, 0.30, 0.10),
         Color::srgb(0.40, 0.50, 0.20),
         Color::srgb(0.60, 0.50, 0.40),
-        Color::srgb(0.22, 0.20, 0.20),
+        Color::srgb(0.30, 0.28, 0.27),
         Color::srgb(0.82, 0.76, 0.62),
         Color::srgb(0.92, 0.94, 0.96),
     ]
@@ -539,20 +623,57 @@ fn ground_palette() -> [Vec4; 6] {
 /// Per-vertex tint from one field sample — the CPU adaptation of the
 /// reference demo's per-fragment material: grass two-tone by altitude,
 /// dirt then cliff as steeps rise, chalky drainage streaks where the
-/// ridge map marks gully creases, snow on the highest ridges.
-fn ground_color(palette: &[Vec4; 6], sample: TerrainSample) -> Vec4 {
-    // Slope is m/m: grass holds to ~31°, sheer cliff past ~45°.
-    let steepness = sample.slope.length();
-    let grass = Vec4::lerp(palette[0], palette[1], smoothstep(4.0, 28.0, sample.height));
-    let mut c = Vec4::lerp(grass, palette[2], smoothstep(0.3, 0.55, steepness));
-    c = Vec4::lerp(c, palette[3], smoothstep(0.55, 1.0, steepness));
+/// ridge map marks gully creases, snow on the highest ridges. Altitude
+/// gates run on unit height (height / relief + 0.43) like the demo's, so
+/// the bands follow the mountains when relief changes scale.
+fn ground_color(
+    palette: &[Vec4; 6],
+    steepness: f32,
+    unit_height: f32,
+    ridgemap_raw: f32,
+    widen: f32,
+) -> Vec4 {
+    // Every band's transition widens with tile level: coarse vertices
+    // sample the field 16-64 m apart, and narrow thresholds then
+    // decorrelate into confetti. Widened bands shade coarse rings as
+    // coherent averages of what the fine ring resolves.
+    let grass = Vec4::lerp(
+        palette[0],
+        palette[1],
+        smoothstep_wide(0.40, 0.55, unit_height, widen),
+    );
+    // Slope gates stay sharp: coarse vertices UNDERSAMPLE slopes (they
+    // miss narrow gully flanks), so widening would fabricate dirt on
+    // terrain the fine ring renders green. Height gates below widen —
+    // heights survive coarsening.
+    let mut c = Vec4::lerp(grass, palette[2], smoothstep(0.5, 1.2, steepness));
+    c = Vec4::lerp(c, palette[3], smoothstep(1.4, 2.4, steepness));
     // ridge_map ≈ -1 at crease centres; only the narrow core band paints
     // the stream beds, or the chalk speckles over every slope (tuned on
-    // screen: 0.3 fired as isolated dots).
-    let ridgemap = (sample.ridge_map * 0.5 + 0.5).clamp(0.0, 1.0);
-    let drainage = (1.0 - ridgemap / 0.15).clamp(0.0, 1.0);
+    // screen: 0.3 fired as isolated dots). Chalk needs steep gully
+    // flanks to read as drainage: without the steepness gate it fires
+    // on the shallow creases of flat plains as pale dandruff.
+    let ridgemap = (ridgemap_raw * 0.5 + 0.5).clamp(0.0, 1.0);
+    // Chalk is as fine as the gullies it traces: coarse rings sample
+    // `ridge_map` decorrelated, so the band would fire as pale dither.
+    // Fade it out with level, like the gully geometry itself.
+    let drainage = (1.0 - ridgemap / 0.15).clamp(0.0, 1.0)
+        * smoothstep(0.2, 0.5, steepness)
+        / widen.sqrt();
     c = Vec4::lerp(c, palette[4], drainage);
-    Vec4::lerp(c, palette[5], smoothstep(55.0, 70.0, sample.height))
+    Vec4::lerp(
+        c,
+        palette[5],
+        smoothstep_wide(0.80, 0.95, unit_height, widen),
+    )
+}
+
+/// `smoothstep` with its transition band widened by `widen` around the
+/// same centre.
+fn smoothstep_wide(a: f32, b: f32, x: f32, widen: f32) -> f32 {
+    let centre = (a + b) * 0.5;
+    let half = (b - a) * 0.5 * widen;
+    smoothstep(centre - half, centre + half, x)
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -944,7 +1065,10 @@ mod tests {
         let before = tile_entities(&app);
         assert!(!before.is_empty(), "no tiles streamed initially");
 
-        app.world_mut().resource_mut::<TerrainTuning>().ridge_max_m += 10.0;
+        app.world_mut()
+            .resource_mut::<TerrainTuning>()
+            .tectonics
+            .mountain_relief_m += 10.0;
         app.update();
         app.update();
 
@@ -1349,28 +1473,35 @@ mod tests {
     fn colors_match_terrain_shape() {
         // Shading must agree with the fields it comes from: steepness
         // loses the grass green for cliff, creases brighten into chalky
-        // drainage streaks.
+        // drainage streaks — but only on STEEP ground: on flat plains
+        // the same crease stays grass (chalk there read as pale
+        // dandruff).
         let palette = ground_palette();
         let sample = |slope: Vec2, ridge: f32| {
             ground_color(
                 &palette,
-                TerrainSample {
-                    height: 10.0,
-                    slope,
-                    ridge_map: ridge,
-                },
+                slope.length(),
+                10.0 / TerrainTuning::default().tectonics.mountain_relief_m
+                    + super::VERTICAL_BIAS,
+                ridge,
+                1.0,
             )
         };
         let grass = sample(Vec2::ZERO, 1.0);
-        let cliff = sample(Vec2::new(1.5, 0.0), 1.0);
+        let cliff = sample(Vec2::new(2.5, 0.0), 1.0);
         assert!(
             cliff.y < grass.y,
             "cliff must lose the grass green: {cliff} vs {grass}"
         );
-        let crease = sample(Vec2::ZERO, -1.0);
+        let crease = sample(Vec2::new(0.9, 0.0), -1.0);
+        let flat_crease = sample(Vec2::ZERO, -1.0);
         assert!(
             crease.x > grass.x && crease.y > grass.y,
-            "drainage brightens creases: {crease} vs {grass}"
+            "drainage brightens steep creases: {crease} vs {grass}"
+        );
+        assert_eq!(
+            flat_crease, grass,
+            "chalk must not fire on flat creases: {flat_crease} vs {grass}"
         );
     }
 
@@ -1559,11 +1690,14 @@ mod tests {
 
     #[test]
     fn tile_mesh_builds_in_about_a_millisecond() {
-        // Pins the SERIAL cost of one tile build — the field sampling is
-        // ~2 ms (release ~2 ms, dev/cranelift a touch more) and the spawn
-        // pass meshes whole waves of them in parallel (see `mesh_wave`).
-        // A noise/erosion regression that multiplies this starves
-        // streaming even across cores. Wall-clock like
+        // Pins the SERIAL cost of one tile build. Two-layer baseline
+        // (tectonic Worley + erosion filter, 2026-09): ~1.9 ms release,
+        // ~3.9 ms dev/cranelift isolated (~2.5 µs/sample: ~0.7 µs
+        // tectonic + ~1.5 µs filter) and up to ~5 ms when the whole
+        // test binary competes for cores — hence the 6 ms dev pin. The
+        // spawn pass meshes whole waves of tiles in parallel (see
+        // `mesh_wave`); a noise/erosion regression that MULTIPLIES this
+        // starves streaming even across cores. Wall-clock like
         // `nearest_solver_scales_to_10k_members`; run in release for the
         // real number.
         let field = HeightField::default();
@@ -1575,8 +1709,8 @@ mod tests {
         let per_tile = start.elapsed() / set.len() as u32;
         eprintln!("tile_mesh: {per_tile:?}/tile over {} tiles", set.len());
         assert!(
-            per_tile < Duration::from_millis(4),
-            "tile mesh avg {per_tile:?} — parallel waves assume ~2 ms serial builds"
+            per_tile < Duration::from_millis(6),
+            "tile mesh avg {per_tile:?} — parallel waves assume ~2 ms serial release builds"
         );
     }
 }
