@@ -311,6 +311,32 @@ impl TerrainTiles {
         self.tiles.values().map(|&(entity, _, _)| entity)
     }
 
+    /// Audit atlas-layer usage across live and cached renders: counts,
+    /// layers claimed by more than one render (aliasing — renders would
+    /// read each other's bakes), and out-of-range layer indices.
+    pub fn slot_audit(&self, cache: &TileRenderCache) -> (usize, usize, usize, usize) {
+        let mut use_count: HashMap<u32, usize> = HashMap::new();
+        let mut oor = 0;
+        let mut live = 0;
+        for (_, _, render) in self.tiles.values() {
+            live += 1;
+            if render.slot >= super::render::ATLAS_LAYERS {
+                oor += 1;
+            }
+            *use_count.entry(render.slot).or_default() += 1;
+        }
+        let mut cached = 0;
+        for (render, _) in cache.entries.values() {
+            cached += 1;
+            if render.slot >= super::render::ATLAS_LAYERS {
+                oor += 1;
+            }
+            *use_count.entry(render.slot).or_default() += 1;
+        }
+        let aliased = use_count.values().filter(|&&n| n > 1).count();
+        (live, cached, aliased, oor)
+    }
+
     /// Is this world point inside any streamed tile's footprint? The
     /// streaming guarantee: every point between the finest ring and the
     /// continental rim is covered.
@@ -898,11 +924,51 @@ pub fn stream_terrain_tiles(
         }
     }
 
-    // Spawn pass. Cache hits apply free; misses are baked in parallel
-    // waves — one tile costs ~2 ms of field sampling serially (see the
-    // `bake_tile` perf test), so a 2 ms budget buys several tiles only
-    // across cores. Absent budget means unlimited (tests, loading
-    // screens).
+    // Immediate pass: apply every cached render swap NOW, unbudgeted.
+    // A zoom gate flip restamps a whole coarse level at once (holes in
+    // or out), and those renders are almost always cached from the last
+    // pass through this zoom — processing them in the same frame as the
+    // fine rings keeps every live tile's hole in step with what renders
+    // beneath it. Without this, the budgeted loop reaches the coarse
+    // restamp frames after the fine ring spawned, and the stale HOLELESS
+    // sheet covers the fresh detail for everyone to see. A hole-adding
+    // swap still waits until a finer live tile renders over the hole
+    // (the void guard), so nothing opens a gap.
+    for &(key, stamp) in &desired {
+        if let Some((_, live, _)) = tiles.tiles.get(&key) {
+            if *live == stamp {
+                continue; // current
+            }
+        }
+        if stamp.cuts_hole && !hole_covered(&tiles.tiles, key, &stamp) {
+            continue; // deferred: fine coverage not live yet
+        }
+        let Some(render) = cache.take(key, stamp) else {
+            continue; // a bake; the budgeted pass below owns it
+        };
+        let entity = commands
+            .spawn((
+                Mesh3d(shared_mesh.0.clone()),
+                MeshMaterial3d(render.material.clone()),
+                bevy::camera::visibility::NoFrustumCulling,
+                Transform::IDENTITY,
+                // The drag-pan grab raycast is off (lock_on_drag =
+                // false); the marker just tags terrain meshes.
+                Ground,
+            ))
+            .id();
+        if let Some((old_entity, old_stamp, old_render)) =
+            tiles.tiles.insert(key, (entity, stamp, render))
+        {
+            cache.put(key, old_stamp, old_render, &mut terrain_materials, &mut atlas);
+            commands.entity(old_entity).despawn();
+        }
+    }
+
+    // Spawn pass. Misses are baked in parallel waves — one tile costs
+    // ~2 ms of field sampling serially (see the `bake_tile` perf test),
+    // so a 2 ms budget buys several tiles only across cores. Absent
+    // budget means unlimited (tests, loading screens).
     let deadline = budget
         .as_deref()
         .map(|b| Instant::now() + Duration::from_millis(b.mesh_millis));
@@ -912,53 +978,42 @@ pub fn stream_terrain_tiles(
         if built > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
-        // Assemble the next wave: misses to bake (a full parallel wave,
-        // or a single guaranteed-progress tile when the budget is already
-        // spent), cache hits passing straight through.
+        // Assemble the next wave of bakes (a full parallel wave, or a
+        // single guaranteed-progress tile when the budget is spent).
         let spent = deadline.is_some_and(|d| Instant::now() >= d);
         let wave_cap = if spent { 1 } else { parallelism().max(1) };
-        let mut wave: Vec<(TileKey, TileStamp, Option<TileRender>)> = Vec::new();
+        let mut wave: Vec<(TileKey, TileStamp)> = Vec::new();
         while index < desired.len() && wave.len() < wave_cap {
             let (key, stamp) = desired[index];
             index += 1;
             if let Some((_, live, _)) = tiles.tiles.get(&key) {
                 if *live == stamp {
-                    continue; // current
+                    continue; // current (or an immediate-pass deferred hit)
                 }
             }
-            wave.push((key, stamp, cache.take(key, stamp)));
+            wave.push((key, stamp));
         }
         if wave.is_empty() {
             continue;
         }
-        // Atlas pressure valve: the wave's cache misses will claim fresh
-        // layers; evict cached renders until they fit (a miss re-bakes,
-        // a shortfall would assert).
-        let pending = wave
-            .iter()
-            .filter(|(_, _, cached)| cached.is_none())
-            .count() as u32;
-        while atlas.available() < pending
+        // Atlas pressure valve: the wave will claim fresh layers; evict
+        // cached renders until they fit (a miss re-bakes, a shortfall
+        // would assert).
+        while atlas.available() < wave.len() as u32
             && cache.evict_oldest(&mut terrain_materials, &mut atlas)
         {}
         let fresh = bake_wave(&field, &wave);
         built += fresh.len();
         for (i, bake) in fresh {
-            let (key, stamp, _) = wave[i];
-            wave[i].2 = Some(upload_tile(
+            let (key, stamp) = wave[i];
+            let render = upload_tile(
                 key,
                 stamp,
                 bake,
                 &mut atlas,
                 &mut images,
                 &mut terrain_materials,
-            ));
-        }
-        for (key, stamp, render) in wave {
-            // Every wave entry has a render by now: cache hit or fresh.
-            let render = render.expect("wave entry left unbaked");
-            // Atomic swap: the replacement enters the map this frame; the
-            // retired render parks in the cache.
+            );
             let entity = commands
                 .spawn((
                     Mesh3d(shared_mesh.0.clone()),
@@ -978,6 +1033,29 @@ pub fn stream_terrain_tiles(
             }
         }
     }
+}
+
+/// Does a finer live tile render over every part of `key`'s would-be
+/// hole? The immediate pass refuses to open a hole the fine level has
+/// not filled in yet (the void guard, same predicate the retire pass
+/// and `hole_cutters_never_expose_their_hole` use).
+fn hole_covered(
+    tiles: &HashMap<TileKey, (Entity, TileStamp, TileRender)>,
+    key: TileKey,
+    stamp: &TileStamp,
+) -> bool {
+    let (hmin, hmax) = hole_square(key.level, stamp.fine_focus_tile);
+    [hmin + Vec2::splat(1.0),
+        Vec2::new(hmax.x - 1.0, hmin.y + 1.0),
+        Vec2::new(hmin.x + 1.0, hmax.y - 1.0),
+        hmax - Vec2::splat(1.0),
+        (hmin + hmax) / 2.0]
+    .iter()
+    .all(|&p| {
+        tiles.iter().any(|(&k, &(_, st, _))| {
+            k.level < key.level && k.contains(p) && renders_at(k.level, &st, p)
+        })
+    })
 }
 
 /// Turn a fresh [`BakedTile`] into live render state: claim an atlas
@@ -1040,25 +1118,17 @@ fn parallelism() -> usize {
 /// so even slices need no work stealing. Single-core falls back to
 /// serial — `std::thread::scope` needs real threads, which wasm does not
 /// have.
-fn bake_wave(
-    field: &HeightField,
-    wave: &[(TileKey, TileStamp, Option<TileRender>)],
-) -> Vec<(usize, BakedTile)> {
-    let to_build: Vec<usize> = wave
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, _, cached))| cached.is_none())
-        .map(|(i, _)| i)
-        .collect();
+fn bake_wave(field: &HeightField, wave: &[(TileKey, TileStamp)]) -> Vec<(usize, BakedTile)> {
     let build = |indexes: &[usize]| -> Vec<(usize, BakedTile)> {
         indexes
             .iter()
             .map(|&i| {
-                let (key, stamp, _) = wave[i];
+                let (key, stamp) = wave[i];
                 (i, bake_tile(field, key, stamp.focus_tile))
             })
             .collect()
     };
+    let to_build: Vec<usize> = (0..wave.len()).collect();
     let workers = parallelism().min(to_build.len()).max(1);
     if workers <= 1 || to_build.len() <= 1 {
         return build(&to_build);
@@ -1778,6 +1848,60 @@ mod tests {
             "returning over visited ground built new renders instead of cache hits"
         );
         assert_eq!(tile_entities(&app).len(), total);
+    }
+
+    #[test]
+    fn gate_flip_restamps_coarse_tiles_the_same_frame() {
+        // Regression (the "mesh sitting on detailed terrain"): a zoom
+        // gate flip makes a whole coarse level's stamps flip their hole
+        // in or out. Those renders are cached from the last pass through
+        // the zoom, so they must apply the SAME frame — unbudgeted — or
+        // the stale holeless sheet covers the fresh fine ring (the old
+        // giant LOD drops used to hide this; flat drops expose it).
+        // Budget 0 (one bake per frame) maximizes the starvation window.
+        let mut app = terrain_app(Some(0));
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
+        // Zoomed in: fine levels render, coarse tiles cut holes.
+        converge(&mut app, desired_tiles(Vec2::ZERO, 0).len());
+        let zoomed_in = app.world().resource::<TerrainTiles>().tile_count();
+
+        // Zoom out (camera far above): the gate lifts the fine levels.
+        app.world_mut()
+            .get_entity_mut(camera)
+            .unwrap()
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(0.0, 40_000.0, 0.0);
+        converge(&mut app, desired_tiles(Vec2::ZERO, 2).len());
+        let zoomed_out = app.world().resource::<TerrainTiles>().tile_count();
+        assert!(zoomed_out < zoomed_in);
+
+        // Zoom back in. After ONE update every live tile must carry its
+        // desired stamp — all the restamps were cache hits.
+        app.world_mut()
+            .get_entity_mut(camera)
+            .unwrap()
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(0.0, 30.0, 40.0);
+        app.update();
+        let desired: HashMap<TileKey, TileStamp> =
+            desired_tiles(Vec2::ZERO, 0).into_iter().collect();
+        let stale: Vec<TileKey> = app
+            .world()
+            .resource::<TerrainTiles>()
+            .tiles
+            .iter()
+            .filter(|(key, (_, live, _))| desired.get(key) != Some(live))
+            .map(|(key, _)| *key)
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "after one frame back at fine zoom, {stale:?} still render stale stamps (the holeless-sheet window)"
+        );
     }
 
     #[test]
