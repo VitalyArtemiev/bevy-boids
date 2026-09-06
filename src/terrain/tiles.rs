@@ -40,26 +40,26 @@ const LEVEL_CELL_M: [f32; 9] = [
 /// Half-extent of a level's rendered square, in multiples of that level's
 /// own tile size: the 5x5 ring around the focus tile.
 const LEVEL_RING: i32 = 2;
-/// Vertical separation between adjacent levels: each level above the
-/// second sits a further half-cell below the one finer, so overlap fringes
-/// resolve by depth test even on steep terrain (chord-over-valley error is
-/// bounded by slope * fringe width, and fringes are under half a cell).
-const LEVEL_DROP_STEP_FRACTION: f32 = 0.3;
-/// The stitched fine rim sits this fraction of the parent cell BELOW the
-/// parent plane: the rim is otherwise exactly coplanar with the coarse
-/// fringe quads, which z-fights where they overlap.
-const STITCH_BIAS_CELL_FRACTION: f32 = 0.02;
+/// Vertical separation between adjacent levels: a fixed sub-metre nudge
+/// so transiently-overlapping rings (the swap window while a coarse
+/// cover sheets over the fine ring it retires) resolve by depth test.
+/// Historically this scaled with cell size (0.3 cells per level,
+/// CUMULATIVE — 26 km at the top level), which rim stitching compressed
+/// into one-cell ramps: concentric square cliffs around every ring,
+/// receding to the horizon. Rings no longer overlap at steady state
+/// (holes are cut exactly and rims stitch to the parent chord), so the
+/// scaled drop bought nothing visible and cost the terraces.
+const LEVEL_DROP: f32 = 0.5;
+/// The stitched fine rim sits this far BELOW the parent plane: the rim
+/// is otherwise exactly coplanar with the coarse fringe quads, which
+/// z-fights where they overlap. Flat for the same reason as
+/// [`LEVEL_DROP` — cell-scaled bias was kilometres wide at the top.
+const STITCH_BIAS: f32 = 0.1;
 
-/// Coarser levels sit below the field so wherever rings overlap the finer
-/// (more accurate) surface wins depth testing instead of z-fighting. The
-/// two finest levels share a 1 m drop, making their ring boundary seamless
-/// by construction; above that each level sinks a further half-cell.
-fn level_drop(level: u8) -> f32 {
-    let mut drop = 1.0;
-    for l in 2..=level as usize {
-        drop += LEVEL_CELL_M[l] * LEVEL_DROP_STEP_FRACTION;
-    }
-    drop
+/// Coarser levels sit a hair below the field so transient ring overlaps
+/// resolve by depth test instead of z-fighting. Flat across levels.
+fn level_drop(_level: u8) -> f32 {
+    LEVEL_DROP
 }
 
 /// Parent (= next coarser) level's geometry, as seen from `level`.
@@ -378,7 +378,7 @@ fn covered_by_finer_level(level: u8, key: TileKey, center: Vec2, min_level: u8) 
 /// cleanly instead of z-fighting.
 fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
     let parent_cell = LEVEL_CELL_M[level as usize] * PARENT_CELL_MULT;
-    let parent_drop = level_drop(level + 1) + parent_cell * STITCH_BIAS_CELL_FRACTION;
+    let parent_drop = level_drop(level + 1) + STITCH_BIAS;
     let gx = x / parent_cell;
     let gz = z / parent_cell;
     // Whichever axis is off the parent grid is the varying one.
@@ -1480,7 +1480,7 @@ mod tests {
                 let t = (z - z0) / parent_cell;
                 let h0 = 0.001 * z0 * z0;
                 let h1 = 0.001 * (z0 + parent_cell) * (z0 + parent_cell);
-                h0 + (h1 - h0) * t - level_drop(1) - parent_cell * STITCH_BIAS_CELL_FRACTION
+                h0 + (h1 - h0) * t - level_drop(1) - STITCH_BIAS
             };
             assert!(
                 (texel(&bake.height, TILE_QUADS, iz) - expected).abs() < 1e-4,
