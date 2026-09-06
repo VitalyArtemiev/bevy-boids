@@ -241,6 +241,11 @@ impl StreamBudget {
     // (tests, loading screens) — see `stream_terrain_tiles`.
 }
 
+/// Number of LOD levels (entries in `LEVEL_CELL_M`).
+pub fn level_count() -> usize {
+    LEVEL_CELL_M.len()
+}
+
 /// How the finest rendered LOD level is chosen. Toggled from the F3 panel.
 ///
 /// `CameraDistance` (the default) is correct LOD: levels whose cells are
@@ -456,7 +461,6 @@ pub(crate) fn bake_tile(
     let origin_x = key.x as f32 * tile_size;
     let origin_z = key.z as f32 * tile_size;
     let drop = level_drop(key.level);
-    let skirt = (cell * 1.5).max(8.0);
     // Rim edges: the neighbour in that direction lies outside the 5x5
     // ring, so the adjacent level there is coarser. The TOP level's outer
     // rim borders the void, not a coarser level — nothing to stitch to.
@@ -567,11 +571,12 @@ pub(crate) fn bake_tile(
 
     // Ring-edge color morph: each LOD ring jumps 4x in cell size, and
     // even with level-widened color bands the two rings' vertices read
-    // differently — the streaming rectangle showed up as a hard color
-    // boundary. Vertices on the tile's ring-facing edges fade toward the
-    // tile average, turning the boundary into a gradient. Geometry keeps
-    // its skirt; only shading blends. Strength grows with level (fine
-    // rings near the camera keep their detail).
+    // differently — the ring boundary showed up as a hard color step.
+    // Rim-facing verts fade toward the tile average over a SEAM-scale
+    // band (a few texels): enough to turn the step into a gradient,
+    // small enough not to read as a band of wrong-resolution terrain
+    // (the original 35%-of-tile band did exactly that at coarse
+    // levels). Strength grows mildly with level.
     let can_morph = can_stitch;
     if can_morph && (rim_x_plus || rim_x_minus || rim_z_plus || rim_z_minus) {
         let mut avg = Vec4::ZERO;
@@ -581,7 +586,7 @@ pub(crate) fn bake_tile(
             }
         }
         avg /= (TILE_VERTS * TILE_VERTS) as f32;
-        let strength = (0.15 * key.level as f32).min(0.65);
+        let strength = (0.1 * key.level as f32).min(0.5);
         for iz in 0..TILE_VERTS {
             for ix in 0..TILE_VERTS {
                 let u = ix as f32 / TILE_QUADS as f32;
@@ -600,16 +605,14 @@ pub(crate) fn bake_tile(
                     d = d.min(1.0 - v);
                 }
                 if d < 1.0 {
-                    let t = smoothstep(0.0, 0.35, d);
+                    let t = smoothstep(0.0, 0.12, d);
                     colors[iz][ix] = colors[iz][ix].lerp(avg, (1.0 - t) * strength);
                 }
             }
         }
     }
 
-    // Pack into textures. Skirt geometry is shader-side (the shared
-    // mesh's flagged border ring sunk by `skirt`), but the bounds must
-    // account for it.
+    // Pack into textures.
     let flat = |g: &[[f32; TILE_VERTS]; TILE_VERTS]| -> Vec<f32> {
         let mut v = Vec::with_capacity(TILE_VERTS * TILE_VERTS);
         for row in g {
@@ -647,16 +650,6 @@ pub(crate) fn bake_tile(
         }),
         min_y,
         max_y,
-    }
-    .with_skirt_bounds(skirt)
-}
-
-impl BakedTile {
-    /// Widen the baked bounds by the skirt depth (the culling AABB must
-    /// contain the shader-sunk skirt ring).
-    fn with_skirt_bounds(mut self, skirt: f32) -> Self {
-        self.min_y -= skirt;
-        self
     }
 }
 
@@ -1021,13 +1014,8 @@ fn upload_tile(
                     key.cell(),
                 ),
                 hole: hole_texels(key, hole),
-                // (level, skirt depth, fade, unused) — fade starts down.
-                shading: Vec4::new(
-                    key.level as f32,
-                    skirt_depth(key.cell()),
-                    0.0,
-                    slot as f32,
-                ),
+                // (level, unused, unused, atlas layer).
+                shading: Vec4::new(key.level as f32, 0.0, 0.0, slot as f32),
             },
         },
     });
@@ -1037,13 +1025,6 @@ fn upload_tile(
         min_y: bake.min_y,
         max_y: bake.max_y,
     }
-}
-
-/// Skirt depth for a tile level: hides cracks against coarser
-/// neighbours (shader-side — the shared mesh's flagged border ring is
-/// sunk by this much).
-pub(crate) fn skirt_depth(cell: f32) -> f32 {
-    (cell * 1.5).max(8.0)
 }
 
 /// Usable cores for the baking waves (wasm reports 1; the serial
@@ -1123,10 +1104,12 @@ mod tests {
     }
 
     #[test]
-    fn shared_mesh_faces_point_up_and_skirts_outward() {
+    fn shared_mesh_faces_up_with_no_excess_geometry() {
         // Backface culling uses winding: the one shared grid every tile
-        // renders must have +y interior faces, and its skirt walls must
-        // face away from the tile centre.
+        // renders must have +y faces. It is EXACTLY the 33x33 grid — no
+        // skirt ring: rims stitch instead (a hanging wall showed up as
+        // coincident z-fighting polygons at ring seams), so any extra
+        // vertices or triangles are a regression.
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();
         let shared = SharedTileMesh::from_world(&mut world);
@@ -1142,43 +1125,21 @@ mod tests {
             Indices::U32(i) => i.clone(),
             _ => panic!("unexpected index format"),
         };
-
-        let face_normal = |a: usize, b: usize, c: usize| {
-            let pa = Vec3::from(positions[a]);
-            let pb = Vec3::from(positions[b]);
-            let pc = Vec3::from(positions[c]);
-            (pb - pa).cross(pc - pa)
-        };
-
-        let interior_count = TILE_QUADS * TILE_QUADS * 2;
-        for tri in 0..interior_count {
+        assert_eq!(positions.len(), TILE_VERTS * TILE_VERTS, "skirt verts crept back");
+        assert_eq!(
+            indices.len(),
+            TILE_QUADS * TILE_QUADS * 6,
+            "extra triangles crept back"
+        );
+        for tri in 0..(indices.len() / 3) {
             let (a, b, c) = (
                 indices[tri * 3] as usize,
                 indices[tri * 3 + 1] as usize,
                 indices[tri * 3 + 2] as usize,
             );
-            let normal = face_normal(a, b, c);
-            assert!(
-                normal.y > 0.0,
-                "interior triangle {tri} faces {normal:?}, not up"
-            );
-        }
-
-        let centre = Vec3::new(TILE_QUADS as f32 / 2.0, 0.0, TILE_QUADS as f32 / 2.0);
-        for tri in interior_count..(indices.len() / 3) {
-            let (a, b, cc) = (
-                indices[tri * 3] as usize,
-                indices[tri * 3 + 1] as usize,
-                indices[tri * 3 + 2] as usize,
-            );
-            let normal = face_normal(a, b, cc);
-            let face_mid = (Vec3::from(positions[a]) + Vec3::from(positions[b])
-                + Vec3::from(positions[cc]))
-                / 3.0;
-            assert!(
-                (face_mid - centre).dot(normal) > 0.0,
-                "skirt triangle {tri} faces inward"
-            );
+            let normal = (Vec3::from(positions[b]) - Vec3::from(positions[a]))
+                .cross(Vec3::from(positions[c]) - Vec3::from(positions[a]));
+            assert!(normal.y > 0.0, "triangle {tri} faces {normal:?}, not up");
         }
     }
 

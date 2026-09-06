@@ -262,13 +262,14 @@ impl Plugin for TerrainRenderPlugin {
 }
 
 /// The one mesh every tile renders: a flat 33×33 grid over texel
-/// coordinates, plus a duplicated border ring one unit below (the skirt
-/// flag — grid verts carry y = 0, skirt verts y = -1; the shader drops
-/// skirt verts by the tile's skirt depth). Normals and colors here are
-/// placeholders purely to keep the standard pipeline's vertex layout;
-/// the shader replaces both per tile. `COLOR_0` exists to arm the
-/// `VERTEX_COLORS` define so `StandardMaterial` multiplies in the
-/// per-vertex tint the shader writes.
+/// coordinates — no skirt ring: rim stitching sews each fine rim onto
+/// the coarse chord with an overlap bias (`STITCH_BIAS_CELL_FRACTION`),
+/// so level seams are watertight by construction and hanging walls
+/// would only show as coincident z-fighting polygons. Normals and
+/// colors here are placeholders purely to keep the standard pipeline's
+/// vertex layout; the shader replaces both per tile. `COLOR_0` exists
+/// to arm the `VERTEX_COLORS` define so `StandardMaterial` multiplies
+/// in the per-vertex tint the shader writes.
 #[derive(Resource)]
 pub struct SharedTileMesh(pub Handle<Mesh>);
 
@@ -281,7 +282,7 @@ impl FromWorld for SharedTileMesh {
 
         // Grid verts: position = (ix, 0, iz) in texel units; the shader
         // turns that into world XZ via the tile uniform.
-        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(TILE_VERTS * TILE_VERTS + 4 * TILE_VERTS);
+        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(TILE_VERTS * TILE_VERTS);
         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(positions.capacity());
         for iz in 0..TILE_VERTS {
             for ix in 0..TILE_VERTS {
@@ -290,22 +291,7 @@ impl FromWorld for SharedTileMesh {
             }
         }
 
-        // Skirt ring, mirroring `tile_mesh`'s border walk: y = -1 flags
-        // the vert; the shader samples the same texel as its border
-        // partner and sinks it by the skirt depth.
-        let border: Vec<usize> = (0..TILE_VERTS)
-            .chain((1..TILE_VERTS).map(|i| i * TILE_VERTS + TILE_QUADS))
-            .chain((0..TILE_QUADS).rev().map(|i| TILE_VERTS * TILE_QUADS + i))
-            .chain((1..TILE_QUADS).rev().map(|i| i * TILE_VERTS))
-            .collect();
-        for &v in &border {
-            let [x, _, z] = positions[v];
-            positions.push([x, -1.0, z]);
-            uvs.push(uvs[v]);
-        }
-
-        let mut indices: Vec<u32> =
-            Vec::with_capacity(TILE_QUADS * TILE_QUADS * 6 + border.len() * 6);
+        let mut indices: Vec<u32> = Vec::with_capacity(TILE_QUADS * TILE_QUADS * 6);
         for iz in 0..TILE_QUADS {
             for ix in 0..TILE_QUADS {
                 let v0 = (iz * TILE_VERTS + ix) as u32;
@@ -319,17 +305,6 @@ impl FromWorld for SharedTileMesh {
                 ]);
             }
         }
-        let n = border.len();
-        let skirt_start = (TILE_VERTS * TILE_VERTS) as u32;
-        for i in 0..n {
-            let top_a = border[i] as u32;
-            let top_b = border[(i + 1) % n] as u32;
-            let bot_a = skirt_start + i as u32;
-            let bot_b = skirt_start + ((i + 1) % n) as u32;
-            // Skirt walls face outward from the tile.
-            indices.extend_from_slice(&[top_a, top_b, bot_a]);
-            indices.extend_from_slice(&[top_b, bot_b, bot_a]);
-        }
 
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_POSITION,
@@ -342,11 +317,11 @@ impl FromWorld for SharedTileMesh {
         // Placeholder attributes: layout only, replaced in-shader.
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_NORMAL,
-            VertexAttributeValues::Float32x3(vec![[0.0, 1.0, 0.0]; skirt_start as usize + n]),
+            VertexAttributeValues::Float32x3(vec![[0.0, 1.0, 0.0]; TILE_VERTS * TILE_VERTS]),
         );
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_COLOR,
-            VertexAttributeValues::Float32x4(vec![[1.0, 1.0, 1.0, 1.0]; skirt_start as usize + n]),
+            VertexAttributeValues::Float32x4(vec![[1.0, 1.0, 1.0, 1.0]; TILE_VERTS * TILE_VERTS]),
         );
         mesh.insert_indices(Indices::U32(indices));
 

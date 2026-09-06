@@ -33,6 +33,9 @@ pub struct LaunchConfig {
     pub duration: Duration,
     /// Bench-only: camera zoom pinned for the whole run (0.0 high, 1.0 low).
     pub zoom: f32,
+    /// Bench-only: when set, oscillate zoom between these bounds instead
+    /// of pinning (exercises LOD churn; `--zoom-sweep low:high`).
+    pub zoom_sweep: Option<(f32, f32)>,
     /// Bench-only: write one screenshot here near the end of the run —
     /// self-contained visual verification with no desktop capture tooling
     /// (works over ssh and on locked/occluded sessions).
@@ -63,6 +66,7 @@ impl Default for LaunchConfig {
             bench: false,
             duration: Duration::from_secs_f32(BENCH_DURATION_SECS),
             zoom: BENCH_ZOOM,
+            zoom_sweep: None,
             shot: None,
             focus: None,
             boids: DEFAULT_BOIDS,
@@ -126,6 +130,15 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
                     return Err(format!("{flag} must be positive, got {parsed}"));
                 }
                 config.duration = Duration::from_secs_f32(parsed);
+            }
+            "--zoom-sweep" => {
+                let (lo, hi) = args[i + 1]
+                    .split_once(':')
+                    .ok_or_else(|| "expected low:high".to_string())?;
+                let lo: f32 = lo.parse().map_err(|e| format!("bad zoom: {e}"))?;
+                let hi: f32 = hi.parse().map_err(|e| format!("bad zoom: {e}"))?;
+                config.zoom_sweep = Some((lo, hi));
+                i += 1;
             }
             "--zoom" => {
                 let parsed: f32 = value(args, &mut i, flag, inline_value)?
@@ -212,6 +225,7 @@ impl Plugin for BenchPlugin {
             Update,
             (
                 pin_bench_camera.before(RtsCameraSystemSet),
+                sweep_bench_zoom.before(RtsCameraSystemSet),
                 bench_screenshot,
                 exit_bench_when_elapsed,
             )
@@ -257,6 +271,26 @@ fn pin_bench_camera(
     );
 }
 
+/// Bench-only (`--zoom-sweep <low>:<high>`): oscillate the zoom
+/// sinusoidally across the run, exercising LOD level gating and ring
+/// churn the way an interactive zoom does. The period spans a few level
+/// flips so screenshots can catch mid-transition states.
+fn sweep_bench_zoom(
+    config: Res<LaunchConfig>,
+    time: Res<Time>,
+    mut cameras: Query<&mut RtsCamera>,
+) {
+    let Some((low, high)) = config.zoom_sweep else {
+        return;
+    };
+    let t = time.elapsed_secs() * std::f32::consts::TAU / 8.0;
+    let z = low + (high - low) * (0.5 - 0.5 * t.cos());
+    for mut camera in &mut cameras {
+        camera.zoom = z;
+        camera.target_zoom = z;
+    }
+}
+
 /// Capture one screenshot near the end of a bench run — tiles streamed,
 /// camera settled — and write it to the `--shot` path. The capture is the
 /// renderer's own framebuffer readback, so it needs no desktop capture
@@ -270,6 +304,7 @@ fn bench_screenshot(
     mut commands: Commands,
     tiles: Query<Entity, With<bevy_rts_camera::Ground>>,
     cameras: Query<(&Transform, Option<&RtsCamera>), With<Camera3d>>,
+    terrain: Option<Res<crate::terrain::TerrainTiles>>,
 ) {
     let Some(path) = &config.shot else {
         return;
@@ -289,6 +324,16 @@ fn bench_screenshot(
             );
         }
         info!("bench: {} terrain tile entities", tiles.iter().count());
+        if let Some(terrain) = terrain {
+            let mut per_level = [0usize; 16];
+            for key in terrain.keys() {
+                per_level[key.level as usize] += 1;
+            }
+            info!(
+                "bench: tiles per level: {:?}",
+                &per_level[..crate::terrain::level_count()]
+            );
+        }
         info!("bench: capturing screenshot to {}", path.display());
         commands
             .spawn(bevy::render::view::screenshot::Screenshot::primary_window())

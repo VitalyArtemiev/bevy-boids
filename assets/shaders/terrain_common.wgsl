@@ -19,7 +19,7 @@ struct TileUniform {
     // Hole rectangle in texel units (min_x, max_x, min_z, max_z); an
     // empty rect is encoded as huge bounds (clamp is the identity).
     hole: vec4<f32>,
-    // (level, skirt depth in metres, unused, atlas layer).
+    // (level, unused, unused, atlas layer).
     shading: vec4<f32>,
 };
 
@@ -34,8 +34,9 @@ struct TerrainVertex {
 
 // Displace one vertex of the shared grid onto the baked tile surface.
 //
-// `position` is tile-local: xz are texel coordinates, y = -1 flags a
-// skirt vert (y = 0 is the grid). Heights, slopes and tints come from
+// `position` is tile-local: xz are texel coordinates, y is always 0
+// (the grid has no skirt ring — rims stitch instead). Heights, slopes
+// and tints come from
 // the bake textures; the clipmap hole rectangle is projected away
 // by clamping interior vertices onto its edge, which degenerates the
 // interior quads the CPU bake used to cut from the index buffer (verts
@@ -44,7 +45,6 @@ struct TerrainVertex {
 fn terrain_displace(position: vec3<f32>) -> TerrainVertex {
     let origin = tile.origin_size.xy;
     let cell = tile.origin_size.w;
-    let skirt_depth = tile.shading.y;
     let layer = i32(tile.shading.w + 0.5);
 
     let texel = clamp(
@@ -52,23 +52,15 @@ fn terrain_displace(position: vec3<f32>) -> TerrainVertex {
         vec2<i32>(0),
         vec2<i32>(TILE_VERTS - 1),
     );
-    var height = textureLoad(height_texture, texel, layer, 0).r;
-
-    let is_skirt = position.y < -0.5;
-    if is_skirt {
-        height = height - skirt_depth;
-    }
+    let height = textureLoad(height_texture, texel, layer, 0).r;
 
     // Hole projection (identity for the empty rect's huge bounds).
     var local = position.xz;
     local.x = clamp(local.x, tile.hole.x, tile.hole.y);
     local.y = clamp(local.y, tile.hole.z, tile.hole.w);
 
-    var world_normal = vec3<f32>(0.0, 1.0, 0.0);
-    if !is_skirt {
-        let slope = textureLoad(slope_texture, texel, layer, 0).xy;
-        world_normal = normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
-    }
+    let slope = textureLoad(slope_texture, texel, layer, 0).xy;
+    let world_normal = normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
 
     return TerrainVertex(
         vec4<f32>(origin.x + local.x * cell, height, origin.y + local.y * cell, 1.0),

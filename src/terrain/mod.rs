@@ -21,7 +21,7 @@ pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
 pub(crate) use noise::VERTICAL_BIAS;
 pub use render::{SharedTileMesh, TerrainRenderPlugin, TileAtlas};
 pub use tiles::{
-    LodMode, StreamBudget, TerrainTiles, TileRenderCache, stream_terrain_tiles,
+    LodMode, StreamBudget, TerrainTiles, TileRenderCache, level_count, stream_terrain_tiles,
 };
 
 use bevy::prelude::*;
