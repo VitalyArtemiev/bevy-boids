@@ -393,37 +393,13 @@ fn covered_by_finer_level(level: u8, key: TileKey, center: Vec2, min_level: u8) 
     c.x - half >= min.x && c.x + half <= max.x && c.y - half >= min.y && c.y + half <= max.y
 }
 
-/// Parent (= next coarser) level's surface height at a boundary point:
-/// linear interpolation between the two enclosing parent grid samples
-/// along the boundary direction, minus the parent's drop and a small bias.
-/// Tile edges are multiples of the parent cell, so edge endpoints coincide
-/// with parent samples and the interpolation is exact there. On corners
-/// both axes are aligned and both branches reduce to the same parent
-/// sample. The bias drops the stitched rim a hair below the parent plane
-/// so overlapping coarse fringe quads (same plane, by construction) win
-/// cleanly instead of z-fighting.
-fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
-    let parent_cell = LEVEL_CELL_M[level as usize] * PARENT_CELL_MULT;
-    let parent_drop = level_drop(level + 1) + STITCH_BIAS;
-    let gx = x / parent_cell;
-    let gz = z / parent_cell;
-    // Whichever axis is off the parent grid is the varying one.
-    if (gz - gz.round()).abs() > 1e-4 {
-        let i = gz.floor();
-        let z0 = i * parent_cell;
-        let t = gz - i;
-        let h0 = field.height(x, z0);
-        let h1 = field.height(x, z0 + parent_cell);
-        h0 + (h1 - h0) * t - parent_drop
-    } else {
-        let i = gx.floor();
-        let x0 = i * parent_cell;
-        let t = gx - i;
-        let h0 = field.height(x0, z);
-        let h1 = field.height(x0 + parent_cell, z);
-        h0 + (h1 - h0) * t - parent_drop
-    }
-}
+/// How far the morph band reaches in from a rim edge, in quads: the fine
+/// surface blends onto the parent surface across this band, making the
+/// LOD boundary a continuous ramp instead of a cliff — without it the
+/// parent's boundary strip (its own sampled heights, which overshoot
+/// massif peaks at 4x cells) can tower over the fine ring's valleys and
+/// occlude them. CDLOD's transition zone, baked statically.
+const MORPH_BAND_QUADS: f32 = 8.0;
 
 /// One tile's baked render data: the small textures the shared displaced
 /// mesh renders from (see `crate::terrain::render`). `height` is the
@@ -515,30 +491,60 @@ pub(crate) fn bake_tile(
         }
     }
 
-    // Stitch rim edges onto the parent level's surface.
-    let mut stitch = |ix: usize, iz: usize| {
-        let x = origin_x + ix as f32 * cell;
-        let z = origin_z + iz as f32 * cell;
-        heights[iz][ix] = parent_lerp_height(field, key.level, x, z);
-    };
-    if rim_x_plus {
+    // Morph band: rim-facing vertices blend onto the parent surface
+    // across MORPH_BAND_QUADS, the rim edge itself landing exactly on it
+    // (the old edge-only stitch). The blend is smoothstep, so the
+    // surface leaves the parent plane tangentially — no step, no
+    // occluding cliff, and the band's screen error decays like the LOD
+    // error itself. The parent surface is a 9x9 sample lattice (the
+    // tile spans exactly 8 parent cells) bilinearly upsampled — the
+    // same surface `parent_lerp_height` interpolates, at 81 field
+    // samples for the whole band instead of four per vertex.
+    if rim_x_plus || rim_x_minus || rim_z_plus || rim_z_minus {
+        let parent_cell = cell * PARENT_CELL_MULT;
+        let parent_drop = level_drop(key.level + 1) + STITCH_BIAS;
+        let mut lattice = [[0.0f32; 9]; 9];
+        for lz in 0..9usize {
+            for lx in 0..9usize {
+                lattice[lz][lx] = field.height(
+                    origin_x + lx as f32 * parent_cell,
+                    origin_z + lz as f32 * parent_cell,
+                ) - parent_drop;
+            }
+        }
         for iz in 0..TILE_VERTS {
-            stitch(TILE_QUADS, iz);
-        }
-    }
-    if rim_x_minus {
-        for iz in 0..TILE_VERTS {
-            stitch(0, iz);
-        }
-    }
-    if rim_z_plus {
-        for ix in 0..TILE_VERTS {
-            stitch(ix, TILE_QUADS);
-        }
-    }
-    if rim_z_minus {
-        for ix in 0..TILE_VERTS {
-            stitch(ix, 0);
+            for ix in 0..TILE_VERTS {
+                let u = ix as f32 / TILE_QUADS as f32;
+                let v = iz as f32 / TILE_QUADS as f32;
+                let mut d = f32::INFINITY;
+                if rim_x_plus {
+                    d = d.min(1.0 - u);
+                }
+                if rim_x_minus {
+                    d = d.min(u);
+                }
+                if rim_z_plus {
+                    d = d.min(1.0 - v);
+                }
+                if rim_z_minus {
+                    d = d.min(v);
+                }
+                if d.is_infinite() {
+                    continue; // interior tile of the ring: no band
+                }
+                let fx = ix as f32 / PARENT_CELL_MULT;
+                let fz = iz as f32 / PARENT_CELL_MULT;
+                let (px, pz) = ((fx.floor() as usize).min(7), (fz.floor() as usize).min(7));
+                let (tx, tz) = (fx - px as f32, fz - pz as f32);
+                let a = lattice[pz][px] + (lattice[pz][px + 1] - lattice[pz][px]) * tx;
+                let b =
+                    lattice[pz + 1][px] + (lattice[pz + 1][px + 1] - lattice[pz + 1][px]) * tx;
+                let parent = a + (b - a) * tz;
+                let fine = heights[iz][ix];
+                let band = d * TILE_QUADS as f32 / MORPH_BAND_QUADS;
+                let morph = smoothstep(0.0, 1.0, band.min(1.0));
+                heights[iz][ix] = parent + (fine - parent) * morph;
+            }
         }
     }
 
@@ -1848,6 +1854,63 @@ mod tests {
             "returning over visited ground built new renders instead of cache hits"
         );
         assert_eq!(tile_entities(&app).len(), total);
+    }
+
+    #[test]
+    fn morph_band_blends_rim_tiles_onto_the_parent() {
+        // A rim tile's outer band ramps onto the parent surface: the rim
+        // edge lands exactly on it, the band's inner edge keeps the fine
+        // height, and between them the blend is strictly monotone. This
+        // band is what keeps the LOD boundary continuous — without it
+        // the parent's boundary strip can tower over the fine ring's
+        // valleys and occlude them.
+        let field = HeightField::from_fn(|x, z| 0.001 * x * z);
+        let key = TileKey { level: 0, x: 2, z: 0 }; // +x rim of the ring
+        let bake = bake_tile(&field, key, IVec2::ZERO);
+        let h = |ix: usize, iz: usize| texel(&bake.height, ix, iz);
+
+        // Parent surface at the rim edge (x = 96): the edge sits exactly
+        // on parent lattice lines along x, so only the z chord varies.
+        let parent_at_rim = |z: f32| {
+            let pz = (z / 4.0).floor();
+            let z0 = pz * 4.0;
+            let t = (z - z0) / 4.0;
+            let a = 0.001 * 96.0 * z0;
+            let b = 0.001 * 96.0 * (z0 + 4.0);
+            a + (b - a) * t - level_drop(1) - STITCH_BIAS
+        };
+
+        // The tile's world origin is (64, 0): texel ix is world x = 64 + ix.
+        let fine_at = |ix: f32, z: f32| 0.001 * (64.0 + ix) * z - level_drop(0);
+
+
+        for iz in [0usize, 7, 16, 27, 32] {
+            let z = iz as f32;
+            let rim = h(TILE_QUADS, iz);
+            let want_parent = parent_at_rim(z);
+            assert!(
+                (rim - want_parent).abs() < 1e-3,
+                "rim iz={iz}: {rim} != parent {want_parent}"
+            );
+            // Inner edge of the band: the fine height, untouched.
+            let band_inner = TILE_QUADS - MORPH_BAND_QUADS as usize;
+            let inner = h(band_inner, iz);
+            let want_fine = fine_at(band_inner as f32, z);
+            assert!(
+                (inner - want_fine).abs() < 1e-3,
+                "band-inner iz={iz}: {inner} != fine {want_fine}"
+            );
+            // Halfway through the band: strictly between the two.
+            let mid = h(TILE_QUADS - 4, iz);
+            let (lo, hi) = (
+                want_parent.min(want_fine),
+                want_parent.max(want_fine),
+            );
+            assert!(
+                mid >= lo - 1e-3 && mid <= hi + 1e-3,
+                "band-mid iz={iz}: {mid} escaped [{lo}, {hi}]"
+            );
+        }
     }
 
     #[test]
