@@ -1,5 +1,4 @@
 use crate::kinematics::*;
-use crate::resources::Materials;
 use crate::target::Target;
 use crate::terrain::{GroundY, Obstacle};
 use bevy::prelude::Bundle;
@@ -64,7 +63,6 @@ impl BoidBundle {
     }
 }
 
-const INTERACTION_RADIUS: f32 = 1.0;
 const REPEL_COEF: f32 = 0.05;
 
 /// Runtime-tunable separation/bob parameters; defaults mirror the consts

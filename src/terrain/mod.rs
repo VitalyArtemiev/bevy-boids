@@ -1,23 +1,27 @@
 //! Terrain subsystem: the heightfield is THE terrain.
 //!
-//! A single LOD system of streamed heightfield tiles covers everything
-//! from 1 m cells at the camera to 65 km cells at continental distance
+//! A single LOD system of streamed tiles covers everything from 1 m
+//! cells at the camera to 65 km cells at continental distance
 //! ([`tiles`]); [`noise`] generates the heights; [`grounding`] and
-//! [`camera`] integrate boids and the RTS camera with the field.
-//! Sparse voxel detail volumes (forts, overhangs) will attach on top in a
-//! later milestone — the heightfield stays the LOD spine everywhere else.
+//! [`camera`] integrate boids and the RTS camera with the field;
+//! [`render`] draws the streamed tiles through one shared
+//! GPU-displaced mesh. Sparse voxel detail volumes (forts, overhangs)
+//! will attach on top in a later milestone — the heightfield stays the
+//! LOD spine everywhere else.
 
 mod camera;
 mod grounding;
 mod noise;
+mod render;
 mod tiles;
 
 pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
 pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
 pub(crate) use noise::VERTICAL_BIAS;
+pub use render::{SharedTileMesh, TerrainRenderPlugin, animate_tile_fades};
 pub use tiles::{
-    LodMode, StreamBudget, TerrainTiles, TileMeshCache, stream_terrain_tiles,
+    LodMode, StreamBudget, TerrainTiles, TileRenderCache, stream_terrain_tiles,
 };
 
 use bevy::prelude::*;

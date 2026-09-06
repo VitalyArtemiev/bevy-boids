@@ -5,7 +5,7 @@ pub struct Horse {
     pub(crate) target: Vec3,
 }
 
-pub fn avoid_tight_formations(mut query: Query<(&Transform)>) {
+pub fn avoid_tight_formations() {
     //todo: insert waypoints to avoid tight formations, if not blinded
     //see waterloo film
 }

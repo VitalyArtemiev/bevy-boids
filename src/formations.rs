@@ -1164,7 +1164,7 @@ mod tests {
         let mut remapped: Vec<(f32, usize)> = query
             .iter(world)
             .filter(|(e, _, _)| world.get::<MemberOf>(*e).unwrap().0 == formation_b)
-            .map(|(e, t, s)| (t.translation.x, s.0))
+            .map(|(_, t, s)| (t.translation.x, s.0))
             .collect();
         remapped.sort_by(|a, b| a.0.total_cmp(&b.0));
         assert_eq!(

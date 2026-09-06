@@ -1,4 +1,3 @@
-use bevy::math::Vec3;
 use bevy::prelude::{Handle, Mesh, Resource, StandardMaterial};
 
 #[derive(Resource, Default)]
@@ -12,7 +11,4 @@ pub struct Materials {
     pub debug_material: Handle<StandardMaterial>,
     pub black: Handle<StandardMaterial>,
     pub white: Handle<StandardMaterial>,
-    /// Terrain tiles; vertex-colored from the erosion fields (tiles.rs
-    /// `ground_color`), so the material itself stays white.
-    pub ground: Handle<StandardMaterial>,
 }

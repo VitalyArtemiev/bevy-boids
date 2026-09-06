@@ -1,13 +1,12 @@
 use crate::boid::Boid;
 use crate::formations::{
-    Formation, FormationKind, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
+    Formation, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
     QuickCommandGroup,
 };
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
 use crate::terrain::HeightField;
 use crate::util::within_rect;
-use bevy::color::palettes::basic::YELLOW;
 use bevy::ecs::component::{Mutable, StorageType};
 use bevy::ecs::lifecycle::{ComponentHook, HookContext};
 use bevy::ecs::relationship::RelationshipTarget as _;
@@ -17,8 +16,8 @@ use bevy::gizmos::config::GizmoLineConfig;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::math::{Isometry3d, Quat, Ray3d, Vec3};
 use bevy::prelude::{
-    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Dir3, Entity,
-    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, InfinitePlane3d, KeyCode, MessageReader,
+    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Entity,
+    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, KeyCode, MessageReader,
     MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World,
     default, info, warn,
 };
@@ -412,7 +411,6 @@ pub fn frontage_position_system(
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
     q_member_of: Query<&MemberOf>,
     mut q_formation_mut: Query<&mut Formation>,
-    mut commands: Commands,
     mut q_targets: Query<&mut Target>,
     mut q_camera_controls: Query<&mut RtsCameraControls>,
     mut gizmos: Gizmos,
@@ -626,7 +624,7 @@ pub fn height_scaled_zoom(
     let zoom_speed = options
         .map(|settings| settings.camera_zoom_sensitivity)
         .unwrap_or(1.0);
-    for (mut cam, controls) in cam_q.iter_mut().filter(|(_, c)| c.enabled) {
+    for (mut cam, _) in cam_q.iter_mut().filter(|(_, c)| c.enabled) {
         let wheel = mouse_wheel
             .read()
             .map(|message| match message.unit {

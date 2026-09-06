@@ -1,21 +1,28 @@
-//! The terrain: streamed heightfield tiles in LOD rings.
+//! The terrain: streamed LOD rings baked into small render textures.
 //!
 //! Each LOD level is a 5x5 ring of tiles around the RTS camera's focus
 //! (the camera's ground position in freecam), with cell size growing ×4
 //! per level (1 m near the camera to 65 km at continental distance); the
 //! finest rendered level is gated by the camera's distance (see
-//! [`LodMode`]). Coverage is continuous by construction: a
-//! coarser tile is skipped only when the finer level's square fully
-//! contains it, so there are no annular gaps between levels; where rings
-//! overlap, the coarser level sits slightly lower (per-level height bias)
-//! so the finer surface wins the depth test. Level transitions hide their
-//! step behind skirts. Heights come from [`HeightField`], so meshes,
-//! grounding, and camera clearance agree by construction; the same field
-//! samples tint the tiles (rock/grass/dirt by slope and altitude,
-//! drainage streaks from the erosion ridge map).
+//! [`LodMode`]). Coverage is continuous by construction: a coarser tile
+//! is skipped only when the finer level's square fully contains it, so
+//! there are no annular gaps between levels; where rings overlap, the
+//! coarser level sits slightly lower (per-level height bias) so the
+//! finer surface wins the depth test. Level transitions fade through a
+//! coarse representation (see `render::TileFade`). Heights come from
+//! [`HeightField`], so the baked render, grounding, and camera clearance
+//! agree by construction; the same field samples tint the tiles
+//! (rock/grass/dirt by slope and altitude, drainage streaks from the
+//! erosion ridge map).
+//!
+//! Rendering is `render`'s job: every tile draws the ONE shared displaced
+//! mesh, placed by its baked textures — the UDLOD approach.
 
+use super::render::{
+    SharedTileMesh, TerrainMaterial, TerrainExtension, TileFade, TileUniform, bake_texture_f32,
+    bake_texture_rg32f, bake_texture_rgba8,
+};
 use super::{HeightField, TerrainSample, VERTICAL_BIAS};
-use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy_rts_camera::{Ground, RtsCamera};
 use bevy::platform::time::Instant; // web-time on wasm: std's Instant::now() panics ("time not implemented on this platform")
@@ -23,8 +30,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 /// Tile resolution: 32x32 quads per tile, any level.
-const TILE_QUADS: usize = 32;
-const TILE_VERTS: usize = TILE_QUADS + 1;
+pub(crate) const TILE_QUADS: usize = 32;
+pub(crate) const TILE_VERTS: usize = TILE_QUADS + 1;
 /// Cell size (metres per quad edge) per LOD level, ×4 per level. Level 0
 /// gives 1 m detail in a 32 m tile; the top level's 65 km cells put the
 /// 5x5 ring at ~10.5 Mm span — a small continent.
@@ -62,9 +69,9 @@ const PARENT_CELL_MULT: f32 = 4.0;
 /// Tile identity: LOD level + grid position at that level's tile size.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TileKey {
-    level: u8,
-    x: i32,
-    z: i32,
+    pub(crate) level: u8,
+    pub(crate) x: i32,
+    pub(crate) z: i32,
 }
 
 impl TileKey {
@@ -93,23 +100,24 @@ impl TileKey {
 }
 
 /// Spawned terrain tiles, keyed for streaming (spawn/evict on focus
-/// movement). The value pairs the entity with the [`TileStamp`] the mesh
-/// was baked with and its [`Handle`](bevy::asset::Handle): rims and holes
-/// are computed from the ring position at spawn time, so a stamp mismatch
-/// (focus crossed a tile boundary) queues a replacement — the old mesh
-/// keeps rendering until the replacement spawns, so streaming never opens
-/// a hole (see `stream_terrain_tiles`).
+/// movement). The value pairs the entity with the [`TileStamp`] the
+/// bake was made with and its [`TileRender`] (the per-tile material and
+/// its textures): rims and holes are computed from the ring position at
+/// spawn time, so a stamp mismatch (focus crossed a tile boundary)
+/// queues a replacement — the old surface keeps rendering until the
+/// replacement spawns, so streaming never opens a hole (see
+/// `stream_terrain_tiles`).
 #[derive(Resource, Default)]
 pub struct TerrainTiles {
-    tiles: HashMap<TileKey, (Entity, TileStamp, Handle<Mesh>)>,
+    tiles: HashMap<TileKey, (Entity, TileStamp, TileRender)>,
 }
 
-/// Ring position a tile's mesh was baked with: the focus tile at the
+/// Ring position a tile's bake was made with: the focus tile at the
 /// tile's own level (which edges are stitching rims), at the finer level
-/// (where the cut-out hole lies), and whether this tile's mesh actually
+/// (where the cut-out hole lies), and whether this tile's bake actually
 /// cuts that hole (the finer level renders AND this tile's footprint
 /// overlaps its square — the distance gate, [`LodMode`], lifts whole fine
-/// levels in and out). Only a flip of what the mesh depends on forces a
+/// levels in and out). Only a flip of what the bake depends on forces a
 /// respawn; tiles whose geometry is unchanged by a ring move keep their
 /// stamp and are not rebuilt.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -119,58 +127,91 @@ pub struct TileStamp {
     cuts_hole: bool,
 }
 
-/// Retired tile meshes, kept for instant re-spawn. Zooming and panning
-/// back over ground you just left re-uses the baked mesh instead of
-/// re-running the erosion-filtered field ~1k times — a cache hit costs no
-/// mesh time and no [`StreamBudget`]. Bounded: the least-recently-used
-/// meshes beyond [`TILE_CACHE_TILES`] are dropped from `Assets<Mesh>`
+/// Live or cached render state for one tile: the per-tile
+/// [`TerrainMaterial`] (which owns the four bake textures — see
+/// `bake_tile`) plus the baked height range for the culling AABB.
+pub(crate) struct TileRender {
+    material: Handle<TerrainMaterial>,
+    height: Handle<Image>,
+    slope: Handle<Image>,
+    color: Handle<Image>,
+    coarse: Handle<Image>,
+    min_y: f32,
+    max_y: f32,
+}
+
+/// Free every asset a retired tile render holds (called on cache
+/// eviction and field rebuilds, when nothing references it anymore).
+impl TileRender {
+    fn free(
+        self,
+        materials: &mut Assets<TerrainMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        materials.remove(&self.material);
+        images.remove(&self.height);
+        images.remove(&self.slope);
+        images.remove(&self.color);
+        images.remove(&self.coarse);
+    }
+}
+
+/// Retired tile renders, kept for instant re-spawn. Zooming and panning
+/// back over ground you just left re-uses the baked material instead of
+/// re-running the erosion-filtered field ~1k times — a cache hit costs
+/// no bake time and no [`StreamBudget`]. Bounded: the
+/// least-recently-used renders beyond [`TILE_CACHE_TILES`] are freed
 /// (live tiles are never cached, so nothing referenced is freed).
 #[derive(Resource, Default)]
-pub struct TileMeshCache {
-    entries: HashMap<(TileKey, TileStamp), (Handle<Mesh>, u64)>,
+pub struct TileRenderCache {
+    entries: HashMap<(TileKey, TileStamp), (TileRender, u64)>,
     clock: u64,
 }
 
-/// Cache capacity in tiles. ~75 KB of vertex/index data per tile →
-/// ~20 MB; a full desired set is ~120-150 tiles, so a zoom gate cycle or
-/// a pan detour fits whole.
+/// Cache capacity in tiles. ~21 KB of bake textures per tile → ~5 MB; a
+/// full desired set is ~120-150 tiles, so a zoom gate cycle or a pan
+/// detour fits whole.
 const TILE_CACHE_TILES: usize = 256;
 
-impl TileMeshCache {
-    /// Take a mesh out of the cache for re-spawn, if present.
-    fn take(&mut self, key: TileKey, stamp: TileStamp) -> Option<Handle<Mesh>> {
+impl TileRenderCache {
+    /// Take a render out of the cache for re-spawn, if present.
+    fn take(&mut self, key: TileKey, stamp: TileStamp) -> Option<TileRender> {
         self.clock += 1;
-        self.entries.remove(&(key, stamp)).map(|(handle, _)| handle)
+        self.entries.remove(&(key, stamp)).map(|(render, _)| render)
     }
 
-    /// Park a retired tile's mesh in the cache; evict the LRU overflow
-    /// (freeing its asset).
+    /// Park a retired tile's render in the cache; free the LRU overflow.
     fn put(
         &mut self,
         key: TileKey,
         stamp: TileStamp,
-        handle: Handle<Mesh>,
-        meshes: &mut Assets<Mesh>,
+        render: TileRender,
+        materials: &mut Assets<TerrainMaterial>,
+        images: &mut Assets<Image>,
     ) {
         self.clock += 1;
         let clock = self.clock;
-        self.entries.insert((key, stamp), (handle, clock));
+        self.entries.insert((key, stamp), (render, clock));
         while self.entries.len() > TILE_CACHE_TILES {
             let Some((&oldest, _)) = self.entries.iter().min_by_key(|(_, (_, used))| *used)
             else {
                 break;
             };
-            if let Some((handle, _)) = self.entries.remove(&oldest) {
-                meshes.remove(&handle);
+            if let Some((render, _)) = self.entries.remove(&oldest) {
+                render.free(materials, images);
             }
         }
     }
 
-    /// Drop every cached mesh (the height field changed; the meshes are
-    /// baked from the old field).
-    fn drain(&mut self, meshes: &mut Assets<Mesh>) {
-        for (_, (handle, _)) in self.entries.drain() {
-            meshes.remove(&handle);
+    /// Drop every cached render (the height field changed; the bakes are
+    /// from the old field).
+    fn drain(
+        &mut self,
+        materials: &mut Assets<TerrainMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        for (_, (render, _)) in self.entries.drain() {
+            render.free(materials, images);
         }
     }
 }
@@ -349,8 +390,49 @@ fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
     }
 }
 
-/// Build one tile mesh: a heightfield grid with a downward skirt ring that
-/// hides cracks against neighbouring (possibly coarser) tiles.
+/// One tile's baked render data: the small textures the shared displaced
+/// mesh renders from (see `crate::terrain::render`). `height` is the
+/// FINAL vertex surface — level drop and rim stitching included, i.e.
+/// exactly what `tile_mesh` used to push as vertex Y — `slope` and
+/// `color` are the 3×3-blurred shading fields, and `coarse` is a
+/// downsampled height the LOD morph fades through (see
+/// [`crate::terrain::render::TileFade`]).
+pub(crate) struct BakedTile {
+    pub height: Image,
+    pub slope: Image,
+    pub color: Image,
+    pub coarse: Image,
+    pub min_y: f32,
+    pub max_y: f32,
+}
+
+/// The hole rectangle for a tile, in tile-local TEXEL units for the
+/// vertex shader's clamp projection (see `terrain_common.wgsl`): world
+/// square → texels, or huge bounds when this tile cuts no hole (clamp
+/// becomes the identity).
+fn hole_texels(key: TileKey, hole: Option<(Vec2, Vec2)>) -> Vec4 {
+    const EMPTY: f32 = 1.0e9;
+    match hole {
+        None => Vec4::new(-EMPTY, EMPTY, -EMPTY, EMPTY),
+        Some((hmin, hmax)) => {
+            let cell = key.cell();
+            let origin = Vec2::new(
+                key.x as f32 * key.tile_size(),
+                key.z as f32 * key.tile_size(),
+            );
+            Vec4::new(
+                (hmin.x - origin.x) / cell,
+                (hmax.x - origin.x) / cell,
+                (hmin.y - origin.y) / cell,
+                (hmax.y - origin.y) / cell,
+            )
+        }
+    }
+}
+
+/// Bake one tile: sample the field on the 33×33 grid (level-truncated),
+/// stitch rim vertices onto the parent surface, blur the shading fields,
+/// and emit the render textures.
 ///
 /// `focus_tile` is the focus tile's grid position at this key's level: the
 /// four outer rim edges of the 5x5 ring border a COARSER level, and their
@@ -359,18 +441,15 @@ fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
 /// terrain_renderer's vertex morphing, so the fine surface meets the
 /// coarse one along the exact shared boundary with no crack or step.
 ///
-/// `hole` is the finer level's rendered square: interior quads whose
-/// centre falls inside it are CUT, so this coarse tile does not sheet a
-/// second surface underneath the finer one (the clipmap invariant —
-/// coarse renders only where fine doesn't). Quads kept by the centre rule
-/// may overlap the square by under half a cell; the level drop and stitch
-/// bias make the fine surface win that fringe.
-pub(crate) fn tile_mesh(
+/// Hole-cutting is shader-side: the coarse tile must not sheet a second
+/// surface underneath the finer one (the clipmap invariant), which the
+/// vertex shader enforces by projecting the hole rectangle away — the
+/// rectangle rides the tile uniform (`hole_texels`), not the bake.
+pub(crate) fn bake_tile(
     field: &HeightField,
     key: TileKey,
     focus_tile: IVec2,
-    hole: Option<(Vec2, Vec2)>,
-) -> Mesh {
+) -> BakedTile {
     let cell = key.cell();
     let tile_size = key.tile_size();
     let origin_x = key.x as f32 * tile_size;
@@ -386,10 +465,11 @@ pub(crate) fn tile_mesh(
     let rim_z_plus = can_stitch && key.z == focus_tile.y + LEVEL_RING;
     let rim_z_minus = can_stitch && key.z == focus_tile.y - LEVEL_RING;
 
-    // Interior grid: one field sample per vertex feeds positions, normals
-    // and colors. `heights` is what the mesh shows (drop applied, rims
-    // re-stitched); `samples` keeps the unstitched world-space fields for
-    // shading, since altitude gates must not see LOD drop offsets.
+    // Interior grid: one field sample per vertex feeds the height, and
+    // (blurred) the shading. `heights` is what renders (drop applied,
+    // rims re-stitched); `samples` keeps the unstitched world-space
+    // fields for shading, since altitude gates must not see LOD drop
+    // offsets.
     let mut heights = [[0.0f32; TILE_VERTS]; TILE_VERTS];
     let mut samples = [[TerrainSample::default(); TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
@@ -431,33 +511,28 @@ pub(crate) fn tile_mesh(
         }
     }
 
-    // Grid vertices + a duplicated border ring pushed down by `skirt`.
-    let vert_count = TILE_VERTS * TILE_VERTS + 4 * TILE_VERTS;
-    let mut positions = Vec::with_capacity(vert_count);
-    let mut normals = Vec::with_capacity(vert_count);
-    let mut colors = Vec::with_capacity(vert_count);
+    // Shading: SLOPE and COLOR from a 3x3-blurred neighborhood: on 50°
+    // carved terrain the exact per-vertex slope flips shading and color
+    // thresholds between adjacent facets every cell — a shattered-glass
+    // speckle (the reference shades per-fragment from interpolated
+    // values). The blur is a free low-pass — all nine samples are
+    // already in the grid — and geometry keeps the exact height, so only
+    // shading softens. Field sampling is tile-independent, so
+    // neighbouring tiles agree exactly on shared vertices.
     let palette = ground_palette();
-
     let relief_m = field.relief_m();
+    let mut slopes = [[Vec2::ZERO; TILE_VERTS]; TILE_VERTS];
+    let mut colors = [[Vec4::ONE; TILE_VERTS]; TILE_VERTS];
     for iz in 0..TILE_VERTS {
         for ix in 0..TILE_VERTS {
-            let x = origin_x + ix as f32 * cell;
-            let z = origin_z + iz as f32 * cell;
-            positions.push([x, heights[iz][ix], z]);
-            // NORMAL and COLOR from a 3x3-blurred neighborhood: on 50°
-            // carved terrain the exact per-vertex slope flips shading
-            // and color thresholds between adjacent facets every cell —
-            // a shattered-glass speckle (the reference shades per-
-            // fragment from interpolated values). The blur is a free
-            // low-pass — all nine samples are already in the grid — and
-            // geometry keeps the exact height, so only shading softens.
-            // Field sampling is tile-independent, so neighbouring tiles
-            // still agree exactly on shared vertices.
             let (mut slope, mut h, mut rg) = (Vec2::ZERO, 0.0, 0.0);
             for dz in -1..=1i32 {
                 for dx in -1..=1i32 {
                     let (jx, jz) = (ix as i32 + dx, iz as i32 + dz);
-                    let s = if jx >= 0 && jx <= TILE_QUADS as i32 && jz >= 0 && jz <= TILE_QUADS as i32
+                    let s = if jx >= 0
+                        && jx <= TILE_QUADS as i32
+                        && jz >= 0
+                        && jz <= TILE_QUADS as i32
                     {
                         samples[jz as usize][jx as usize]
                     } else {
@@ -478,16 +553,13 @@ pub(crate) fn tile_mesh(
                 }
             }
             let slope = slope / 9.0;
-            normals.push(Vec3::new(-slope.x, 1.0, -slope.y).normalize().to_array());
-            colors.push(
-                ground_color(
-                    &palette,
-                    slope.length(),
-                    h / 9.0 / relief_m.max(1.0) + VERTICAL_BIAS,
-                    rg / 9.0,
-                    1.0 + 0.7 * key.level as f32,
-                )
-                .to_array(),
+            slopes[iz][ix] = slope;
+            colors[iz][ix] = ground_color(
+                &palette,
+                slope.length(),
+                h / 9.0 / relief_m.max(1.0) + VERTICAL_BIAS,
+                rg / 9.0,
+                1.0 + 0.7 * key.level as f32,
             );
         }
     }
@@ -502,8 +574,10 @@ pub(crate) fn tile_mesh(
     let can_morph = can_stitch;
     if can_morph && (rim_x_plus || rim_x_minus || rim_z_plus || rim_z_minus) {
         let mut avg = Vec4::ZERO;
-        for c in colors[..TILE_VERTS * TILE_VERTS].iter() {
-            avg += Vec4::from(*c);
+        for row in &colors {
+            for c in row {
+                avg += *c;
+            }
         }
         avg /= (TILE_VERTS * TILE_VERTS) as f32;
         let strength = (0.15 * key.level as f32).min(0.65);
@@ -526,80 +600,104 @@ pub(crate) fn tile_mesh(
                 }
                 if d < 1.0 {
                     let t = smoothstep(0.0, 0.35, d);
-                    let i = iz * TILE_VERTS + ix;
-                    colors[i] = Vec4::from_array(colors[i])
-                        .lerp(avg, (1.0 - t) * strength)
-                        .to_array();
+                    colors[iz][ix] = colors[iz][ix].lerp(avg, (1.0 - t) * strength);
                 }
             }
         }
     }
 
-    // Skirt: duplicate the border ring, sunk by `skirt`. Winding runs
-    // around the tile edge so the walls face outward. Each corner appears
-    // exactly once: edge D starts at iz = TILE_QUADS - 1 because edge C
-    // already ends at the (iz = TILE_QUADS, ix = 0) corner.
-    let border: Vec<usize> = (0..TILE_VERTS)
-        .chain((1..TILE_VERTS).map(|i| i * TILE_VERTS + TILE_QUADS))
-        .chain((0..TILE_QUADS).rev().map(|i| TILE_VERTS * TILE_QUADS + i))
-        .chain((1..TILE_QUADS).rev().map(|i| i * TILE_VERTS))
-        .collect();
-    let skirt_start = positions.len();
-    for &v in &border {
-        let [x, y, z] = positions[v];
-        positions.push([x, y - skirt, z]);
-        normals.push([0.0, 1.0, 0.0]);
-        colors.push(colors[v]);
-    }
-
-    let mut indices: Vec<u32> = Vec::with_capacity(TILE_QUADS * TILE_QUADS * 6 + border.len() * 6);
-    for iz in 0..TILE_QUADS {
-        for ix in 0..TILE_QUADS {
-            // Cut the hole: no coarse quads under the finer level's square.
-            if let Some((hmin, hmax)) = hole {
-                let cx = origin_x + (ix as f32 + 0.5) * cell;
-                let cz = origin_z + (iz as f32 + 0.5) * cell;
-                if cx > hmin.x && cx < hmax.x && cz > hmin.y && cz < hmax.y {
-                    continue;
-                }
+    // Coarse representation for the LOD morph: 4×4 block averages of the
+    // final heights on a 9×9 lattice, bilinearly upsampled back to the
+    // full grid. Not the parent tile's own bake, but the same low
+    // frequencies — the fade slides the surface to where the coarser
+    // ring sits without binding the two tiles together.
+    let mut coarse = [[0.0f32; TILE_VERTS]; TILE_VERTS];
+    let lattice = |ix: usize, iz: usize| -> f32 {
+        // Average of the 4×4 height block with this lattice point as its
+        // min corner (clamped at the far edge, where the last block is
+        // 1 texel wide).
+        let x0 = (ix * 4).min(TILE_QUADS);
+        let z0 = (iz * 4).min(TILE_QUADS);
+        let x1 = (x0 + 4).min(TILE_QUADS);
+        let z1 = (z0 + 4).min(TILE_QUADS);
+        let mut sum = 0.0;
+        for z in z0..=z1 {
+            for x in x0..=x1 {
+                sum += heights[z][x];
             }
-            let v0 = (iz * TILE_VERTS + ix) as u32;
-            // Winding so faces point UP (+y): (B - A) x (C - A) with
-            // +x then +z edges gives -y, so the +z corner comes second.
-            indices.extend_from_slice(&[v0, v0 + TILE_VERTS as u32, v0 + 1]);
-            indices.extend_from_slice(&[
-                v0 + 1,
-                v0 + TILE_VERTS as u32,
-                v0 + TILE_VERTS as u32 + 1,
-            ]);
+        }
+        sum / ((x1 - x0 + 1) * (z1 - z0 + 1)) as f32
+    };
+    let mut grid = [[0.0f32; 9]; 9];
+    for iz in 0..9 {
+        for ix in 0..9 {
+            grid[iz][ix] = lattice(ix, iz);
         }
     }
-    let n = border.len();
-    for i in 0..n {
-        let top_a = border[i] as u32;
-        let top_b = border[(i + 1) % n] as u32;
-        let bot_a = (skirt_start + i) as u32;
-        let bot_b = (skirt_start + (i + 1) % n) as u32;
-        // Skirt walls face outward from the tile.
-        indices.extend_from_slice(&[top_a, top_b, bot_a]);
-        indices.extend_from_slice(&[top_b, bot_b, bot_a]);
+    for iz in 0..TILE_VERTS {
+        for ix in 0..TILE_VERTS {
+            let (fx, fz) = (ix as f32 / 4.0, iz as f32 / 4.0);
+            let (x0, z0) = (fx.floor() as usize, fz.floor() as usize);
+            let (x1, z1) = ((x0 + 1).min(8), (z0 + 1).min(8));
+            let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
+            let a = grid[z0][x0] + (grid[z0][x1] - grid[z0][x0]) * tx;
+            let b = grid[z1][x0] + (grid[z1][x1] - grid[z1][x0]) * tx;
+            coarse[iz][ix] = a + (b - a) * tz;
+        }
     }
 
-    let mut mesh = Mesh::new(
-        bevy::render::mesh::PrimitiveTopology::TriangleList,
-        Default::default(),
-    );
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_POSITION,
-        VertexAttributeValues::Float32x3(positions),
-    );
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_NORMAL,
-        VertexAttributeValues::Float32x3(normals),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, VertexAttributeValues::Float32x4(colors));
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
+    // Pack into textures. Skirt geometry is shader-side (the shared
+    // mesh's flagged border ring sunk by `skirt`), but the bounds must
+    // account for it.
+    let flat = |g: &[[f32; TILE_VERTS]; TILE_VERTS]| -> Vec<f32> {
+        let mut v = Vec::with_capacity(TILE_VERTS * TILE_VERTS);
+        for row in g {
+            v.extend_from_slice(row);
+        }
+        v
+    };
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for row in &heights {
+        for &h in row {
+            min_y = min_y.min(h);
+            max_y = max_y.max(h);
+        }
+    }
+    BakedTile {
+        height: bake_texture_f32(&flat(&heights)),
+        slope: bake_texture_rg32f(&{
+            let mut v = Vec::with_capacity(TILE_VERTS * TILE_VERTS);
+            for row in &slopes {
+                for s in row {
+                    v.push([s.x, s.y]);
+                }
+            }
+            v
+        }),
+        color: bake_texture_rgba8(&{
+            let mut v = Vec::with_capacity(TILE_VERTS * TILE_VERTS);
+            for row in &colors {
+                for c in row {
+                    v.push(c.to_array());
+                }
+            }
+            v
+        }),
+        coarse: bake_texture_f32(&flat(&coarse)),
+        min_y,
+        max_y,
+    }
+    .with_skirt_bounds(skirt)
+}
+
+impl BakedTile {
+    /// Widen the baked bounds by the skirt depth (the culling AABB must
+    /// contain the shader-sunk skirt ring).
+    fn with_skirt_bounds(mut self, skirt: f32) -> Self {
+        self.min_y -= skirt;
+        self
+    }
 }
 
 /// The terrain palette as linear RGBA — sRGB values from the erosion
@@ -743,8 +841,8 @@ pub(crate) fn desired_tiles(center: Vec2, min_level: u8) -> Vec<(TileKey, TileSt
 }
 
 /// Stream terrain tiles: compute the desired tile set, spawn missing
-/// (mesh built synchronously — ~1k field samples per tile, at most a
-/// [`StreamBudget`] worth of *builds* per frame; [`TileMeshCache`] hits
+/// (baked synchronously — ~1k field samples per tile, at most a
+/// [`StreamBudget`] worth of *bakes* per frame; [`TileRenderCache`] hits
 /// are free), retire the rest. The rings centre on the RTS focus (the
 /// camera's ground position in freecam) and the finest level is gated by
 /// the camera's distance to that centre — see [`LodMode`].
@@ -753,19 +851,22 @@ pub(crate) fn desired_tiles(center: Vec2, min_level: u8) -> Vec<(TileKey, TileSt
 /// position moved, or the distance gate flipped their hole) keep
 /// rendering until their replacement spawns in the same frame — an atomic
 /// swap, not a despawn-then-build. Tiles dropped from the desired set
-/// (gate lifted their whole level, focus moved on) keep rendering until a
+/// (gate lifted their whole level, focus moved on) fade out through the
+/// coarse representation ([`TileFade`]) and keep rendering until a
 /// current tile actually renders over their ground: the coarse ring's
-/// baked hole would otherwise expose the void beneath. A stale rim or a
+/// cut hole would otherwise expose the void beneath. A stale rim or a
 /// few frames of coarse-over-fine overlap beat a hole every time.
+#[allow(clippy::too_many_arguments)]
 pub fn stream_terrain_tiles(
     mut commands: Commands,
     mut tiles: ResMut<TerrainTiles>,
-    mut cache: ResMut<TileMeshCache>,
+    mut cache: ResMut<TileRenderCache>,
     cameras: Query<(&Transform, Option<&RtsCamera>), With<Camera3d>>,
     lod_mode: Option<Res<LodMode>>,
     field: Res<HeightField>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    materials: Res<crate::resources::Materials>,
+    shared_mesh: Res<SharedTileMesh>,
+    mut images: ResMut<Assets<Image>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     budget: Option<Res<StreamBudget>>,
 ) {
     let Ok((camera_transform, rts_camera)) = cameras.single() else {
@@ -787,15 +888,15 @@ pub fn stream_terrain_tiles(
     let min_level = finest_level(camera_distance);
 
     // The height field changed (tuning edit): the entire rendered world is
-    // stale, cached meshes included. Drop it all — the spawn pass below
+    // stale, cached renders included. Drop it all — the spawn pass below
     // then rebuilds the desired set from the new field, spreading the
-    // meshes across frames under the budget so a slider drag never
+    // bakes across frames under the budget so a slider drag never
     // freezes the frame.
     if field.is_changed() {
         for (_, (entity, ..)) in tiles.tiles.drain() {
             commands.entity(entity).despawn();
         }
-        cache.drain(&mut meshes);
+        cache.drain(&mut terrain_materials, &mut images);
     }
 
     let desired = desired_tiles(center, min_level);
@@ -808,19 +909,28 @@ pub fn stream_terrain_tiles(
 
     // Retire pass. Current and stale-stamped tiles stay (the spawn pass
     // swaps the stale ones atomically); dropped keys — the gate lifted
-    // their whole level, or the focus moved on — stay until current tiles
-    // render over their centre, then retire into the cache.
+    // their whole level, or the focus moved on — start fading out and
+    // stay until they have faded AND current tiles render over their
+    // centre, then retire into the cache.
     let mut retired: Vec<TileKey> = Vec::new();
-    for (&key, _) in tiles.tiles.iter() {
+    for (&key, &(entity, _, ref render)) in tiles.tiles.iter() {
         if desired.iter().any(|(k, _)| *k == key) {
             continue; // current or stale: the spawn pass owns it
         }
+        // Begin the fade-out (overwrites a still-running fade-in).
+        commands.entity(entity).insert(TileFade { target: 0.0 });
         // Dropped: nothing will ever cover it out at the continental rim,
         // and the desired set always covers everything closer, so the
         // wait is bounded.
         let centre = key.centre();
         if (centre - center).abs().max_element() > continental_reach {
             retired.push(key);
+            continue;
+        }
+        let faded_out = terrain_materials
+            .get(&render.material)
+            .is_none_or(|m| m.extension.tile.shading.z <= 1.0e-3);
+        if !faded_out {
             continue;
         }
         let covered = desired.iter().any(|(cover_key, cover_stamp)| {
@@ -836,19 +946,23 @@ pub fn stream_terrain_tiles(
         }
     }
     for key in retired {
-        if let Some((entity, stamp, handle)) = tiles.tiles.remove(&key) {
-            cache.put(key, stamp, handle, &mut meshes);
+        if let Some((entity, stamp, render)) = tiles.tiles.remove(&key) {
+            cache.put(
+                key,
+                stamp,
+                render,
+                &mut terrain_materials,
+                &mut images,
+            );
             commands.entity(entity).despawn();
         }
     }
 
-    // Spawn pass. Cache hits apply free; misses are meshed in parallel
+    // Spawn pass. Cache hits apply free; misses are baked in parallel
     // waves — one tile costs ~2 ms of field sampling serially (see the
-    // `tile_mesh` perf test), so a 2 ms budget buys several tiles only
-    // across cores. Camera focus-following samples the HeightField
-    // directly (terrain::camera); the Ground marker remains for
-    // drag-pan's grab-point raycast. Absent budget means unlimited
-    // (tests, loading screens).
+    // `bake_tile` perf test), so a 2 ms budget buys several tiles only
+    // across cores. Absent budget means unlimited (tests, loading
+    // screens).
     let deadline = budget
         .as_deref()
         .map(|b| Instant::now() + Duration::from_millis(b.mesh_millis));
@@ -858,12 +972,12 @@ pub fn stream_terrain_tiles(
         if built > 0 && deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
-        // Assemble the next wave: misses to mesh (a full parallel wave,
+        // Assemble the next wave: misses to bake (a full parallel wave,
         // or a single guaranteed-progress tile when the budget is already
         // spent), cache hits passing straight through.
         let spent = deadline.is_some_and(|d| Instant::now() >= d);
         let wave_cap = if spent { 1 } else { parallelism().max(1) };
-        let mut wave: Vec<(TileKey, TileStamp, Option<Handle<Mesh>>)> = Vec::new();
+        let mut wave: Vec<(TileKey, TileStamp, Option<TileRender>)> = Vec::new();
         while index < desired.len() && wave.len() < wave_cap {
             let (key, stamp) = desired[index];
             index += 1;
@@ -877,36 +991,120 @@ pub fn stream_terrain_tiles(
         if wave.is_empty() {
             continue;
         }
-        let fresh = mesh_wave(&field, &wave);
+        let fresh = bake_wave(&field, &wave);
         built += fresh.len();
-        for (i, mesh) in fresh {
-            let handle = meshes.add(mesh);
-            wave[i].2 = Some(handle);
+        for (i, bake) in fresh {
+            let (key, stamp, _) = wave[i];
+            wave[i].2 = Some(upload_tile(
+                key,
+                stamp,
+                bake,
+                &mut images,
+                &mut terrain_materials,
+            ));
         }
-        for (key, stamp, mesh) in wave {
-            // Every wave entry has a handle by now: cache hit or fresh.
-            let mesh = mesh.expect("wave entry left unmeshed");
+        for (key, stamp, render) in wave {
+            // Every wave entry has a render by now: cache hit or fresh.
+            let render = render.expect("wave entry left unbaked");
+            // A re-used material restarts its fade from the bottom.
+            if let Some(mut material) = terrain_materials.get_mut(&render.material) {
+                material.extension.tile.shading.z = 0.0;
+            }
             // Atomic swap: the replacement enters the map this frame; the
-            // retired mesh parks in the cache.
+            // retired render parks in the cache.
             let entity = commands
                 .spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(materials.ground.clone()),
+                    Mesh3d(shared_mesh.0.clone()),
+                    MeshMaterial3d(render.material.clone()),
+                    bevy::camera::visibility::NoFrustumCulling,
                     Transform::IDENTITY,
+                    // The drag-pan grab raycast is off (lock_on_drag =
+                    // false); the marker just tags terrain meshes.
                     Ground,
+                    TileFade { target: 1.0 },
                 ))
                 .id();
-            if let Some((old_entity, old_stamp, old_handle)) =
-                tiles.tiles.insert(key, (entity, stamp, mesh))
+            if let Some((old_entity, old_stamp, old_render)) =
+                tiles.tiles.insert(key, (entity, stamp, render))
             {
-                cache.put(key, old_stamp, old_handle, &mut meshes);
+                cache.put(
+                    key,
+                    old_stamp,
+                    old_render,
+                    &mut terrain_materials,
+                    &mut images,
+                );
                 commands.entity(old_entity).despawn();
             }
         }
     }
 }
 
-/// Usable cores for the meshing waves (wasm reports 1; the serial
+/// Turn a fresh [`BakedTile`] into live render state: upload the
+/// textures and build the per-tile material.
+fn upload_tile(
+    key: TileKey,
+    stamp: TileStamp,
+    bake: BakedTile,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<TerrainMaterial>,
+) -> TileRender {
+    let height = images.add(bake.height);
+    let slope = images.add(bake.slope);
+    let color = images.add(bake.color);
+    let coarse = images.add(bake.coarse);
+    let hole = if stamp.cuts_hole {
+        Some(hole_square(key.level, stamp.fine_focus_tile))
+    } else {
+        None
+    };
+    let material = materials.add(TerrainMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            ..Default::default()
+        },
+        extension: TerrainExtension {
+            height: height.clone(),
+            slope: slope.clone(),
+            color: color.clone(),
+            coarse: coarse.clone(),
+            tile: TileUniform {
+                origin_size: Vec4::new(
+                    key.x as f32 * key.tile_size(),
+                    key.z as f32 * key.tile_size(),
+                    key.tile_size(),
+                    key.cell(),
+                ),
+                hole: hole_texels(key, hole),
+                // (level, skirt depth, fade, unused) — fade starts down.
+                shading: Vec4::new(
+                    key.level as f32,
+                    skirt_depth(key.cell()),
+                    0.0,
+                    0.0,
+                ),
+            },
+        },
+    });
+    TileRender {
+        material,
+        height,
+        slope,
+        color,
+        coarse,
+        min_y: bake.min_y,
+        max_y: bake.max_y,
+    }
+}
+
+/// Skirt depth for a tile level: hides cracks against coarser
+/// neighbours (shader-side — the shared mesh's flagged border ring is
+/// sunk by this much).
+pub(crate) fn skirt_depth(cell: f32) -> f32 {
+    (cell * 1.5).max(8.0)
+}
+
+/// Usable cores for the baking waves (wasm reports 1; the serial
 /// fallback there needs no threads).
 fn parallelism() -> usize {
     std::thread::available_parallelism()
@@ -914,32 +1112,27 @@ fn parallelism() -> usize {
         .unwrap_or(1)
 }
 
-/// Mesh this wave's cache misses across cores, returning `(wave index,
-/// mesh)` pairs. Every tile costs about the same (~equal vertex counts),
+/// Bake this wave's cache misses across cores, returning `(wave index,
+/// bake)` pairs. Every tile costs about the same (~equal sample counts),
 /// so even slices need no work stealing. Single-core falls back to
 /// serial — `std::thread::scope` needs real threads, which wasm does not
 /// have.
-fn mesh_wave(
+fn bake_wave(
     field: &HeightField,
-    wave: &[(TileKey, TileStamp, Option<Handle<Mesh>>)],
-) -> Vec<(usize, Mesh)> {
+    wave: &[(TileKey, TileStamp, Option<TileRender>)],
+) -> Vec<(usize, BakedTile)> {
     let to_build: Vec<usize> = wave
         .iter()
         .enumerate()
         .filter(|(_, (_, _, cached))| cached.is_none())
         .map(|(i, _)| i)
         .collect();
-    let build = |indexes: &[usize]| -> Vec<(usize, Mesh)> {
+    let build = |indexes: &[usize]| -> Vec<(usize, BakedTile)> {
         indexes
             .iter()
             .map(|&i| {
                 let (key, stamp, _) = wave[i];
-                let hole = if stamp.cuts_hole {
-                    Some(hole_square(key.level, stamp.fine_focus_tile))
-                } else {
-                    None
-                };
-                (i, tile_mesh(field, key, stamp.focus_tile, hole))
+                (i, bake_tile(field, key, stamp.focus_tile))
             })
             .collect()
     };
@@ -954,31 +1147,51 @@ fn mesh_wave(
             .collect();
         handles
             .into_iter()
-            .flat_map(|handle| handle.join().expect("tile meshing panicked"))
+            .flat_map(|handle| handle.join().expect("tile baking panicked"))
             .collect()
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{TerrainTuning, rebuild_height_field};
+    use super::super::render::SharedTileMesh;
+    use bevy::mesh::{Indices, VertexAttributeValues};
+    use super::super::{TerrainTuning, animate_tile_fades, rebuild_height_field};
     use super::*;
 
     fn flat_field() -> HeightField {
         HeightField::from_fn(|_, _| 3.0)
     }
 
+    /// One baked f32 texel (R32Float layout: 4 bytes per texel).
+    fn texel(image: &Image, ix: usize, iz: usize) -> f32 {
+        let data = image.data.as_ref().expect("cpu-side data");
+        let i = (iz * TILE_VERTS + ix) * 4;
+        f32::from_le_bytes(data[i..i + 4].try_into().unwrap())
+    }
+
+    /// One baked RG32Float texel (slope components).
+    fn texel2(image: &Image, ix: usize, iz: usize) -> [f32; 2] {
+        let data = image.data.as_ref().expect("cpu-side data");
+        let i = (iz * TILE_VERTS + ix) * 8;
+        [
+            f32::from_le_bytes(data[i..i + 4].try_into().unwrap()),
+            f32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap()),
+        ]
+    }
+
     #[test]
-    fn tile_faces_point_up_and_skirts_outward() {
-        // Backface culling uses winding: interior faces must have +y
-        // geometric normals, and skirt walls must face away from the tile.
-        let key = TileKey {
-            level: 2,
-            x: -3,
-            z: 7,
-        };
-        // Focus on the tile itself: no rim edges, pure interior test.
-        let mesh = tile_mesh(&flat_field(), key, IVec2::new(-3, 7), None);
+    fn shared_mesh_faces_point_up_and_skirts_outward() {
+        // Backface culling uses winding: the one shared grid every tile
+        // renders must have +y interior faces, and its skirt walls must
+        // face away from the tile centre.
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        let shared = SharedTileMesh::from_world(&mut world);
+        let mesh = world
+            .resource::<Assets<Mesh>>()
+            .get(&shared.0)
+            .expect("shared mesh");
         let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
             VertexAttributeValues::Float32x3(p) => p.clone(),
             _ => panic!("unexpected position format"),
@@ -1009,8 +1222,7 @@ mod tests {
             );
         }
 
-        let c = key.centre();
-        let centre = Vec3::new(c.x, 0.0, c.y);
+        let centre = Vec3::new(TILE_QUADS as f32 / 2.0, 0.0, TILE_QUADS as f32 / 2.0);
         for tri in interior_count..(indices.len() / 3) {
             let (a, b, cc) = (
                 indices[tri * 3] as usize,
@@ -1018,9 +1230,9 @@ mod tests {
                 indices[tri * 3 + 2] as usize,
             );
             let normal = face_normal(a, b, cc);
-            let face_mid =
-                (Vec3::from(positions[a]) + Vec3::from(positions[b]) + Vec3::from(positions[cc]))
-                    / 3.0;
+            let face_mid = (Vec3::from(positions[a]) + Vec3::from(positions[b])
+                + Vec3::from(positions[cc]))
+                / 3.0;
             assert!(
                 (face_mid - centre).dot(normal) > 0.0,
                 "skirt triangle {tri} faces inward"
@@ -1031,34 +1243,21 @@ mod tests {
     #[test]
     fn tuning_change_rebuilds_the_whole_tile_set() {
         // The live-regeneration contract: mutating the tuning resource
-        // replaces every streamed tile with fresh meshes.
-        let mut app = App::new();
-        app.insert_resource(TerrainTuning::default())
-            .insert_resource(HeightField::default())
-            .init_resource::<TerrainTiles>()
-            .init_resource::<TileMeshCache>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<crate::resources::Materials>()
-            .add_systems(
-                Update,
-                (
-                    rebuild_height_field,
-                    stream_terrain_tiles.after(rebuild_height_field),
-                ),
-            );
+        // replaces every streamed tile with fresh bakes.
+        let mut app = terrain_app(None);
+        app.insert_resource(TerrainTuning::default());
         // One camera entity: streaming keys the ring centre off the
         // Camera3d entity's transform (plus its RtsCamera focus in Focus
         // mode) via `cameras.single()`.
         app.world_mut()
             .spawn((Camera3d::default(), RtsCamera::default()));
-        let ground = app
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::from_color(Color::WHITE));
-        app.world_mut()
-            .resource_mut::<crate::resources::Materials>()
-            .ground = ground;
+        app.add_systems(
+            Update,
+            (
+                rebuild_height_field,
+                stream_terrain_tiles.after(rebuild_height_field),
+            ),
+        );
         app.update();
         app.update();
 
@@ -1085,6 +1284,26 @@ mod tests {
         app.world().resource::<TerrainTiles>().entities().collect()
     }
 
+    /// A streaming test app: the systems and resources the terrain needs,
+    /// one RTS camera at the origin (spawned by the caller when ready).
+    /// `budget_millis: None` = no budget (unlimited bakes per frame).
+    fn terrain_app(budget_millis: Option<u64>) -> App {
+        let mut app = App::new();
+        app.insert_resource(HeightField::default())
+            .init_resource::<TerrainTiles>()
+            .init_resource::<TileRenderCache>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<TerrainMaterial>>()
+            .init_resource::<SharedTileMesh>()
+            .insert_resource(Time::<()>::default())
+            .add_systems(Update, (stream_terrain_tiles, animate_tile_fades));
+        if let Some(millis) = budget_millis {
+            app.insert_resource(StreamBudget { mesh_millis: millis });
+        }
+        app
+    }
+
     #[test]
     fn coverage_is_continuous_from_the_camera_to_continental_distance() {
         // Ring-sampling: every point from beside the focus out to the
@@ -1103,9 +1322,10 @@ mod tests {
                     let a = angle as f32 * std::f32::consts::TAU / 16.0;
                     let point = Vec2::new(a.cos(), a.sin()) * radius;
                     total += 1;
-                    covered +=
-                        tiles_covering_point(desired_set_around(Vec2::ZERO, min_level), point)
-                            as usize;
+                    covered += tiles_covering_point(
+                        desired_set_around(Vec2::ZERO, min_level),
+                        point,
+                    ) as usize;
                 }
             }
             assert_eq!(covered, total, "min_level {min_level}: uncovered points");
@@ -1244,32 +1464,28 @@ mod tests {
     }
 
     #[test]
-    fn coarse_tiles_cut_holes_where_the_finer_level_renders() {
-        // The clipmap invariant at quad granularity: a coarse tile
-        // straddling the finer square emits fewer quads — the overlap is
-        // cut out, not sheeted underneath (which showed as coarse mesh
-        // clipping through the fine surface over valleys).
-        let field = flat_field();
-        let focus = Vec2::new(64.0, 64.0); // level-0 square: [0, 160]^2
-        let (hmin, hmax) = finer_render_square(1, focus);
-        // A level-1 tile (128 m) straddling the square's +x edge.
+    fn hole_texels_place_the_cut_rectangle_and_empty_is_identity() {
+        // The shader cuts a coarse tile's overlap with the finer square by
+        // clamping verts into the hole rectangle (texel units); an empty
+        // rect must encode to bounds clamp() never reaches.
         let key = TileKey {
             level: 1,
             x: 1,
             z: 1,
-        };
-        let with_hole = tile_mesh(&field, key, IVec2::new(1, 1), Some((hmin, hmax)));
-        let without_hole = tile_mesh(&field, key, IVec2::new(1, 1), None);
-        let quad_count = |mesh: &Mesh| mesh.indices().expect("indices").len() as usize;
-        assert!(
-            quad_count(&with_hole) < quad_count(&without_hole),
-            "hole not cut: {} vs {} indices",
-            quad_count(&with_hole),
-            quad_count(&without_hole)
+        }; // 128 m tile at (128, 128), 4 m cells
+        let empty = hole_texels(key, None);
+        assert!(empty.x < -1.0e8 && empty.y > 1.0e8, "empty rect: {empty:?}");
+
+        // Finer square [0, 160]^2 world → texels relative to the tile
+        // origin (128, 128): [-32, 8] in x and z.
+        let rect = hole_texels(
+            key,
+            Some((Vec2::ZERO, Vec2::new(160.0, 160.0))),
         );
-        // And the cut must not be everything: the part outside the square
-        // still renders.
-        assert!(quad_count(&with_hole) > 0);
+        assert!((rect.x - (-32.0)).abs() < 1e-4);
+        assert!((rect.y - 8.0).abs() < 1e-4);
+        assert!((rect.z - (-32.0)).abs() < 1e-4);
+        assert!((rect.w - 8.0).abs() < 1e-4);
     }
 
     #[test]
@@ -1277,21 +1493,7 @@ mod tests {
         // Rims and holes are baked from the ring position at spawn time;
         // crossing a tile boundary must rebuild affected tiles instead of
         // leaving stale geometry mid-ring.
-        let mut app = App::new();
-        app.insert_resource(HeightField::default())
-            .init_resource::<TerrainTiles>()
-            .init_resource::<TileMeshCache>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<crate::resources::Materials>()
-            .add_systems(Update, stream_terrain_tiles);
-        let ground = app
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::from_color(Color::WHITE));
-        app.world_mut()
-            .resource_mut::<crate::resources::Materials>()
-            .ground = ground;
+        let mut app = terrain_app(None);
         let camera = app
             .world_mut()
             .spawn((Camera3d::default(), RtsCamera::default()))
@@ -1352,7 +1554,7 @@ mod tests {
     #[test]
     fn rim_edges_are_stitched_to_the_parent_surface() {
         // Nonlinear in z, so the parent chord differs from the true field:
-        // a stitched rim vertex must sit on the chord, an interior one on
+        // a stitched rim texel must sit on the chord, an interior one on
         // the field itself (minus their respective drops).
         let field = HeightField::from_fn(|_, z| 0.001 * z * z);
         let key = TileKey {
@@ -1360,16 +1562,7 @@ mod tests {
             x: 2,
             z: 0,
         }; // +x rim of the focus ring
-        let mesh = tile_mesh(&field, key, IVec2::ZERO, None);
-        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
-            VertexAttributeValues::Float32x3(p) => p.clone(),
-            _ => panic!("unexpected position format"),
-        };
-
-        let vertex_y = |ix: usize, iz: usize| match &positions[iz * TILE_VERTS + ix] {
-            [_, y, _] => *y,
-            _ => unreachable!(),
-        };
+        let bake = bake_tile(&field, key, IVec2::ZERO);
 
         // Level 0 and level 1 share the same drop (1 m), so a +x rim edge
         // vertex at (x=96, z) must equal chord_lerp(h(96,z0), h(96,z0+4)) - 1.
@@ -1386,17 +1579,17 @@ mod tests {
                 h0 + (h1 - h0) * t - level_drop(1) - parent_cell * STITCH_BIAS_CELL_FRACTION
             };
             assert!(
-                (vertex_y(TILE_QUADS, iz) - expected).abs() < 1e-4,
-                "rim vertex iz={iz}: {} != {expected}",
-                vertex_y(TILE_QUADS, iz)
+                (texel(&bake.height, TILE_QUADS, iz) - expected).abs() < 1e-4,
+                "rim texel iz={iz}: {} != {expected}",
+                texel(&bake.height, TILE_QUADS, iz)
             );
         }
         // Interior vertices stay on the true field (minus own drop), e.g.
         // the centre: h(80, 16) - 1.
         let centre_expected = 0.001 * 16.0 * 16.0 - level_drop(0);
         assert!(
-            (vertex_y(16, 16) - centre_expected).abs() < 1e-4,
-            "interior vertex must be un-stitched"
+            (texel(&bake.height, 16, 16) - centre_expected).abs() < 1e-4,
+            "interior texel must be un-stitched"
         );
     }
 
@@ -1405,7 +1598,7 @@ mod tests {
         // Regression: the top level's outer rim borders no coarser level;
         // stitching used to index LEVEL_CELL_M[9] and panic at runtime.
         // Periodic sub-scale heights, because real-amplitude fields at
-        // 2 Mm tile distances exceed f32 vertex precision in the test's
+        // 2 Mm tile distances exceed f32 precision in the test's
         // exact-value comparison.
         let field = HeightField::from_fn(|_, z| 0.001 * (z % 1000.0));
         let key = TileKey {
@@ -1413,28 +1606,25 @@ mod tests {
             x: 2,
             z: 0,
         };
-        let mesh = tile_mesh(&field, key, IVec2::ZERO, None); // must not panic
-        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") {
-            VertexAttributeValues::Float32x3(p) => p.clone(),
-            _ => panic!("unexpected position format"),
-        };
-        // Rim vertices stay on the plain field (minus the top level's drop).
+        let bake = bake_tile(&field, key, IVec2::ZERO); // must not panic
+        // Rim texels stay on the plain field (minus the top level's drop).
         let drop = level_drop(key.level);
         let z = 5.0 * LEVEL_CELL_M[8];
         let expected = 0.001 * (z % 1000.0) - drop;
-        let [_, y, _] = positions[5 * TILE_VERTS + TILE_QUADS] else {
-            unreachable!()
-        };
-        assert!((y - expected).abs() < 1e-2, "{y} != {expected}");
+        assert!(
+            (texel(&bake.height, TILE_QUADS, 5) - expected).abs() < 1e-2,
+            "{} != {expected}",
+            texel(&bake.height, TILE_QUADS, 5)
+        );
     }
 
     #[test]
-    fn normals_agree_across_tile_boundaries() {
-        // Normals come from the field at world positions, so the shared
-        // edge of two adjacent tiles must carry identical normals — this
-        // is what kills the per-tile lighting grid.
+    fn slopes_agree_across_tile_boundaries() {
+        // Slopes come from the field at world positions, so the shared
+        // edge of two adjacent tiles must carry identical baked slopes —
+        // this is what kills the per-tile lighting grid.
         let field = HeightField::default();
-        let a = tile_mesh(
+        let a = bake_tile(
             &field,
             TileKey {
                 level: 0,
@@ -1442,9 +1632,8 @@ mod tests {
                 z: 0,
             },
             IVec2::ZERO,
-            None,
-        );
-        let b = tile_mesh(
+                    );
+        let b = bake_tile(
             &field,
             TileKey {
                 level: 0,
@@ -1452,21 +1641,41 @@ mod tests {
                 z: 0,
             },
             IVec2::ZERO,
-            None,
-        );
-        let normals = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_NORMAL).expect("normals") {
-            VertexAttributeValues::Float32x3(n) => n.clone(),
-            _ => panic!("unexpected normal format"),
-        };
-        let (na, nb) = (normals(&a), normals(&b));
+                    );
         // Shared edge x = 32: A's ix = TILE_QUADS column, B's ix = 0.
         for iz in 0..TILE_VERTS {
             assert_eq!(
-                na[iz * TILE_VERTS + TILE_QUADS],
-                nb[iz * TILE_VERTS],
-                "normal mismatch on shared edge at iz={iz}"
+                texel2(&a.slope, TILE_QUADS, iz),
+                texel2(&b.slope, 0, iz),
+                "slope mismatch on shared edge at iz={iz}"
             );
         }
+    }
+
+    #[test]
+    fn coarse_bake_averages_the_heights() {
+        // The morph target is a block-average downsample of the final
+        // heights: on a flat field both must be exactly flat, and on a
+        // ramp the coarse value must sit inside the block's min/max.
+        let flat = bake_tile(&flat_field(), TileKey { level: 1, x: 0, z: 0 }, IVec2::ZERO);
+        assert_eq!(texel(&flat.coarse, 7, 7), 3.0 - level_drop(1));
+
+        let ramp = HeightField::from_fn(|x, _| 0.01 * x);
+        let key = TileKey { level: 0, x: 0, z: 0 };
+        let bake = bake_tile(&ramp, key, IVec2::ZERO);
+        let (mut block_min, mut block_max) = (f32::INFINITY, f32::NEG_INFINITY);
+        for iz in 0..9 {
+            for ix in 0..9 {
+                let h = texel(&bake.height, ix, iz);
+                block_min = block_min.min(h);
+                block_max = block_max.max(h);
+            }
+        }
+        let c = texel(&bake.coarse, 4, 4);
+        assert!(
+            block_min <= c && c <= block_max,
+            "coarse texel {c} escaped the block range [{block_min}, {block_max}]"
+        );
     }
 
     #[test]
@@ -1509,22 +1718,7 @@ mod tests {
     fn streaming_respects_the_per_frame_budget() {
         // Zero budget: exactly one tile per frame (the progress
         // guarantee), and the full desired set eventually lands.
-        let mut app = App::new();
-        app.insert_resource(HeightField::default())
-            .insert_resource(StreamBudget { mesh_millis: 0 })
-            .init_resource::<TerrainTiles>()
-            .init_resource::<TileMeshCache>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<crate::resources::Materials>()
-            .add_systems(Update, stream_terrain_tiles);
-        let ground = app
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::from_color(Color::WHITE));
-        app.world_mut()
-            .resource_mut::<crate::resources::Materials>()
-            .ground = ground;
+        let mut app = terrain_app(Some(0));
         app.world_mut()
             .spawn((Camera3d::default(), RtsCamera::default()));
         app.update();
@@ -1534,6 +1728,9 @@ mod tests {
 
         let total = desired_tiles(Vec2::ZERO, 0).len();
         for _ in 0..(4 * total) {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(1.0 / 60.0));
             app.update();
             if tile_entities(&app).len() == total {
                 break;
@@ -1544,35 +1741,6 @@ mod tests {
             total,
             "budgeted streaming never finished the desired set"
         );
-    }
-
-    /// A streaming test app: the system plus the resources it needs, one
-    /// RTS camera at the origin. `budget_millis: None` = no budget
-    /// (unlimited builds per frame).
-    fn streaming_app(budget_millis: Option<u64>) -> (App, Entity) {
-        let mut app = App::new();
-        app.insert_resource(HeightField::default())
-            .init_resource::<TerrainTiles>()
-            .init_resource::<TileMeshCache>()
-            .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<crate::resources::Materials>()
-            .add_systems(Update, stream_terrain_tiles);
-        if let Some(millis) = budget_millis {
-            app.insert_resource(StreamBudget { mesh_millis: millis });
-        }
-        let ground = app
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::from_color(Color::WHITE));
-        app.world_mut()
-            .resource_mut::<crate::resources::Materials>()
-            .ground = ground;
-        let camera = app
-            .world_mut()
-            .spawn((Camera3d::default(), RtsCamera::default()))
-            .id();
-        (app, camera)
     }
 
     /// Move the camera body and its focus together (a pan); both the ring
@@ -1587,6 +1755,9 @@ mod tests {
 
     fn converge(app: &mut App, total: usize) {
         for _ in 0..(4 * total + 8) {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(1.0 / 60.0));
             app.update();
         }
     }
@@ -1594,11 +1765,15 @@ mod tests {
     #[test]
     fn stale_tiles_render_until_their_replacement_spawns() {
         // The no-void invariant: crossing a tile boundary restamps the
-        // rings, but the old meshes stay in the world until each
-        // replacement lands (zero budget = one build per frame, so the
+        // rings, but the old surfaces stay in the world until each
+        // replacement lands (zero budget = one bake per frame, so the
         // overlap window is long) — and the streamed set keeps covering
         // the focus throughout.
-        let (mut app, camera) = streaming_app(Some(0));
+        let mut app = terrain_app(Some(0));
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
         let total = desired_tiles(Vec2::ZERO, 0).len();
         converge(&mut app, total);
         assert_eq!(tile_entities(&app).len(), total);
@@ -1611,7 +1786,7 @@ mod tests {
         let survivors = before.iter().filter(|e| alive(&app, **e)).count();
         assert!(
             survivors > before.len() / 2,
-            "old meshes vanished before their replacements: {survivors}/{}",
+            "old surfaces vanished before their replacements: {survivors}/{}",
             before.len()
         );
         assert!(
@@ -1628,21 +1803,26 @@ mod tests {
     #[test]
     fn dropped_level_tiles_wait_until_covered() {
         // Zooming out lifts the finest levels (the distance gate): their
-        // tiles must not vanish while the coarser ring still cuts the
-        // hole that exposed them — the cover has to land first.
-        let (mut app, _camera) = streaming_app(Some(0));
+        // tiles fade out through the coarse representation and must not
+        // retire while the coarser ring still cuts the hole that exposed
+        // them — the cover has to land first.
+        let mut app = terrain_app(Some(0));
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
         let total = desired_tiles(Vec2::ZERO, 0).len();
         converge(&mut app, total);
 
         // Lift the camera 40 km (focus stays): distance gates the finest
         // level up to L4, dropping the L0..L3 rings.
         app.world_mut()
-            .get_entity_mut(_camera)
+            .get_entity_mut(camera)
             .unwrap()
             .get_mut::<Transform>()
             .unwrap()
             .translation = Vec3::new(0.0, 40_000.0, 0.0);
-        app.update(); // one build: the un-holed covers have not landed
+        app.update(); // one bake: the un-holed covers have not landed
 
         let l0 = app
             .world()
@@ -1665,15 +1845,23 @@ mod tests {
     }
 
     #[test]
-    fn recycled_tiles_reuse_cached_meshes() {
-        // Panning away and back re-spawns from the mesh cache: the return
-        // trip creates no new Assets<Mesh> entries.
-        let (mut app, camera) = streaming_app(None);
+    fn recycled_tiles_reuse_cached_renders() {
+        // Panning away and back re-spawns from the render cache: the
+        // return trip creates no new terrain materials.
+        let mut app = terrain_app(None);
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
         let total = desired_tiles(Vec2::ZERO, 0).len();
         converge(&mut app, total);
 
-        let asset_count =
-            |app: &App| app.world().resource::<Assets<Mesh>>().iter().count();
+        let asset_count = |app: &App| {
+            app.world()
+                .resource::<Assets<TerrainMaterial>>()
+                .iter()
+                .count()
+        };
         pan_camera(&mut app, camera, 200.0);
         converge(&mut app, total);
         let away = asset_count(&app);
@@ -1683,34 +1871,93 @@ mod tests {
         assert_eq!(
             asset_count(&app),
             away,
-            "returning over visited ground built new meshes instead of cache hits"
+            "returning over visited ground built new renders instead of cache hits"
         );
         assert_eq!(tile_entities(&app).len(), total);
     }
 
     #[test]
-    fn tile_mesh_builds_in_about_a_millisecond() {
-        // Pins the SERIAL cost of one tile build. Two-layer baseline
+    fn spawned_tiles_fade_in_and_dropped_tiles_fade_out() {
+        // The LOD morph: a fresh tile's material starts at fade 0 and is
+        // driven to 1; a dropped tile's fade is driven back to 0 before
+        // it may retire.
+        let mut app = terrain_app(Some(0));
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()))
+            .id();
+        let total = desired_tiles(Vec2::ZERO, 0).len();
+        app.update(); // one tile, fresh
+        let entity = tile_entities(&app)[0];
+        let material = app
+            .world()
+            .get::<MeshMaterial3d<TerrainMaterial>>(entity)
+            .unwrap()
+            .0
+            .clone();
+        let fade = |app: &App| {
+            app.world()
+                .resource::<Assets<TerrainMaterial>>()
+                .get(&material)
+                .unwrap()
+                .extension
+                .tile
+                .shading
+                .z
+        };
+        assert_eq!(fade(&app), 0.0, "fresh tile must start at the coarse end");
+        converge(&mut app, total);
+        assert!(
+            (fade(&app) - 1.0).abs() < 1e-3,
+            "tile never faded in: {}",
+            fade(&app)
+        );
+
+        // Drop the whole fine stack: fades must run DOWN before the
+        // tiles disappear. The fade-out marker lands via commands, so it
+        // animates from the following frame.
+        app.world_mut()
+            .get_entity_mut(camera)
+            .unwrap()
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(0.0, 40_000.0, 0.0);
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_secs_f32(1.0 / 60.0));
+            app.update();
+        }
+        assert!(
+            app.world().get_entity(entity).is_ok() && fade(&app) < 1.0,
+            "dropped tile did not begin fading out"
+        );
+    }
+
+    #[test]
+    fn bake_tile_costs_about_two_milliseconds() {
+        // Pins the SERIAL cost of one tile bake. Two-layer baseline
         // (tectonic Worley + erosion filter, 2026-09): ~1.9 ms release,
         // ~3.9 ms dev/cranelift isolated (~2.5 µs/sample: ~0.7 µs
-        // tectonic + ~1.5 µs filter) and up to ~5 ms when the whole
-        // test binary competes for cores — hence the 6 ms dev pin. The
-        // spawn pass meshes whole waves of tiles in parallel (see
-        // `mesh_wave`); a noise/erosion regression that MULTIPLIES this
-        // starves streaming even across cores. Wall-clock like
-        // `nearest_solver_scales_to_10k_members`; run in release for the
-        // real number.
+        // tectonic + ~1.5 µs filter), up to ~5 ms when the whole test
+        // binary competes for cores, and ~7.5 ms with heavy EXTERNAL
+        // system load on top (load average ~11) — hence the 8 ms dev
+        // ceiling. The spawn pass bakes whole waves of tiles in parallel
+        // (see `bake_wave`); a noise/erosion regression that MULTIPLIES
+        // this starves streaming even across cores. Wall-clock like
+        // `nearest_solver_scales_to_10k_members`; run in release (or in
+        // isolation) for the real number.
         let field = HeightField::default();
         let set = desired_tiles(Vec2::new(123.4, -45.6), 0);
         let start = Instant::now();
         for (key, stamp) in &set {
-            let _ = tile_mesh(&field, *key, stamp.focus_tile, None);
+            let _ = bake_tile(&field, *key, stamp.focus_tile);
         }
         let per_tile = start.elapsed() / set.len() as u32;
-        eprintln!("tile_mesh: {per_tile:?}/tile over {} tiles", set.len());
+        eprintln!("bake_tile: {per_tile:?}/tile over {} tiles", set.len());
         assert!(
-            per_tile < Duration::from_millis(6),
-            "tile mesh avg {per_tile:?} — parallel waves assume ~2 ms serial release builds"
+            per_tile < Duration::from_millis(8),
+            "tile bake avg {per_tile:?} — parallel waves assume ~2 ms serial release bakes"
         );
     }
 }

@@ -1,7 +1,6 @@
 use crate::kinematics::NNTree;
 use bevy::prelude::*;
 use bevy_spatial::SpatialAABBAccess;
-use bevy_spatial::kdtree::KDTree3;
 
 pub fn side(start: Vec3, end: Vec3, query: &Vec3) -> f32 {
     (end.z - start.z) * (query.x - start.x) + (-end.x + start.x) * (query.z - start.z)

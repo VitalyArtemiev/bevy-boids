@@ -268,6 +268,8 @@ fn bench_screenshot(
     mut elapsed: Local<Duration>,
     mut taken: Local<bool>,
     mut commands: Commands,
+    tiles: Query<Entity, With<bevy_rts_camera::Ground>>,
+    cameras: Query<(&Transform, Option<&RtsCamera>), With<Camera3d>>,
 ) {
     let Some(path) = &config.shot else {
         return;
@@ -278,6 +280,15 @@ fn bench_screenshot(
     let at = config.duration.saturating_sub(Duration::from_secs(5));
     if !*taken && *elapsed >= at {
         *taken = true;
+        for (transform, rts) in &cameras {
+            info!(
+                "bench: camera at {:?} focus {:?} zoom {:?}",
+                transform.translation,
+                rts.map(|r| r.focus.translation),
+                rts.map(|r| r.zoom)
+            );
+        }
+        info!("bench: {} terrain tile entities", tiles.iter().count());
         info!("bench: capturing screenshot to {}", path.display());
         commands
             .spawn(bevy::render::view::screenshot::Screenshot::primary_window())

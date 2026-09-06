@@ -30,9 +30,10 @@ use crate::resources::{Materials, Meshes};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, HeightField, LodMode, ObstacleBundle, StreamBudget, TerrainTiles,
-    TileMeshCache, TerrainTuning, camera_terrain_clearance, focus_camera_on_ground, ground_boids,
-    project_obstacles_onto_field, rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
+    CameraClearance, HeightField, LodMode, ObstacleBundle, SharedTileMesh, StreamBudget,
+    TerrainRenderPlugin, TerrainTiles, TerrainTuning, TileRenderCache, animate_tile_fades,
+    camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
+    rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
 };
 use crate::ui::{GameState, UiPlugin};
 use bevy::asset::RenderAssetUsages;
@@ -78,14 +79,14 @@ fn main() {
         .init_resource::<LODGuard>()
         .init_resource::<HeightField>()
         .init_resource::<TerrainTiles>()
-        // Retired tile meshes kept for instant re-spawn (pan/zoom back).
-        .init_resource::<TileMeshCache>()
+        // Retired tile renders kept for instant re-spawn (pan/zoom back).
+        .init_resource::<TileRenderCache>()
         // Finest rendered LOD level gated by camera distance (correct);
         // the F3 panel can force finest-at-focus for debugging.
         .init_resource::<LodMode>()
         // RTS camera vs freecam, toggled from the F3 panel.
         .init_resource::<CameraMode>()
-        // Budgeted tile meshing: a tuning edit floods the world back in
+        // Budgeted tile baking: a tuning edit floods the world back in
         // over a few frames instead of hitching one.
         .init_resource::<StreamBudget>()
         .insert_resource(launch)
@@ -101,6 +102,11 @@ fn main() {
                     ..default()
                 }),
         )
+        // The terrain render path: the displaced-mesh material plugin
+        // (loads the vertex shaders) + the shared tile mesh, which needs
+        // Assets<Mesh> from the asset plugin above, hence the ordering.
+        .add_plugins(TerrainRenderPlugin)
+        .init_resource::<SharedTileMesh>()
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)
@@ -142,6 +148,8 @@ fn main() {
                 // grounding caches, re-seated obstacles.
                 rebuild_height_field.before(stream_terrain_tiles),
                 stream_terrain_tiles.run_if(launch_terrain_enabled),
+                // LOD transitions: step the per-tile morph fades.
+                animate_tile_fades.after(stream_terrain_tiles),
                 reset_ground_caches.after(rebuild_height_field),
                 project_obstacles_onto_field.after(rebuild_height_field),
                 focus_camera_on_ground.before(RtsCameraSystemSet),
@@ -186,8 +194,6 @@ struct Container {
     vel: Vec3,
     target: Vec3,
 }
-
-const X_EXTENT: f32 = 14.5;
 
 /// Camera draw distance. Sized for the 30 km ceiling: at that altitude the
 /// shallow-angle horizon rays meet ground hundreds of km out, and anything
@@ -241,14 +247,8 @@ fn setup(
 
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
-    // Terrain tiles carry per-vertex colors (rock/grass/drainage from the
-    // erosion fields, see tiles::ground_color); Bevy multiplies the vertex
-    // color into base_color whenever the mesh has a COLOR attribute, so
-    // the material stays white and the vertex tint is the whole story.
-    mat_list.ground = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        ..default()
-    });
+    // Terrain tiles render through `terrain::render`'s displaced-mesh
+    // material (per-tile baked textures), not a shared StandardMaterial.
     mat_list.debug_material = materials.add(StandardMaterial {
         base_color_texture: Some(images.add(uv_debug_texture())),
         ..default()
@@ -278,7 +278,7 @@ fn setup(
         }
     }
 
-    for i in 1..100 {
+    for _ in 1..100 {
         let mut rng = rand::rng();
         let x = rng.random_range(-100.0..100.0);
         let z = rng.random_range(-100.0..100.0);
@@ -286,14 +286,12 @@ fn setup(
         // its centre).
         let y = field.height(x, z) + 0.5;
 
-        let mut ent = commands
-            .spawn(ObstacleBundle::new(
-                mesh_list.cube.clone(),
-                mat_list.black.clone(),
-                Vec3::from_array([1.0, 0.0, 0.0]),
-                Vec3::from_array([x, y, z]),
-            ))
-            .id();
+        commands.spawn(ObstacleBundle::new(
+            mesh_list.cube.clone(),
+            mat_list.black.clone(),
+            Vec3::from_array([1.0, 0.0, 0.0]),
+            Vec3::from_array([x, y, z]),
+        ));
     }
 
     let camera = commands
