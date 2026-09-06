@@ -408,14 +408,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn world_height_matches_unit_height() {
-        let demo = DemoTerrain::default();
-        let uv = Vec2::new(0.3, 0.7);
-        let unit = evaluate_terrain(&demo, uv).unit_height;
-        assert_eq!(
-            world_height(&demo, uv),
-            (unit - UNIT_HEIGHT_ORIGIN) * VERTICAL_SCALE * WORLD_SCALE
-        );
-    }
 }

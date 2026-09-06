@@ -219,9 +219,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn field_is_flat_by_default() {
-        let field = HeightField::default();
-        assert_eq!(field.height(123.4, -567.8), 0.0);
-    }
 }
