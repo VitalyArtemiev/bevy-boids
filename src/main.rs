@@ -30,10 +30,9 @@ use crate::resources::{Materials, Meshes};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, HeightField, LodMode, ObstacleBundle, SharedTileMesh, StreamBudget,
-    TerrainRenderPlugin, TerrainTiles, TerrainTuning, TileAtlas, TileRenderCache,
-    camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
-    rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
+    CameraClearance, HeightField, ObstacleBundle, TerrainMesh, camera_terrain_clearance,
+    focus_camera_on_ground, ground_boids, project_obstacles_onto_field, reset_ground_caches,
+    spawn_ground,
 };
 use crate::ui::{GameState, UiPlugin};
 use bevy::asset::RenderAssetUsages;
@@ -78,17 +77,8 @@ fn main() {
         .init_resource::<Player>()
         .init_resource::<LODGuard>()
         .init_resource::<HeightField>()
-        .init_resource::<TerrainTiles>()
-        // Retired tile renders kept for instant re-spawn (pan/zoom back).
-        .init_resource::<TileRenderCache>()
-        // Finest rendered LOD level gated by camera distance (correct);
-        // the F3 panel can force finest-at-focus for debugging.
-        .init_resource::<LodMode>()
         // RTS camera vs freecam, toggled from the F3 panel.
         .init_resource::<CameraMode>()
-        // Budgeted tile baking: a tuning edit floods the world back in
-        // over a few frames instead of hitching one.
-        .init_resource::<StreamBudget>()
         .insert_resource(launch)
         .insert_resource(SkyTuning {
             shadows,
@@ -102,14 +92,9 @@ fn main() {
                     ..default()
                 }),
         )
-        // The terrain render path: the displaced-mesh material plugin
-        // (loads the vertex shaders) + the shared tile mesh and atlas,
-        // which need Assets<Mesh>/Assets<Image> from the asset plugin
-        // above, hence the ordering.
-        .add_plugins(TerrainRenderPlugin)
-        .init_resource::<SharedTileMesh>()
-        .init_resource::<TileAtlas>()
         .add_plugins(RtsCameraPlugin)
+        // The 1 km² ground mesh (needs Assets<Mesh> from the plugins).
+        .init_resource::<TerrainMesh>()
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)
         // No-op without --bench; skips the main menu when enabled.
@@ -119,7 +104,6 @@ fn main() {
         .init_resource::<KinematicsTuning>()
         .init_resource::<BoidTuning>()
         .init_resource::<FormationTuning>()
-        .init_resource::<TerrainTuning>()
         .insert_resource(ClearColor(Color::srgb(0.38, 0.62, 0.86)))
         .init_resource::<SelectionGizmo>()
         .init_resource::<FormationSelectionGizmo>()
@@ -128,7 +112,7 @@ fn main() {
                 .with_frequency(Duration::from_secs_f32(1.0))
                 .with_transform(TransformMode::Transform),
         )
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, spawn_ground.run_if(launch_terrain_enabled)))
         .add_systems(
             Update,
             (
@@ -146,12 +130,8 @@ fn main() {
                 ),
                 height_scaled_zoom.run_if(not(egui_wants_any_pointer_input)),
                 selection_indicator_face,
-                // Tuning edits cascade: new field -> rebuilt tiles, reset
-                // grounding caches, re-seated obstacles.
-                rebuild_height_field.before(stream_terrain_tiles),
-                stream_terrain_tiles.run_if(launch_terrain_enabled),
-                reset_ground_caches.after(rebuild_height_field),
-                project_obstacles_onto_field.after(rebuild_height_field),
+                reset_ground_caches,
+                project_obstacles_onto_field,
                 focus_camera_on_ground.before(RtsCameraSystemSet),
                 camera_terrain_clearance.after(RtsCameraSystemSet),
                 // Freecam (F3 toggle) takes the camera over by component
@@ -186,13 +166,6 @@ fn main() {
                 .run_if(in_state(GameState::Playing)),
         )
         .run();
-}
-
-#[derive(Component)]
-struct Container {
-    pos: Vec3,
-    vel: Vec3,
-    target: Vec3,
 }
 
 /// Camera draw distance. Sized for the 30 km ceiling: at that altitude the

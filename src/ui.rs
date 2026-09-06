@@ -17,7 +17,6 @@ use bevy_rts_camera::RtsCameraControls;
 
 use crate::freecam::CameraMode;
 use crate::sky::SkyTuning;
-use crate::terrain::{LodMode, TerrainTuning};
 use std::ops::RangeInclusive;
 
 /// App-wide flow state. The simulation and gameplay input only run in
@@ -95,7 +94,7 @@ impl Plugin for UiPlugin {
                     options_ui.run_if(
                         in_state(GameState::MainMenu).or_else(in_state(GameState::Paused)),
                     ),
-                    terrain_tuning_ui
+                    debug_panel_ui
                         .run_if(in_state(GameState::Playing))
                         // Don't let F3 leak into egui while a drag value is
                         // being keyboard-edited (and vice versa).
@@ -288,18 +287,12 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// The terrain tuning panel: every world-generation parameter as a live
-/// slider. Mutations propagate through change detection the same frame.
-///
-/// F3 toggles it here (not in a separate system: `Local` state is
-/// per-system, so a toggle elsewhere flips its own flag, never this one) —
-/// and the window's X button closes it through the same `Local`.
-fn terrain_tuning_ui(
+/// The F3 debug panel (was the terrain tuning panel; the world
+/// regenerator is gone with the LOD terrain). Keeps the freecam toggle.
+fn debug_panel_ui(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
     mut shown: Local<bool>,
-    mut tuning: ResMut<TerrainTuning>,
-    mut lod_mode: ResMut<LodMode>,
     mut camera_mode: ResMut<CameraMode>,
 ) -> Result {
     if keys.just_pressed(KeyCode::F3) {
@@ -309,225 +302,29 @@ fn terrain_tuning_ui(
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
-    // Holding `&mut` through the ResMut would flag the resource as changed
-    // every frame the window is open, rebuilding the whole terrain at frame
-    // rate; bypass the flag and re-arm it only for real edits.
-    let mut changed = false;
-    // Same bypass for the two debug toggles: `apply_camera_mode` is gated
-    // on `resource_changed::<CameraMode>`.
-    let mut lod_changed = false;
     let mut mode_changed = false;
-    egui::Window::new("Terrain tuning")
-        .open(&mut *shown)
-        .show(ctx, |ui| {
-            let tuning: &mut TerrainTuning = tuning.bypass_change_detection();
-            let lod_mode = lod_mode.bypass_change_detection();
-            let camera_mode = camera_mode.bypass_change_detection();
-            ui.label("World regenerates live while you drag.");
-            ui.add_space(6.0);
-
-            ui.heading("Debug");
-            ui.horizontal(|ui| {
-                ui.label("LOD:");
-                let r_distance = ui.selectable_value(
-                    lod_mode,
-                    LodMode::CameraDistance,
-                    "by camera distance (correct)",
-                );
-                let r_focus = ui.selectable_value(
-                    lod_mode,
-                    LodMode::FinestAtFocus,
-                    "finest at focus (debug)",
-                );
-                lod_changed |= r_distance.changed() | r_focus.changed();
-            });
-            let mut free = *camera_mode == CameraMode::Free;
-            if ui
-                .checkbox(
-                    &mut free,
-                    "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
-                )
-                .changed()
-            {
-                *camera_mode = if free { CameraMode::Free } else { CameraMode::Rts };
-                mode_changed = true;
-            }
-            ui.add_space(6.0);
-
-            changed |= ui
-                .horizontal(|ui| {
-                    ui.label("seed:");
-                    ui.add(egui::DragValue::new(&mut tuning.seed).speed(1)).changed()
-                })
-                .inner;
-
-            changed |= section(ui, "Tectonics", |ui| {
-                let t = &mut tuning.tectonics;
-                let mut c =
-                    slider(ui, &mut t.plate_size_m, 2000.0..=30_000.0, "plate size (m)").changed();
-                c |= slider(ui, &mut t.drift_speed, 0.25..=4.0, "drift speed").changed();
-                c |= slider(ui, &mut t.mountain_width, 0.1..=0.8, "mountain width").changed();
-                c |= slider(ui, &mut t.rift_depth_m, 0.0..=400.0, "rift depth (m)").changed();
-                c |= slider(ui, &mut t.plains_relief_m, 0.0..=200.0, "plains relief (m)").changed();
-                c |= slider(ui, &mut t.hills_relief_m, 0.0..=400.0, "hills relief (m)").changed();
-                c |= slider(
-                    ui,
-                    &mut t.mountain_relief_m,
-                    0.0..=1200.0,
-                    "mountain relief (m)",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut t.plains_feature_m,
-                    50.0..=2000.0,
-                    "plains feature (m)",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut t.mountain_feature_m,
-                    50.0..=2000.0,
-                    "mountain feature (m)",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut t.boundary_curvature,
-                    0.0..=1.0,
-                    "boundary curvature",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut t.boundary_curvature_wavelength,
-                    1.0..=10.0,
-                    "curvature wavelength (plates)",
-                )
-                .changed();
-                c |= slider(ui, &mut t.range_pulse, 0.0..=1.0, "range pulse").changed();
-                c |= slider(
-                    ui,
-                    &mut t.range_pulse_wavelength,
-                    1.0..=10.0,
-                    "pulse wavelength (plates)",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut t.macro_amplitude_m,
-                    0.0..=600.0,
-                    "massif amplitude (m)",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut t.macro_wavelength_m,
-                    300.0..=6000.0,
-                    "massif wavelength (m)",
-                )
-                .changed();
-                c |= slider(ui, &mut t.macro_octaves, 1..=8, "massif octaves").changed();
-                c
-            });
-
-            changed |= section(ui, "Landform", |ui| {
-                let mut c = slider(
-                    ui,
-                    &mut tuning.height_offset,
-                    -1.1..=0.25,
-                    "height offset",
-                )
-                .changed();
-                c |= slider(
-                    ui,
-                    &mut tuning.base_wavelength_m,
-                    20.0..=2000.0,
-                    "hill wavelength (m)",
-                )
-                .changed();
-                c |= slider(ui, &mut tuning.base_octaves, 1..=8, "hill octaves").changed();
-                c
-            });
-
-            changed |= section(ui, "Erosion (gullies)", |ui| {
-                let e = &mut tuning.erosion;
-                let mut c =
-                    slider(ui, &mut e.strength, 0.0..=0.42, "strength (0 = off)").changed();
-                c |= slider(ui, &mut e.gully_weight, 0.0..=1.0, "gully depth").changed();
-                c |= slider(ui, &mut e.scale, 0.04..=0.32, "gully size").changed();
-                c |= slider(ui, &mut e.detail, 0.2..=4.0, "high-slope spread").changed();
-                c |= slider(ui, &mut e.cell_scale, 0.25..=4.0, "cell density").changed();
-                c |= slider(
-                    ui,
-                    &mut e.normalization,
-                    0.0..=1.0,
-                    "wave normalization",
-                )
-                .changed();
-                c |= slider(ui, &mut e.octaves, 1..=8, "octaves").changed();
-                c |= slider(ui, &mut e.lacunarity, 1.5..=3.0, "lacunarity").changed();
-                c |= slider(ui, &mut e.gain, 0.1..=0.9, "gain").changed();
-                // Fixed-size shader vectors round-trip through arrays so
-                // each component binds to a slider directly.
-                let mut rounding = e.rounding.to_array();
-                c |= component_sliders(
-                    ui,
-                    &mut rounding,
-                    0.0..=4.0,
-                    &[
-                        "round ridges",
-                        "ridge falloff",
-                        "round creases",
-                        "crease falloff",
-                    ],
-                );
-                e.rounding = Vec4::from_array(rounding);
-                let mut onset = e.onset.to_array();
-                c |= component_sliders(
-                    ui,
-                    &mut onset,
-                    0.0..=4.0,
-                    &["onset slope 1", "onset slope 2", "ridge mask", "ridge fade"],
-                );
-                e.onset = Vec4::from_array(onset);
-                let mut assumed_slope = e.assumed_slope.to_array();
-                c |= component_sliders(
-                    ui,
-                    &mut assumed_slope,
-                    0.0..=2.0,
-                    &["pretend slope", "pretend blend"],
-                );
-                e.assumed_slope = Vec2::from_array(assumed_slope);
-                c
-            });
-
-            ui.add_space(6.0);
-            if ui.button("Reset to defaults").clicked() {
-                *tuning = TerrainTuning::default();
-                changed = true;
-            }
-        });
-    if changed {
-        tuning.set_changed();
-    }
-    if lod_changed {
-        lod_mode.set_changed();
-    }
+    egui::Window::new("Debug").open(&mut *shown).show(ctx, |ui| {
+        // Bypass the change flag (apply_camera_mode is gated on
+        // resource_changed::<CameraMode>) and re-arm only for real edits.
+        let camera_mode = camera_mode.bypass_change_detection();
+        let mut free = *camera_mode == CameraMode::Free;
+        if ui
+            .checkbox(
+                &mut free,
+                "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
+            )
+            .changed()
+        {
+            *camera_mode = if free { CameraMode::Free } else { CameraMode::Rts };
+            mode_changed = true;
+        }
+    });
     if mode_changed {
         camera_mode.set_changed();
     }
     Ok(())
 }
 
-/// A collapsing section whose body reports whether it changed anything.
-fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
-    egui::CollapsingHeader::new(title)
-        .default_open(true)
-        .show(ui, body)
-        .body_returned
-        .unwrap_or(false)
-}
 
 fn slider<T: egui::emath::Numeric>(
     ui: &mut egui::Ui,
@@ -539,21 +336,6 @@ fn slider<T: egui::emath::Numeric>(
 }
 
 /// One slider per array component — the erosion filter's shader vectors
-/// (rounding/onset/assumed slope) bind component-wise.
-fn component_sliders(
-    ui: &mut egui::Ui,
-    values: &mut [f32],
-    range: RangeInclusive<f32>,
-    labels: &[&str],
-) -> bool {
-    let mut changed = false;
-    for (value, label) in values.iter_mut().zip(labels) {
-        changed |= ui
-            .add(egui::Slider::new(value, range.clone()).text(*label))
-            .changed();
-    }
-    changed
-}
 
 /// Escape pauses/resumes; with the Options window open it closes that
 /// instead, and in the main menu it just closes the Options window.

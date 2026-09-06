@@ -36,12 +36,6 @@ pub struct LaunchConfig {
     /// Bench-only: when set, oscillate zoom between these bounds instead
     /// of pinning (exercises LOD churn; `--zoom-sweep low:high`).
     pub zoom_sweep: Option<(f32, f32)>,
-    /// Bench-only: override the tectonic macro (massif) amplitude before
-    /// the world builds (`--massif <m>`; the F3 slider is 0..600).
-    pub massif_amplitude_m: Option<f32>,
-    /// Bench-only: at this second, start a 3 s amplitude "drag" to 600 m
-    /// (`--retune <secs>`) — the F3 slider churn path.
-    pub retune_at_secs: Option<f32>,
     /// Bench-only: write one screenshot here near the end of the run —
     /// self-contained visual verification with no desktop capture tooling
     /// (works over ssh and on locked/occluded sessions).
@@ -73,8 +67,6 @@ impl Default for LaunchConfig {
             duration: Duration::from_secs_f32(BENCH_DURATION_SECS),
             zoom: BENCH_ZOOM,
             zoom_sweep: None,
-            massif_amplitude_m: None,
-            retune_at_secs: None,
             shot: None,
             focus: None,
             boids: DEFAULT_BOIDS,
@@ -138,16 +130,6 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
                     return Err(format!("{flag} must be positive, got {parsed}"));
                 }
                 config.duration = Duration::from_secs_f32(parsed);
-            }
-            "--retune" => {
-                config.retune_at_secs =
-                    Some(args[i + 1].parse().map_err(|e| format!("bad secs: {e}"))?);
-                i += 1;
-            }
-            "--massif" => {
-                config.massif_amplitude_m =
-                    Some(args[i + 1].parse().map_err(|e| format!("bad amplitude: {e}"))?);
-                i += 1;
             }
             "--zoom-sweep" => {
                 let (lo, hi) = args[i + 1]
@@ -242,8 +224,6 @@ impl Plugin for BenchPlugin {
         app.insert_state(GameState::Playing).add_systems(
             Update,
             (
-                apply_bench_massif.before(crate::terrain::rebuild_height_field),
-                retune_bench_massif.before(crate::terrain::rebuild_height_field),
                 pin_bench_camera.before(RtsCameraSystemSet),
                 sweep_bench_zoom.before(RtsCameraSystemSet),
                 bench_screenshot,
@@ -293,68 +273,10 @@ fn pin_bench_camera(
 
 /// Bench-only (`--massif <m>`): override the tectonic macro amplitude
 /// before the first rebuild, so benches can pin extreme worlds (the F3
-/// slider path this mirrors is `ui.rs`'s terrain tuning panel).
-fn apply_bench_massif(
-    config: Res<LaunchConfig>,
-    tuning: Option<ResMut<crate::terrain::TerrainTuning>>,
-    mut applied: Local<bool>,
-) {
-    if *applied {
-        return;
-    }
-    *applied = true;
-    let Some(amp) = config.massif_amplitude_m else {
-        return;
-    };
-    if let Some(mut tuning) = tuning {
-        tuning.bypass_change_detection().tectonics.macro_amplitude_m = amp;
-        tuning.set_changed();
-    }
-}
 
 /// Bench-only (`--retune <secs>`): flip the massif amplitude between
 /// 170 m and 600 m every frame for the given window, exactly like
 /// dragging the F3 slider, then hold 600 m and let the world settle —
-/// the rebuild-churn path under test.
-fn retune_bench_massif(
-    config: Res<LaunchConfig>,
-    time: Res<Time>,
-    tuning: Option<ResMut<crate::terrain::TerrainTuning>>,
-    mut cameras: Query<&mut RtsCamera>,
-) {
-    let Some(start) = config.retune_at_secs else {
-        return;
-    };
-    let Some(mut tuning) = tuning else {
-        return;
-    };
-    let t = time.elapsed_secs();
-    // Drag for 3 s from the start mark, then hold the max. While the
-    // amplitude churns (and for a while after), also pan and zoom the
-    // focus around — the repro is a crank-then-fly-around.
-    let dragging = t >= start && t < start + 3.0;
-    let amp = if t < start {
-        170.0
-    } else if dragging {
-        170.0 + (600.0 - 170.0) * ((t - start) / 3.0).fract()
-    } else {
-        600.0
-    };
-    tuning.bypass_change_detection().tectonics.macro_amplitude_m = amp;
-    if dragging || (t >= start + 3.0 && t < start + 3.1) {
-        tuning.set_changed();
-    }
-    if t >= start {
-        let w = (t - start) * 0.7;
-        for mut camera in &mut cameras {
-            camera.focus.translation.x = 900.0 * w.sin();
-            camera.focus.translation.z = 700.0 * (w * 1.3).cos();
-            camera.target_focus = camera.focus;
-            camera.zoom = 0.85 + 0.15 * (w * 0.9).sin();
-            camera.target_zoom = camera.zoom;
-        }
-    }
-}
 
 /// Bench-only (`--zoom-sweep <low>:<high>`): oscillate the zoom
 /// sinusoidally across the run, exercising LOD level gating and ring
@@ -387,10 +309,7 @@ fn bench_screenshot(
     mut elapsed: Local<Duration>,
     mut taken: Local<bool>,
     mut commands: Commands,
-    tiles: Query<Entity, With<bevy_rts_camera::Ground>>,
     cameras: Query<(&Transform, Option<&RtsCamera>), With<Camera3d>>,
-    terrain: Option<Res<crate::terrain::TerrainTiles>>,
-    cache: Option<Res<crate::terrain::TileRenderCache>>,
 ) {
     let Some(path) = &config.shot else {
         return;
@@ -408,24 +327,6 @@ fn bench_screenshot(
                 rts.map(|r| r.focus.translation),
                 rts.map(|r| r.zoom)
             );
-        }
-        info!("bench: {} terrain tile entities", tiles.iter().count());
-        if let Some(terrain) = terrain {
-            let mut per_level = [0usize; 16];
-            for key in terrain.keys() {
-                per_level[key.level as usize] += 1;
-            }
-            info!(
-                "bench: tiles per level: {:?}",
-                &per_level[..crate::terrain::level_count()]
-            );
-            // Slot-aliasing watchdog (see `TerrainTiles::slot_audit`).
-            if let Some(cache) = cache {
-                let (live, cached, aliased, oor) = terrain.slot_audit(&cache);
-                info!(
-                    "bench: slot audit: {live} live + {cached} cached renders, {aliased} aliased layers, {oor} out-of-range"
-                );
-            }
         }
         info!("bench: capturing screenshot to {}", path.display());
         commands

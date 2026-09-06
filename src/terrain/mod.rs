@@ -1,148 +1,140 @@
-//! Terrain subsystem: the heightfield is THE terrain.
-//!
-//! A single LOD system of streamed tiles covers everything from 1 m
-//! cells at the camera to 65 km cells at continental distance
-//! ([`tiles`]); [`noise`] generates the heights; [`grounding`] and
-//! [`camera`] integrate boids and the RTS camera with the field;
-//! [`render`] draws the streamed tiles through one shared
-//! GPU-displaced mesh. Sparse voxel detail volumes (forts, overhangs)
-//! will attach on top in a later milestone — the heightfield stays the
-//! LOD spine everywhere else.
+//! The terrain: a single flat 1 km² square (no LOD, no streaming) whose
+//! surface `HeightField` describes. Boid grounding, camera focus-follow
+//! and terrain clearance all sample the field; the mesh exists for
+//! rendering and for the drag-pan grab raycast (`Ground`).
+
+use bevy::pbr::MeshMaterial3d;
+use bevy::prelude::*;
+use std::sync::Arc;
+use bevy::render::mesh::{Indices, Mesh};
+use bevy_rts_camera::Ground;
 
 mod camera;
 mod grounding;
-mod noise;
-mod render;
-mod tiles;
 
 pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_ground};
-
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
-pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
 
-pub(crate) use noise::VERTICAL_BIAS;
-pub use render::{SharedTileMesh, TerrainRenderPlugin, TileAtlas};
-pub use tiles::{
-    LodMode, StreamBudget, TerrainTiles, TileRenderCache, level_count, stream_terrain_tiles,
-};
+/// The playable square's side, in metres.
+pub const TERRAIN_EXTENT_M: f32 = 1000.0;
 
-use bevy::prelude::*;
-use std::sync::Arc;
-
-/// The authoritative terrain height function. Everything samples this one
-/// field — tile meshes, grounding, camera clearance, cursor rays — so the
-/// world stays self-consistent no matter which subsystem asks. The edit
-/// layer (later milestone) will wrap the base sampler with sparse height
-/// deltas instead of replacing it.
-///
-/// The closure returns the full [`TerrainSample`] (height, slope, ridge
-/// map) because tile meshes shade from the same evaluation they displace
-/// with; height-only callers just discard the rest. Backed by a boxed
-/// closure so tests (and later, edited worlds) can substitute synthetic
-/// fields. Rebuilt from [`TerrainTuning`] by [`rebuild_height_field`]
-/// whenever the tuning changes, which cascades into tile rebuilds and
-/// cache resets via change detection.
+/// The terrain surface. Closure-backed so the erosion-demo generators
+/// (and the tests) can install any height function; the default is flat.
 #[derive(Resource, Clone)]
 pub struct HeightField {
-    sampler: Arc<dyn Fn(f32, f32, u8) -> TerrainSample + Send + Sync>,
-    /// Coloring reference relief (the mountain scale): consumers that
-    /// gate on unit height (the demo's coloring thresholds) convert back
-    /// with this, so snow crowns only real mountains. The live terrain's
-    /// relief varies per point with the tectonic field.
-    relief_m: f32,
-}
-
-impl HeightField {
-    pub fn from_noise(noise: TerrainNoise) -> Self {
-        HeightField {
-            relief_m: noise.relief_m(),
-            sampler: Arc::new(move |x, z, level| noise.sample_lod(x, z, level)),
-        }
-    }
-
-    /// World metres of relief per unit height (`TerrainTuning::relief_m`).
-    pub fn relief_m(&self) -> f32 {
-        self.relief_m
-    }
-
-    /// Height in metres at world (x, z), full detail (gameplay-facing:
-    /// grounding, camera and obstacles must see the same ground no
-    /// matter what the rendered LOD shows).
-    pub fn height(&self, x: f32, z: f32) -> f32 {
-        (self.sampler)(x, z, 0).height
-    }
-
-    /// Height plus the slope and ridge map, in one evaluation, full
-    /// detail.
-    pub fn sample(&self, x: f32, z: f32) -> TerrainSample {
-        (self.sampler)(x, z, 0)
-    }
-
-    /// LOD sample: `level` truncates every octave ladder to what that
-    /// tile's cell size can resolve, so coarse rings don't alias the
-    /// sub-cell octaves into speckle. Gameplay callers use
-    /// [`Self::sample`]/[`Self::height`].
-    pub fn sample_lod(&self, x: f32, z: f32, level: u8) -> TerrainSample {
-        (self.sampler)(x, z, level)
-    }
+    sampler: Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>,
 }
 
 impl Default for HeightField {
     fn default() -> Self {
-        HeightField::from_noise(TerrainNoise::default())
+        HeightField::from_fn(|_, _| 0.0)
     }
 }
 
 impl HeightField {
-    /// Test helper: a synthetic field from a plain height function. The
-    /// slope is finite-differenced (real fields report it analytically)
-    /// and the ridge map stays neutral, so test meshes shade plausibly.
-    /// Relief defaults to the tuning's mountain scale so unit-height
-    /// color gates behave like the real world's.
-    pub fn from_fn(f: impl Fn(f32, f32) -> f32 + Send + Sync + 'static) -> Self {
+    pub fn from_fn(sampler: impl Fn(f32, f32) -> f32 + Send + Sync + 'static) -> Self {
         HeightField {
-            relief_m: TerrainTuning::default().tectonics.mountain_relief_m,
-            sampler: Arc::new(move |x, z, _level| {
-                const EPS: f32 = 0.5;
-                TerrainSample {
-                    height: f(x, z),
-                    slope: Vec2::new(
-                        (f(x + EPS, z) - f(x - EPS, z)) / (2.0 * EPS),
-                        (f(x, z + EPS) - f(x, z - EPS)) / (2.0 * EPS),
-                    ),
-                    ridge_map: 0.0,
-                }
-            }),
+            sampler: Arc::new(sampler),
         }
     }
-}
 
-/// Rebuild the height field when the tuning resource changes. Running
-/// before `stream_terrain_tiles`, its change tick then cascades: tiles
-/// despawn/respawn from the new field, grounding caches reset, obstacles
-/// re-project.
-pub fn rebuild_height_field(tuning: Res<TerrainTuning>, mut field: ResMut<HeightField>) {
-    if !tuning.is_changed() {
-        return;
+    /// Surface height at a world XZ point.
+    pub fn height(&self, x: f32, z: f32) -> f32 {
+        (self.sampler)(x, z)
     }
-    *field = HeightField::from_noise(TerrainNoise::from_tuning(&tuning));
 }
 
-// ---------------------------------------------------------------------------
-// Obstacles
-// ---------------------------------------------------------------------------
+/// The rendered square: one grid mesh (vertex Y holds the surface, so the
+/// mesh IS the field's render — kept in a resource so later systems can
+/// rewrite heights in place through `Assets<Mesh>`).
+#[derive(Resource)]
+pub struct TerrainMesh {
+    pub handle: Handle<Mesh>,
+}
+
+/// Grid resolution per side (quads). Matches the erosion-filter demo's
+/// 256×256 lattice.
+pub const TERRAIN_RESOLUTION: usize = 256;
+
+impl FromWorld for TerrainMesh {
+    fn from_world(world: &mut World) -> Self {
+        let handle = world.resource_mut::<Assets<Mesh>>().add(grid_mesh(0.0));
+        TerrainMesh { handle }
+    }
+}
+
+/// A `TERRAIN_RESOLUTION`² grid over the square with every vertex at
+/// `y` — the shared substrate of the barebones plane and the erosion
+/// demo's height updates.
+pub(crate) fn grid_mesh(y: f32) -> Mesh {
+    let verts = TERRAIN_RESOLUTION + 1;
+    let half = TERRAIN_EXTENT_M / 2.0;
+    let step = TERRAIN_EXTENT_M / TERRAIN_RESOLUTION as f32;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(verts * verts);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(verts * verts);
+    for iz in 0..verts {
+        for ix in 0..verts {
+            positions.push([-half + ix as f32 * step, y, -half + iz as f32 * step]);
+            uvs.push([ix as f32, iz as f32]);
+        }
+    }
+    let mut indices: Vec<u32> = Vec::with_capacity(TERRAIN_RESOLUTION * TERRAIN_RESOLUTION * 6);
+    for iz in 0..TERRAIN_RESOLUTION {
+        for ix in 0..TERRAIN_RESOLUTION {
+            let v0 = (iz * verts + ix) as u32;
+            // Winding so faces point up (+y).
+            indices.extend_from_slice(&[v0, v0 + verts as u32, v0 + 1]);
+            indices.extend_from_slice(&[v0 + 1, v0 + verts as u32, v0 + verts as u32 + 1]);
+        }
+    }
+    let mut mesh = Mesh::new(
+        bevy::render::render_resource::PrimitiveTopology::TriangleList,
+        Default::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vec![[0.0f32, 1.0, 0.0]; verts * verts],
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vec![[1.0f32, 1.0, 1.0, 1.0]; verts * verts],
+    );
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+/// Spawn the rendered square. `Ground` marks it for the drag-pan grab
+/// raycast (lock_on_drag is off, so it is only a tag).
+pub fn spawn_ground(
+    mut commands: Commands,
+    terrain: Res<TerrainMesh>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Mesh3d(terrain.handle.clone()),
+        MeshMaterial3d(materials.add(StandardMaterial::default())),
+        Transform::IDENTITY,
+        Ground,
+    ));
+}
 
 use crate::kinematics::{HardCollision, TrackedByTree};
 
 /// Cuboid obstacles are 1 m; their centre rides half a metre above the
-/// surface. Shared with `project_obstacles_onto_field`.
+/// surface.
 pub(crate) const OBSTACLE_HALF_HEIGHT: f32 = 0.5;
 
+/// A cuboid obstacle on the terrain surface, repelling boids from its
+/// `normal` side.
 #[derive(Component, Default)]
 pub struct Obstacle {
     pub(crate) normal: Vec3,
 }
 
+/// Spawn bundle: obstacle + mesh + surface transform + spatial-tree
+/// registration.
 #[derive(Bundle, Default)]
 pub struct ObstacleBundle {
     obstacle: Obstacle,
@@ -171,17 +163,54 @@ impl ObstacleBundle {
     }
 }
 
-/// Re-seat obstacles on the terrain after the field changed (tuning edits).
-/// Runs every frame but pays nothing unless the field's change tick moved.
+/// Re-seat obstacles on the terrain surface (cheap at ~100 obstacles, so
+/// it simply runs every frame).
 pub fn project_obstacles_onto_field(
     mut query: Query<(&mut Transform, &Obstacle)>,
     field: Res<HeightField>,
 ) {
-    if !field.is_changed() {
-        return;
-    }
     for (mut transform, _obstacle) in &mut query {
         let t = transform.translation;
         transform.translation.y = field.height(t.x, t.z) + OBSTACLE_HALF_HEIGHT;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::render::mesh::VertexAttributeValues;
+
+    #[test]
+    fn grid_mesh_faces_up_with_full_coverage() {
+        // Backface culling uses winding: every triangle faces +y, and the
+        // grid is exactly (resolution+1)² verts / resolution²×2 tris.
+        let mesh = grid_mesh(0.0);
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() {
+            VertexAttributeValues::Float32x3(p) => p.clone(),
+            _ => panic!("unexpected position format"),
+        };
+        let indices = match mesh.indices().unwrap() {
+            Indices::U32(i) => i.clone(),
+            _ => panic!("unexpected index format"),
+        };
+        let verts = TERRAIN_RESOLUTION + 1;
+        assert_eq!(positions.len(), verts * verts);
+        assert_eq!(indices.len(), TERRAIN_RESOLUTION * TERRAIN_RESOLUTION * 6);
+        for tri in 0..(indices.len() / 3) {
+            let (a, b, c) = (
+                indices[tri * 3] as usize,
+                indices[tri * 3 + 1] as usize,
+                indices[tri * 3 + 2] as usize,
+            );
+            let normal = (Vec3::from(positions[b]) - Vec3::from(positions[a]))
+                .cross(Vec3::from(positions[c]) - Vec3::from(positions[a]));
+            assert!(normal.y > 0.0, "triangle {tri} faces {normal:?}, not up");
+        }
+    }
+
+    #[test]
+    fn field_is_flat_by_default() {
+        let field = HeightField::default();
+        assert_eq!(field.height(123.4, -567.8), 0.0);
     }
 }

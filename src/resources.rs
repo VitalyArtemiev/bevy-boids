@@ -4,7 +4,6 @@ use bevy::prelude::{Handle, Mesh, Resource, StandardMaterial};
 pub struct Meshes {
     pub cube: Handle<Mesh>,
     pub capsule: Handle<Mesh>,
-    pub plane: Handle<Mesh>,
 }
 #[derive(Resource, Default)]
 pub struct Materials {
