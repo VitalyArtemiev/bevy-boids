@@ -19,7 +19,7 @@ pub use camera::{CameraClearance, camera_terrain_clearance, focus_camera_on_grou
 pub use grounding::{GroundY, ground_boids, reset_ground_caches};
 pub use noise::{TerrainNoise, TerrainSample, TerrainTuning};
 pub(crate) use noise::VERTICAL_BIAS;
-pub use render::{SharedTileMesh, TerrainRenderPlugin, TileAtlas, animate_tile_fades};
+pub use render::{SharedTileMesh, TerrainRenderPlugin, TileAtlas};
 pub use tiles::{
     LodMode, StreamBudget, TerrainTiles, TileRenderCache, stream_terrain_tiles,
 };

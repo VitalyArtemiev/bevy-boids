@@ -12,7 +12,6 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(201) var height_texture: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(202) var slope_texture: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(203) var color_texture: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(204) var coarse_texture: texture_2d_array<f32>;
 
 struct TileUniform {
     // Tile origin (xy) and size/cell in metres (zw).
@@ -20,8 +19,7 @@ struct TileUniform {
     // Hole rectangle in texel units (min_x, max_x, min_z, max_z); an
     // empty rect is encoded as huge bounds (clamp is the identity).
     hole: vec4<f32>,
-    // (level, skirt depth in metres, fade, atlas layer). fade: 1 = this
-    // level's geometry, 0 = the coarse representation (LOD morph).
+    // (level, skirt depth in metres, unused, atlas layer).
     shading: vec4<f32>,
 };
 
@@ -38,8 +36,7 @@ struct TerrainVertex {
 //
 // `position` is tile-local: xz are texel coordinates, y = -1 flags a
 // skirt vert (y = 0 is the grid). Heights, slopes and tints come from
-// the bake textures; the LOD morph blends the fine height with the
-// baked coarse downsample; the clipmap hole rectangle is projected away
+// the bake textures; the clipmap hole rectangle is projected away
 // by clamping interior vertices onto its edge, which degenerates the
 // interior quads the CPU bake used to cut from the index buffer (verts
 // stay on their own texel's height, so the boundary strip keeps the
@@ -48,7 +45,6 @@ fn terrain_displace(position: vec3<f32>) -> TerrainVertex {
     let origin = tile.origin_size.xy;
     let cell = tile.origin_size.w;
     let skirt_depth = tile.shading.y;
-    let fade = tile.shading.z;
     let layer = i32(tile.shading.w + 0.5);
 
     let texel = clamp(
@@ -56,9 +52,7 @@ fn terrain_displace(position: vec3<f32>) -> TerrainVertex {
         vec2<i32>(0),
         vec2<i32>(TILE_VERTS - 1),
     );
-    let height_fine = textureLoad(height_texture, texel, layer, 0).r;
-    let height_coarse = textureLoad(coarse_texture, texel, layer, 0).r;
-    var height = mix(height_coarse, height_fine, fade);
+    var height = textureLoad(height_texture, texel, layer, 0).r;
 
     let is_skirt = position.y < -0.5;
     if is_skirt {

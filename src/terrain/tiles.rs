@@ -8,8 +8,7 @@
 //! is skipped only when the finer level's square fully contains it, so
 //! there are no annular gaps between levels; where rings overlap, the
 //! coarser level sits slightly lower (per-level height bias) so the
-//! finer surface wins the depth test. Level transitions fade through a
-//! coarse representation (see `render::TileFade`). Heights come from
+//! finer surface wins the depth test. Heights come from
 //! [`HeightField`], so the baked render, grounding, and camera clearance
 //! agree by construction; the same field samples tint the tiles
 //! (rock/grass/dirt by slope and altitude, drainage streaks from the
@@ -19,7 +18,7 @@
 //! mesh, placed by its baked textures — the UDLOD approach.
 
 use super::render::{
-    SharedTileMesh, TerrainMaterial, TerrainExtension, TileAtlas, TileFade, TileUniform,
+    SharedTileMesh, TerrainMaterial, TerrainExtension, TileAtlas, TileUniform,
     bake_texture_f32, bake_texture_rg32f, bake_texture_rgba8,
 };
 use super::{HeightField, TerrainSample, VERTICAL_BIAS};
@@ -170,6 +169,23 @@ impl TileRenderCache {
     fn take(&mut self, key: TileKey, stamp: TileStamp) -> Option<TileRender> {
         self.clock += 1;
         self.entries.remove(&(key, stamp)).map(|(render, _)| render)
+    }
+
+    /// Free the least-recently-used cached render, if any — the atlas's
+    /// pressure valve when a wave of bakes would claim more layers than
+    /// are free. Cache misses cost a re-bake, never a hole.
+    fn evict_oldest(
+        &mut self,
+        materials: &mut Assets<TerrainMaterial>,
+        atlas: &mut TileAtlas,
+    ) -> bool {
+        let Some((&oldest, _)) = self.entries.iter().min_by_key(|(_, (_, used))| *used) else {
+            return false;
+        };
+        if let Some((render, _)) = self.entries.remove(&oldest) {
+            render.free(materials, atlas);
+        }
+        true
     }
 
     /// Park a retired tile's render in the cache; free the LRU overflow.
@@ -382,14 +398,11 @@ fn parent_lerp_height(field: &HeightField, level: u8, x: f32, z: f32) -> f32 {
 /// mesh renders from (see `crate::terrain::render`). `height` is the
 /// FINAL vertex surface — level drop and rim stitching included, i.e.
 /// exactly what `tile_mesh` used to push as vertex Y — `slope` and
-/// `color` are the 3×3-blurred shading fields, and `coarse` is a
-/// downsampled height the LOD morph fades through (see
-/// [`crate::terrain::render::TileFade`]).
+/// `color` are the 3×3-blurred shading fields.
 pub(crate) struct BakedTile {
     pub height: Image,
     pub slope: Image,
     pub color: Image,
-    pub coarse: Image,
     pub min_y: f32,
     pub max_y: f32,
 }
@@ -594,46 +607,6 @@ pub(crate) fn bake_tile(
         }
     }
 
-    // Coarse representation for the LOD morph: 4×4 block averages of the
-    // final heights on a 9×9 lattice, bilinearly upsampled back to the
-    // full grid. Not the parent tile's own bake, but the same low
-    // frequencies — the fade slides the surface to where the coarser
-    // ring sits without binding the two tiles together.
-    let mut coarse = [[0.0f32; TILE_VERTS]; TILE_VERTS];
-    let lattice = |ix: usize, iz: usize| -> f32 {
-        // Average of the 4×4 height block with this lattice point as its
-        // min corner (clamped at the far edge, where the last block is
-        // 1 texel wide).
-        let x0 = (ix * 4).min(TILE_QUADS);
-        let z0 = (iz * 4).min(TILE_QUADS);
-        let x1 = (x0 + 4).min(TILE_QUADS);
-        let z1 = (z0 + 4).min(TILE_QUADS);
-        let mut sum = 0.0;
-        for z in z0..=z1 {
-            for x in x0..=x1 {
-                sum += heights[z][x];
-            }
-        }
-        sum / ((x1 - x0 + 1) * (z1 - z0 + 1)) as f32
-    };
-    let mut grid = [[0.0f32; 9]; 9];
-    for iz in 0..9 {
-        for ix in 0..9 {
-            grid[iz][ix] = lattice(ix, iz);
-        }
-    }
-    for iz in 0..TILE_VERTS {
-        for ix in 0..TILE_VERTS {
-            let (fx, fz) = (ix as f32 / 4.0, iz as f32 / 4.0);
-            let (x0, z0) = (fx.floor() as usize, fz.floor() as usize);
-            let (x1, z1) = ((x0 + 1).min(8), (z0 + 1).min(8));
-            let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
-            let a = grid[z0][x0] + (grid[z0][x1] - grid[z0][x0]) * tx;
-            let b = grid[z1][x0] + (grid[z1][x1] - grid[z1][x0]) * tx;
-            coarse[iz][ix] = a + (b - a) * tz;
-        }
-    }
-
     // Pack into textures. Skirt geometry is shader-side (the shared
     // mesh's flagged border ring sunk by `skirt`), but the bounds must
     // account for it.
@@ -672,7 +645,6 @@ pub(crate) fn bake_tile(
             }
             v
         }),
-        coarse: bake_texture_f32(&flat(&coarse)),
         min_y,
         max_y,
     }
@@ -839,9 +811,8 @@ pub(crate) fn desired_tiles(center: Vec2, min_level: u8) -> Vec<(TileKey, TileSt
 /// position moved, or the distance gate flipped their hole) keep
 /// rendering until their replacement spawns in the same frame — an atomic
 /// swap, not a despawn-then-build. Tiles dropped from the desired set
-/// (gate lifted their whole level, focus moved on) fade out through the
-/// coarse representation ([`TileFade`]) and keep rendering until a
-/// current tile actually renders over their ground: the coarse ring's
+/// (gate lifted their whole level, focus moved on) keep rendering until
+/// a current tile actually renders over their ground: the coarse ring's
 /// cut hole would otherwise expose the void beneath. A stale rim or a
 /// few frames of coarse-over-fine overlap beat a hole every time.
 #[allow(clippy::too_many_arguments)]
@@ -903,24 +874,16 @@ pub fn stream_terrain_tiles(
     // stay until they have faded AND current tiles render over their
     // centre, then retire into the cache.
     let mut retired: Vec<TileKey> = Vec::new();
-    for (&key, &(entity, _, ref render)) in tiles.tiles.iter() {
+    for (&key, &(_, _, _)) in tiles.tiles.iter() {
         if desired.iter().any(|(k, _)| *k == key) {
             continue; // current or stale: the spawn pass owns it
         }
-        // Begin the fade-out (overwrites a still-running fade-in).
-        commands.entity(entity).insert(TileFade { target: 0.0 });
         // Dropped: nothing will ever cover it out at the continental rim,
         // and the desired set always covers everything closer, so the
         // wait is bounded.
         let centre = key.centre();
         if (centre - center).abs().max_element() > continental_reach {
             retired.push(key);
-            continue;
-        }
-        let faded_out = terrain_materials
-            .get(&render.material)
-            .is_none_or(|m| m.extension.tile.shading.z <= 1.0e-3);
-        if !faded_out {
             continue;
         }
         let covered = desired.iter().any(|(cover_key, cover_stamp)| {
@@ -975,6 +938,16 @@ pub fn stream_terrain_tiles(
         if wave.is_empty() {
             continue;
         }
+        // Atlas pressure valve: the wave's cache misses will claim fresh
+        // layers; evict cached renders until they fit (a miss re-bakes,
+        // a shortfall would assert).
+        let pending = wave
+            .iter()
+            .filter(|(_, _, cached)| cached.is_none())
+            .count() as u32;
+        while atlas.available() < pending
+            && cache.evict_oldest(&mut terrain_materials, &mut atlas)
+        {}
         let fresh = bake_wave(&field, &wave);
         built += fresh.len();
         for (i, bake) in fresh {
@@ -991,10 +964,6 @@ pub fn stream_terrain_tiles(
         for (key, stamp, render) in wave {
             // Every wave entry has a render by now: cache hit or fresh.
             let render = render.expect("wave entry left unbaked");
-            // A re-used material restarts its fade from the bottom.
-            if let Some(mut material) = terrain_materials.get_mut(&render.material) {
-                material.extension.tile.shading.z = 0.0;
-            }
             // Atomic swap: the replacement enters the map this frame; the
             // retired render parks in the cache.
             let entity = commands
@@ -1006,7 +975,6 @@ pub fn stream_terrain_tiles(
                     // The drag-pan grab raycast is off (lock_on_drag =
                     // false); the marker just tags terrain meshes.
                     Ground,
-                    TileFade { target: 1.0 },
                 ))
                 .id();
             if let Some((old_entity, old_stamp, old_render)) =
@@ -1045,7 +1013,6 @@ fn upload_tile(
             height: atlas.height.clone(),
             slope: atlas.slope.clone(),
             color: atlas.color.clone(),
-            coarse: atlas.coarse.clone(),
             tile: TileUniform {
                 origin_size: Vec4::new(
                     key.x as f32 * key.tile_size(),
@@ -1131,7 +1098,7 @@ fn bake_wave(
 mod tests {
     use super::super::render::SharedTileMesh;
     use bevy::mesh::{Indices, VertexAttributeValues};
-    use super::super::{TerrainTuning, animate_tile_fades, rebuild_height_field};
+    use super::super::{TerrainTuning, rebuild_height_field};
     use super::*;
 
     fn flat_field() -> HeightField {
@@ -1273,7 +1240,7 @@ mod tests {
             .init_resource::<SharedTileMesh>()
             .init_resource::<TileAtlas>()
             .insert_resource(Time::<()>::default())
-            .add_systems(Update, (stream_terrain_tiles, animate_tile_fades));
+            .add_systems(Update, stream_terrain_tiles);
         if let Some(millis) = budget_millis {
             app.insert_resource(StreamBudget { mesh_millis: millis });
         }
@@ -1629,32 +1596,6 @@ mod tests {
     }
 
     #[test]
-    fn coarse_bake_averages_the_heights() {
-        // The morph target is a block-average downsample of the final
-        // heights: on a flat field both must be exactly flat, and on a
-        // ramp the coarse value must sit inside the block's min/max.
-        let flat = bake_tile(&flat_field(), TileKey { level: 1, x: 0, z: 0 }, IVec2::ZERO);
-        assert_eq!(texel(&flat.coarse, 7, 7), 3.0 - level_drop(1));
-
-        let ramp = HeightField::from_fn(|x, _| 0.01 * x);
-        let key = TileKey { level: 0, x: 0, z: 0 };
-        let bake = bake_tile(&ramp, key, IVec2::ZERO);
-        let (mut block_min, mut block_max) = (f32::INFINITY, f32::NEG_INFINITY);
-        for iz in 0..9 {
-            for ix in 0..9 {
-                let h = texel(&bake.height, ix, iz);
-                block_min = block_min.min(h);
-                block_max = block_max.max(h);
-            }
-        }
-        let c = texel(&bake.coarse, 4, 4);
-        assert!(
-            block_min <= c && c <= block_max,
-            "coarse texel {c} escaped the block range [{block_min}, {block_max}]"
-        );
-    }
-
-    #[test]
     fn colors_match_terrain_shape() {
         // Shading must agree with the fields it comes from: steepness
         // loses the grass green for cliff, creases brighten into chalky
@@ -1879,61 +1820,43 @@ mod tests {
     }
 
     #[test]
-    fn spawned_tiles_fade_in_and_dropped_tiles_fade_out() {
-        // The LOD morph: a fresh tile's material starts at fade 0 and is
-        // driven to 1; a dropped tile's fade is driven back to 0 before
-        // it may retire.
+    fn hole_cutters_never_expose_their_hole() {
+        // The void guard that replaced LOD fades: a coarse tile spawns
+        // with its hole already cut, so anything under the hole must be
+        // rendering BEFORE the cutter goes live. The spawn order is
+        // finest-first and the budget here admits one tile per frame —
+        // the widest exposure window — and still no hole may open.
         let mut app = terrain_app(Some(0));
-        let camera = app
-            .world_mut()
-            .spawn((Camera3d::default(), RtsCamera::default()))
-            .id();
-        let total = desired_tiles(Vec2::ZERO, 0).len();
-        app.update(); // one tile, fresh
-        let entity = tile_entities(&app)[0];
-        let material = app
-            .world()
-            .get::<MeshMaterial3d<TerrainMaterial>>(entity)
-            .unwrap()
-            .0
-            .clone();
-        let fade = |app: &App| {
-            app.world()
-                .resource::<Assets<TerrainMaterial>>()
-                .get(&material)
-                .unwrap()
-                .extension
-                .tile
-                .shading
-                .z
-        };
-        assert_eq!(fade(&app), 0.0, "fresh tile must start at the coarse end");
-        converge(&mut app, total);
-        assert!(
-            (fade(&app) - 1.0).abs() < 1e-3,
-            "tile never faded in: {}",
-            fade(&app)
-        );
-
-        // Drop the whole fine stack: fades must run DOWN before the
-        // tiles disappear. The fade-out marker lands via commands, so it
-        // animates from the following frame.
         app.world_mut()
-            .get_entity_mut(camera)
-            .unwrap()
-            .get_mut::<Transform>()
-            .unwrap()
-            .translation = Vec3::new(0.0, 40_000.0, 0.0);
-        for _ in 0..2 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(Duration::from_secs_f32(1.0 / 60.0));
+            .spawn((Camera3d::default(), RtsCamera::default()));
+        let total = desired_tiles(Vec2::ZERO, 0).len();
+        for _ in 0..(total * 2) {
             app.update();
+            let tiles = &app.world().resource::<TerrainTiles>().tiles;
+            for (&key, &(_, stamp, _)) in tiles {
+                if !stamp.cuts_hole {
+                    continue;
+                }
+                let (hmin, hmax) = hole_square(key.level, stamp.fine_focus_tile);
+                // Corners-in plus centre sample the hole; the cover may
+                // be any live tile that renders over the point.
+                for p in [
+                    Vec2::new(hmin.x + 1.0, hmin.y + 1.0),
+                    Vec2::new(hmax.x - 1.0, hmin.y + 1.0),
+                    Vec2::new(hmin.x + 1.0, hmax.y - 1.0),
+                    Vec2::new(hmax.x - 1.0, hmax.y - 1.0),
+                    (hmin + hmax) / 2.0,
+                ] {
+                    let covered = tiles.iter().any(|(&k, &(_, st, _))| {
+                        k.contains(p) && renders_at(k.level, &st, p)
+                    });
+                    assert!(
+                        covered,
+                        "live hole-cutter {key:?} exposes {p:?}: spawn order broke the void guard"
+                    );
+                }
+            }
         }
-        assert!(
-            app.world().get_entity(entity).is_ok() && fade(&app) < 1.0,
-            "dropped tile did not begin fading out"
-        );
     }
 
     #[test]

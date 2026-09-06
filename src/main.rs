@@ -32,7 +32,6 @@ use crate::target::{Target, follow_target};
 use crate::terrain::{
     CameraClearance, HeightField, LodMode, ObstacleBundle, SharedTileMesh, StreamBudget,
     TerrainRenderPlugin, TerrainTiles, TerrainTuning, TileAtlas, TileRenderCache,
-    animate_tile_fades,
     camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
     rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
 };
@@ -151,8 +150,6 @@ fn main() {
                 // grounding caches, re-seated obstacles.
                 rebuild_height_field.before(stream_terrain_tiles),
                 stream_terrain_tiles.run_if(launch_terrain_enabled),
-                // LOD transitions: step the per-tile morph fades.
-                animate_tile_fades.after(stream_terrain_tiles),
                 reset_ground_caches.after(rebuild_height_field),
                 project_obstacles_onto_field.after(rebuild_height_field),
                 focus_camera_on_ground.before(RtsCameraSystemSet),

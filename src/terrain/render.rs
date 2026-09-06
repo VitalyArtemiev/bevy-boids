@@ -56,23 +56,20 @@ pub struct TerrainExtension {
     pub(crate) slope: Handle<Image>,
     #[texture(203, dimension = "2d_array")]
     pub(crate) color: Handle<Image>,
-    #[texture(204, dimension = "2d_array")]
-    pub(crate) coarse: Handle<Image>,
     #[uniform(200, TileUniform)]
     pub(crate) tile: TileUniform,
 }
 
-/// Everything the vertex shader needs to place, cut and morph one tile.
+/// Everything the vertex shader needs to place and cut one tile.
 /// `hole` is in tile-local TEXEL units; an empty rectangle (`min >
-/// max`) means no cut. `fade` is the LOD morph: 1 = fully this level's
-/// geometry, 0 = fully the coarse representation.
+/// max`) means no cut.
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct TileUniform {
     /// Tile origin (xy) and size/cell in metres (zw).
     pub origin_size: Vec4,
     /// Hole rectangle in texel units: (min_x, max_x, min_z, max_z).
     pub hole: Vec4,
-    /// (level, skirt depth in metres, fade, atlas layer).
+    /// (level, skirt depth in metres, unused, atlas layer).
     pub shading: Vec4,
 }
 
@@ -108,11 +105,13 @@ impl MaterialExtension for TerrainExtension {
 #[derive(Resource)]
 pub(crate) struct TerrainCommonShader(pub(crate) Handle<Shader>);
 
-/// How many tile layers each atlas array holds. Every live tile and
-/// every cached-but-retired one holds a layer, so this must cover the
-/// desired set (≤ 10 levels × 25 tiles) plus the
-/// [`super::tiles::TileRenderCache`] LRU (256) with headroom.
-pub(crate) const ATLAS_LAYERS: u32 = 512;
+/// How many tile layers each atlas array holds. Live tiles, tiles
+/// waiting out the retire rule, and the [`super::tiles::TileRenderCache`]
+/// LRU all hold layers — during a zoom gesture the retiring and incoming
+/// sets coexist, so the bound must cover roughly twice the desired set
+/// plus the cache. `alloc` still frees cache entries under pressure
+/// before giving up.
+pub(crate) const ATLAS_LAYERS: u32 = 2048;
 
 /// The four bake textures of every tile, packed layer-wise into four
 /// shared `Texture2DArray`s — one material bind group's worth of texture
@@ -133,8 +132,6 @@ pub struct TileAtlas {
     pub(crate) slope: Handle<Image>,
     /// Rgba8Unorm — per-vertex ground tints.
     pub(crate) color: Handle<Image>,
-    /// R32Float — coarse downsample for the LOD morph.
-    pub(crate) coarse: Handle<Image>,
     /// Returned layers, most-freed-first.
     free: Vec<u32>,
     /// Next never-allocated layer.
@@ -171,7 +168,6 @@ impl FromWorld for TileAtlas {
             height: array(TextureFormat::R32Float, 4),
             slope: array(TextureFormat::Rg32Float, 8),
             color: array(TextureFormat::Rgba8Unorm, 4),
-            coarse: array(TextureFormat::R32Float, 4),
             free: Vec::new(),
             next: 0,
         }
@@ -179,15 +175,23 @@ impl FromWorld for TileAtlas {
 }
 
 impl TileAtlas {
-    /// Hand out a layer. Reuses freed layers first; the bound covers
-    /// every live tile plus the whole cache, so running out is a bug.
+    /// Layers claimable without evicting anything.
+    pub(crate) fn available(&self) -> u32 {
+        ATLAS_LAYERS - self.next + self.free.len() as u32
+    }
+
+    /// Hand out a layer. Reuses freed layers first; fresh layers come
+    /// from the never-allocated tail. When the tail runs out the caller
+    /// is expected to have evicted cache renders (see
+    /// [`TileRenderCache::evict_oldest`]) — allocating past the bound is
+    /// a bug and asserts.
     pub(crate) fn alloc(&mut self) -> u32 {
         if let Some(slot) = self.free.pop() {
             return slot;
         }
         assert!(
             self.next < ATLAS_LAYERS,
-            "tile atlas exhausted: live tiles + cache exceed {ATLAS_LAYERS} layers"
+            "tile atlas exhausted: live tiles exceed {ATLAS_LAYERS} layers"
         );
         let slot = self.next;
         self.next += 1;
@@ -229,7 +233,6 @@ impl TileAtlas {
         splice(&self.height, &bake.height);
         splice(&self.slope, &bake.slope);
         splice(&self.color, &bake.color);
-        splice(&self.coarse, &bake.coarse);
     }
 }
 
@@ -442,43 +445,3 @@ pub fn bake_texture_rgba8(values: &[[f32; 4]]) -> Image {
     }
 }
 
-/// LOD-transition state per tile entity: the material's `fade` uniform
-/// animates toward `target` (1 = this level's geometry, 0 = the coarse
-/// representation). Spawned tiles fade in (the new surface slides up
-/// from where the coarser ring was); dropped tiles fade out before
-/// retiring (the surface settles onto the cover that lands beneath).
-/// [`super::tiles::stream_terrain_tiles`] refuses to retire a fading
-/// tile while its fade is still up.
-#[derive(Component, Debug)]
-pub struct TileFade {
-    pub target: f32,
-}
-
-/// How long one LOD transition takes.
-pub const TILE_FADE_SECS: f32 = 0.25;
-
-/// Step every fading tile's material toward its target and drop the
-/// marker once it arrives. Mutates material assets (not components), so
-/// it touches nothing the streaming system holds — fades and streaming
-/// interleave freely.
-pub fn animate_tile_fades(
-    tiles: Query<(Entity, &MeshMaterial3d<TerrainMaterial>, &TileFade)>,
-    mut materials: ResMut<Assets<TerrainMaterial>>,
-    time: Res<Time>,
-    mut commands: Commands,
-) {
-    let step = time.delta_secs() / TILE_FADE_SECS;
-    for (entity, material, fade) in &tiles {
-        let Some(mut material) = materials.get_mut(&material.0) else {
-            continue;
-        };
-        let current = &mut material.extension.tile.shading.z;
-        let delta = fade.target - *current;
-        if delta.abs() <= step {
-            *current = fade.target;
-            commands.entity(entity).remove::<TileFade>();
-        } else {
-            *current += delta.signum() * step;
-        }
-    }
-}
