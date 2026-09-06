@@ -19,7 +19,8 @@ use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy_rts_camera::{Ground, RtsCamera};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use bevy::platform::time::Instant; // web-time on wasm: std's Instant::now() panics ("time not implemented on this platform")
+use std::time::Duration;
 
 /// Tile resolution: 32x32 quads per tile, any level.
 const TILE_QUADS: usize = 32;
