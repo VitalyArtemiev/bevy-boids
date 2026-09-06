@@ -5,12 +5,14 @@
 
 // Per-tile material bindings. Indices 200+: they share the material
 // bind group with StandardMaterial, whose own bindings stop well below
-// (same convention as bevy_pbr's forward decal extension).
+// (same convention as bevy_pbr's forward decal extension). The textures
+// are the shared tile atlas: one Texture2DArray per bake kind, one layer
+// per tile; the layer index rides `tile.shading.w`.
 @group(#{MATERIAL_BIND_GROUP}) @binding(200) var<uniform> tile: TileUniform;
-@group(#{MATERIAL_BIND_GROUP}) @binding(201) var height_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(202) var slope_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(203) var color_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(204) var coarse_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(201) var height_texture: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(202) var slope_texture: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(203) var color_texture: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(204) var coarse_texture: texture_2d_array<f32>;
 
 struct TileUniform {
     // Tile origin (xy) and size/cell in metres (zw).
@@ -18,7 +20,7 @@ struct TileUniform {
     // Hole rectangle in texel units (min_x, max_x, min_z, max_z); an
     // empty rect is encoded as huge bounds (clamp is the identity).
     hole: vec4<f32>,
-    // (level, skirt depth in metres, fade, unused). fade: 1 = this
+    // (level, skirt depth in metres, fade, atlas layer). fade: 1 = this
     // level's geometry, 0 = the coarse representation (LOD morph).
     shading: vec4<f32>,
 };
@@ -47,14 +49,15 @@ fn terrain_displace(position: vec3<f32>) -> TerrainVertex {
     let cell = tile.origin_size.w;
     let skirt_depth = tile.shading.y;
     let fade = tile.shading.z;
+    let layer = i32(tile.shading.w + 0.5);
 
     let texel = clamp(
         vec2<i32>(position.xz),
         vec2<i32>(0),
         vec2<i32>(TILE_VERTS - 1),
     );
-    let height_fine = textureLoad(height_texture, texel, 0).r;
-    let height_coarse = textureLoad(coarse_texture, texel, 0).r;
+    let height_fine = textureLoad(height_texture, texel, layer, 0).r;
+    let height_coarse = textureLoad(coarse_texture, texel, layer, 0).r;
     var height = mix(height_coarse, height_fine, fade);
 
     let is_skirt = position.y < -0.5;
@@ -69,13 +72,13 @@ fn terrain_displace(position: vec3<f32>) -> TerrainVertex {
 
     var world_normal = vec3<f32>(0.0, 1.0, 0.0);
     if !is_skirt {
-        let slope = textureLoad(slope_texture, texel, 0).xy;
+        let slope = textureLoad(slope_texture, texel, layer, 0).xy;
         world_normal = normalize(vec3<f32>(-slope.x, 1.0, -slope.y));
     }
 
     return TerrainVertex(
         vec4<f32>(origin.x + local.x * cell, height, origin.y + local.y * cell, 1.0),
         world_normal,
-        textureLoad(color_texture, texel, 0),
+        textureLoad(color_texture, texel, layer, 0),
     );
 }

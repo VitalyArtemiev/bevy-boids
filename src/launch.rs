@@ -304,10 +304,26 @@ fn exit_bench_when_elapsed(
     time: Res<Time>,
     mut elapsed: Local<Duration>,
     mut frames: Local<u32>,
+    mut recent_window: Local<Duration>,
+    mut recent_frames: Local<u32>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
     *elapsed += time.delta();
     *frames += 1;
+    *recent_window += time.delta();
+    *recent_frames += 1;
+    // Steady-state rate over the trailing window — startup streaming and
+    // its atlas re-uploads dominate the whole-run average, which makes
+    // short benches lie.
+    if *recent_window >= Duration::from_secs(5) {
+        info!(
+            "bench: last {:.1}s: {:.1} fps",
+            recent_window.as_secs_f32(),
+            *recent_frames as f32 / recent_window.as_secs_f32()
+        );
+        *recent_window = Duration::ZERO;
+        *recent_frames = 0;
+    }
     if *elapsed >= config.duration {
         info!(
             "bench: duration reached, {} frames, {:.1} fps",

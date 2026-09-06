@@ -31,7 +31,8 @@ use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
     CameraClearance, HeightField, LodMode, ObstacleBundle, SharedTileMesh, StreamBudget,
-    TerrainRenderPlugin, TerrainTiles, TerrainTuning, TileRenderCache, animate_tile_fades,
+    TerrainRenderPlugin, TerrainTiles, TerrainTuning, TileAtlas, TileRenderCache,
+    animate_tile_fades,
     camera_terrain_clearance, focus_camera_on_ground, ground_boids, project_obstacles_onto_field,
     rebuild_height_field, reset_ground_caches, stream_terrain_tiles,
 };
@@ -103,10 +104,12 @@ fn main() {
                 }),
         )
         // The terrain render path: the displaced-mesh material plugin
-        // (loads the vertex shaders) + the shared tile mesh, which needs
-        // Assets<Mesh> from the asset plugin above, hence the ordering.
+        // (loads the vertex shaders) + the shared tile mesh and atlas,
+        // which need Assets<Mesh>/Assets<Image> from the asset plugin
+        // above, hence the ordering.
         .add_plugins(TerrainRenderPlugin)
         .init_resource::<SharedTileMesh>()
+        .init_resource::<TileAtlas>()
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
         .add_plugins(UiPlugin)

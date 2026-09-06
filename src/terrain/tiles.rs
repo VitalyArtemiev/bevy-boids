@@ -19,8 +19,8 @@
 //! mesh, placed by its baked textures — the UDLOD approach.
 
 use super::render::{
-    SharedTileMesh, TerrainMaterial, TerrainExtension, TileFade, TileUniform, bake_texture_f32,
-    bake_texture_rg32f, bake_texture_rgba8,
+    SharedTileMesh, TerrainMaterial, TerrainExtension, TileAtlas, TileFade, TileUniform,
+    bake_texture_f32, bake_texture_rg32f, bake_texture_rgba8,
 };
 use super::{HeightField, TerrainSample, VERTICAL_BIAS};
 use bevy::prelude::*;
@@ -128,31 +128,23 @@ pub struct TileStamp {
 }
 
 /// Live or cached render state for one tile: the per-tile
-/// [`TerrainMaterial`] (which owns the four bake textures — see
-/// `bake_tile`) plus the baked height range for the culling AABB.
+/// [`TerrainMaterial`] plus the tile's layer in the shared [`TileAtlas`]
+/// and the baked height range. The material's uniform carries the layer
+/// index, so render state and atlas stay in lockstep.
 pub(crate) struct TileRender {
     material: Handle<TerrainMaterial>,
-    height: Handle<Image>,
-    slope: Handle<Image>,
-    color: Handle<Image>,
-    coarse: Handle<Image>,
+    slot: u32,
     min_y: f32,
     max_y: f32,
 }
 
-/// Free every asset a retired tile render holds (called on cache
-/// eviction and field rebuilds, when nothing references it anymore).
+/// Free what a retired tile render holds (called on cache eviction and
+/// field rebuilds, when nothing references it anymore): the material
+/// goes, the atlas layer returns to the free list.
 impl TileRender {
-    fn free(
-        self,
-        materials: &mut Assets<TerrainMaterial>,
-        images: &mut Assets<Image>,
-    ) {
+    fn free(self, materials: &mut Assets<TerrainMaterial>, atlas: &mut TileAtlas) {
         materials.remove(&self.material);
-        images.remove(&self.height);
-        images.remove(&self.slope);
-        images.remove(&self.color);
-        images.remove(&self.coarse);
+        atlas.release(self.slot);
     }
 }
 
@@ -187,7 +179,7 @@ impl TileRenderCache {
         stamp: TileStamp,
         render: TileRender,
         materials: &mut Assets<TerrainMaterial>,
-        images: &mut Assets<Image>,
+        atlas: &mut TileAtlas,
     ) {
         self.clock += 1;
         let clock = self.clock;
@@ -198,20 +190,16 @@ impl TileRenderCache {
                 break;
             };
             if let Some((render, _)) = self.entries.remove(&oldest) {
-                render.free(materials, images);
+                render.free(materials, atlas);
             }
         }
     }
 
     /// Drop every cached render (the height field changed; the bakes are
     /// from the old field).
-    fn drain(
-        &mut self,
-        materials: &mut Assets<TerrainMaterial>,
-        images: &mut Assets<Image>,
-    ) {
+    fn drain(&mut self, materials: &mut Assets<TerrainMaterial>, atlas: &mut TileAtlas) {
         for (_, (render, _)) in self.entries.drain() {
-            render.free(materials, images);
+            render.free(materials, atlas);
         }
     }
 }
@@ -865,6 +853,7 @@ pub fn stream_terrain_tiles(
     lod_mode: Option<Res<LodMode>>,
     field: Res<HeightField>,
     shared_mesh: Res<SharedTileMesh>,
+    mut atlas: ResMut<TileAtlas>,
     mut images: ResMut<Assets<Image>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     budget: Option<Res<StreamBudget>>,
@@ -893,10 +882,11 @@ pub fn stream_terrain_tiles(
     // bakes across frames under the budget so a slider drag never
     // freezes the frame.
     if field.is_changed() {
-        for (_, (entity, ..)) in tiles.tiles.drain() {
+        for (_, (entity, _, render)) in tiles.tiles.drain() {
             commands.entity(entity).despawn();
+            render.free(&mut terrain_materials, &mut atlas);
         }
-        cache.drain(&mut terrain_materials, &mut images);
+        cache.drain(&mut terrain_materials, &mut atlas);
     }
 
     let desired = desired_tiles(center, min_level);
@@ -947,13 +937,7 @@ pub fn stream_terrain_tiles(
     }
     for key in retired {
         if let Some((entity, stamp, render)) = tiles.tiles.remove(&key) {
-            cache.put(
-                key,
-                stamp,
-                render,
-                &mut terrain_materials,
-                &mut images,
-            );
+            cache.put(key, stamp, render, &mut terrain_materials, &mut atlas);
             commands.entity(entity).despawn();
         }
     }
@@ -999,6 +983,7 @@ pub fn stream_terrain_tiles(
                 key,
                 stamp,
                 bake,
+                &mut atlas,
                 &mut images,
                 &mut terrain_materials,
             ));
@@ -1027,32 +1012,25 @@ pub fn stream_terrain_tiles(
             if let Some((old_entity, old_stamp, old_render)) =
                 tiles.tiles.insert(key, (entity, stamp, render))
             {
-                cache.put(
-                    key,
-                    old_stamp,
-                    old_render,
-                    &mut terrain_materials,
-                    &mut images,
-                );
+                cache.put(key, old_stamp, old_render, &mut terrain_materials, &mut atlas);
                 commands.entity(old_entity).despawn();
             }
         }
     }
 }
 
-/// Turn a fresh [`BakedTile`] into live render state: upload the
-/// textures and build the per-tile material.
+/// Turn a fresh [`BakedTile`] into live render state: claim an atlas
+/// layer, patch the bakes into it and build the per-tile material.
 fn upload_tile(
     key: TileKey,
     stamp: TileStamp,
     bake: BakedTile,
+    atlas: &mut TileAtlas,
     images: &mut Assets<Image>,
     materials: &mut Assets<TerrainMaterial>,
 ) -> TileRender {
-    let height = images.add(bake.height);
-    let slope = images.add(bake.slope);
-    let color = images.add(bake.color);
-    let coarse = images.add(bake.coarse);
+    let slot = atlas.alloc();
+    atlas.write(images, slot, &bake);
     let hole = if stamp.cuts_hole {
         Some(hole_square(key.level, stamp.fine_focus_tile))
     } else {
@@ -1064,10 +1042,10 @@ fn upload_tile(
             ..Default::default()
         },
         extension: TerrainExtension {
-            height: height.clone(),
-            slope: slope.clone(),
-            color: color.clone(),
-            coarse: coarse.clone(),
+            height: atlas.height.clone(),
+            slope: atlas.slope.clone(),
+            color: atlas.color.clone(),
+            coarse: atlas.coarse.clone(),
             tile: TileUniform {
                 origin_size: Vec4::new(
                     key.x as f32 * key.tile_size(),
@@ -1081,17 +1059,14 @@ fn upload_tile(
                     key.level as f32,
                     skirt_depth(key.cell()),
                     0.0,
-                    0.0,
+                    slot as f32,
                 ),
             },
         },
     });
     TileRender {
         material,
-        height,
-        slope,
-        color,
-        coarse,
+        slot,
         min_y: bake.min_y,
         max_y: bake.max_y,
     }
@@ -1296,6 +1271,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<TerrainMaterial>>()
             .init_resource::<SharedTileMesh>()
+            .init_resource::<TileAtlas>()
             .insert_resource(Time::<()>::default())
             .add_systems(Update, (stream_terrain_tiles, animate_tile_fades));
         if let Some(millis) = budget_millis {
@@ -1845,8 +1821,34 @@ mod tests {
     }
 
     #[test]
-    fn recycled_tiles_reuse_cached_renders() {
-        // Panning away and back re-spawns from the render cache: the
+    fn tile_atlas_layers_are_recycled_across_rebuilds() {
+        // A tuning edit drops every live render and the whole cache; the
+        // atlas must hand those layers back out instead of running its
+        // high-water mark up — unbounded slider-dragging against a
+        // bounded atlas would otherwise assert mid-frame.
+        let mut app = terrain_app(None);
+        app.world_mut()
+            .spawn((Camera3d::default(), RtsCamera::default()));
+        let total = desired_tiles(Vec2::ZERO, 0).len();
+        converge(&mut app, total);
+        let first_pass = app.world().resource::<TileAtlas>().high_water();
+        assert!(first_pass > 0, "no atlas layers were claimed");
+
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<HeightField>()
+                .set_changed();
+            converge(&mut app, total);
+        }
+        assert_eq!(
+            app.world().resource::<TileAtlas>().high_water(),
+            first_pass,
+            "atlas layers leaked across world rebuilds"
+        );
+    }
+
+    #[test]
+    fn recycled_tiles_reuse_cached_renders() {        // Panning away and back re-spawns from the render cache: the
         // return trip creates no new terrain materials.
         let mut app = terrain_app(None);
         let camera = app
@@ -1940,24 +1942,28 @@ mod tests {
         // (tectonic Worley + erosion filter, 2026-09): ~1.9 ms release,
         // ~3.9 ms dev/cranelift isolated (~2.5 µs/sample: ~0.7 µs
         // tectonic + ~1.5 µs filter), up to ~5 ms when the whole test
-        // binary competes for cores, and ~7.5 ms with heavy EXTERNAL
-        // system load on top (load average ~11) — hence the 8 ms dev
-        // ceiling. The spawn pass bakes whole waves of tiles in parallel
-        // (see `bake_wave`); a noise/erosion regression that MULTIPLIES
-        // this starves streaming even across cores. Wall-clock like
-        // `nearest_solver_scales_to_10k_members`; run in release (or in
-        // isolation) for the real number.
+        // binary competes for cores, and ~8 ms with heavy EXTERNAL
+        // system load on top (load average ~11). Wall-clock timing, so
+        // the best of three passes is the number that's pinned —
+        // contention inflates individual passes, while a real
+        // noise/erosion regression slows every one. The spawn pass bakes
+        // whole waves in parallel (see `bake_wave`); a regression that
+        // MULTIPLIES this starves streaming even across cores. Run in
+        // release for the real number.
         let field = HeightField::default();
         let set = desired_tiles(Vec2::new(123.4, -45.6), 0);
-        let start = Instant::now();
-        for (key, stamp) in &set {
-            let _ = bake_tile(&field, *key, stamp.focus_tile);
+        let mut best = Duration::from_secs(1);
+        for _ in 0..3 {
+            let start = Instant::now();
+            for (key, stamp) in &set {
+                let _ = bake_tile(&field, *key, stamp.focus_tile);
+            }
+            best = best.min(start.elapsed() / set.len() as u32);
         }
-        let per_tile = start.elapsed() / set.len() as u32;
-        eprintln!("bake_tile: {per_tile:?}/tile over {} tiles", set.len());
+        eprintln!("bake_tile: {best:?}/tile over {} tiles", set.len());
         assert!(
-            per_tile < Duration::from_millis(8),
-            "tile bake avg {per_tile:?} — parallel waves assume ~2 ms serial release bakes"
+            best < Duration::from_millis(8),
+            "tile bake avg {best:?} — parallel waves assume ~2 ms serial release bakes"
         );
     }
 }

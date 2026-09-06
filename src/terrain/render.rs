@@ -45,16 +45,18 @@ pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExtension>;
 /// 200+: they share the material bind group with `StandardMaterial`,
 /// whose own bindings stop well below (the in-tree forward decal uses
 /// the same 200+ convention). The indices must match `terrain_common.wgsl`
-/// exactly: uniform 200, textures 201-204.
+/// exactly: uniform 200, textures 201-204. The textures are the shared
+/// [`TileAtlas`] arrays (one layer per live or cached tile); the layer
+/// index rides the uniform (`shading.w`).
 #[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
 pub struct TerrainExtension {
-    #[texture(201, dimension = "2d")]
+    #[texture(201, dimension = "2d_array")]
     pub(crate) height: Handle<Image>,
-    #[texture(202, dimension = "2d")]
+    #[texture(202, dimension = "2d_array")]
     pub(crate) slope: Handle<Image>,
-    #[texture(203, dimension = "2d")]
+    #[texture(203, dimension = "2d_array")]
     pub(crate) color: Handle<Image>,
-    #[texture(204, dimension = "2d")]
+    #[texture(204, dimension = "2d_array")]
     pub(crate) coarse: Handle<Image>,
     #[uniform(200, TileUniform)]
     pub(crate) tile: TileUniform,
@@ -70,7 +72,7 @@ pub struct TileUniform {
     pub origin_size: Vec4,
     /// Hole rectangle in texel units: (min_x, max_x, min_z, max_z).
     pub hole: Vec4,
-    /// (level, skirt depth in metres, fade, unused).
+    /// (level, skirt depth in metres, fade, atlas layer).
     pub shading: Vec4,
 }
 
@@ -105,6 +107,141 @@ impl MaterialExtension for TerrainExtension {
 /// never specialize and no tile ever draws.
 #[derive(Resource)]
 pub(crate) struct TerrainCommonShader(pub(crate) Handle<Shader>);
+
+/// How many tile layers each atlas array holds. Every live tile and
+/// every cached-but-retired one holds a layer, so this must cover the
+/// desired set (≤ 10 levels × 25 tiles) plus the
+/// [`super::tiles::TileRenderCache`] LRU (256) with headroom.
+pub(crate) const ATLAS_LAYERS: u32 = 512;
+
+/// The four bake textures of every tile, packed layer-wise into four
+/// shared `Texture2DArray`s — one material bind group's worth of texture
+/// bindings no matter how many tiles are on screen, instead of four
+/// dedicated images per tile.
+///
+/// Layers are handed out by [`TileAtlas::alloc`] when a tile bakes and
+/// returned by [`TileAtlas::release`] when its render is evicted from
+/// the cache. Writing a bake patches the layer's texels inside the
+/// array `Image`s; the asset change re-uploads through `COPY_DST`
+/// (batched once per frame per array by the renderer, so a wave of
+/// spawns costs one upload, not one per tile).
+#[derive(Resource)]
+pub struct TileAtlas {
+    /// R32Float — final vertex heights (drop + stitching baked in).
+    pub(crate) height: Handle<Image>,
+    /// Rg32Float — 3×3-blurred analytic slopes.
+    pub(crate) slope: Handle<Image>,
+    /// Rgba8Unorm — per-vertex ground tints.
+    pub(crate) color: Handle<Image>,
+    /// R32Float — coarse downsample for the LOD morph.
+    pub(crate) coarse: Handle<Image>,
+    /// Returned layers, most-freed-first.
+    free: Vec<u32>,
+    /// Next never-allocated layer.
+    next: u32,
+}
+
+impl FromWorld for TileAtlas {
+    fn from_world(world: &mut World) -> Self {
+        let mut images = world.resource_mut::<Assets<Image>>();
+        let mut array = |format: TextureFormat, texel: usize| {
+            let dimension = TILE_VERTS as u32;
+            images.add(Image {
+                // `write_texture` takes unpadded rows; layers are
+                // consecutive images in one buffer.
+                data: Some(vec![0u8; ATLAS_LAYERS as usize * dimension as usize * dimension as usize * texel]),
+                texture_descriptor: TextureDescriptor {
+                    label: Some("terrain_tile_atlas"),
+                    size: Extent3d {
+                        width: dimension,
+                        height: dimension,
+                        depth_or_array_layers: ATLAS_LAYERS,
+                    },
+                    dimension: TextureDimension::D2,
+                    format,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                    view_formats: &[],
+                },
+                ..Default::default()
+            })
+        };
+        TileAtlas {
+            height: array(TextureFormat::R32Float, 4),
+            slope: array(TextureFormat::Rg32Float, 8),
+            color: array(TextureFormat::Rgba8Unorm, 4),
+            coarse: array(TextureFormat::R32Float, 4),
+            free: Vec::new(),
+            next: 0,
+        }
+    }
+}
+
+impl TileAtlas {
+    /// Hand out a layer. Reuses freed layers first; the bound covers
+    /// every live tile plus the whole cache, so running out is a bug.
+    pub(crate) fn alloc(&mut self) -> u32 {
+        if let Some(slot) = self.free.pop() {
+            return slot;
+        }
+        assert!(
+            self.next < ATLAS_LAYERS,
+            "tile atlas exhausted: live tiles + cache exceed {ATLAS_LAYERS} layers"
+        );
+        let slot = self.next;
+        self.next += 1;
+        slot
+    }
+
+    /// Take a layer back. The texels stay until the slot is rewritten.
+    pub(crate) fn release(&mut self, slot: u32) {
+        self.free.push(slot);
+    }
+
+    /// Layers ever handed out — the high-water mark. Constant across
+    /// world rebuilds if (and only if) layers are actually recycled;
+    /// pinned by the tile-atlas test.
+    pub(crate) fn high_water(&self) -> u32 {
+        self.next
+    }
+
+    /// Patch one tile's four bakes into its layer. `bake` data layouts
+    /// match the arrays texel-for-texel (`bake_texture_*` in this
+    /// module), so the splice is a plain byte copy per array.
+    pub(crate) fn write(
+        &self,
+        images: &mut Assets<Image>,
+        slot: u32,
+        bake: &super::tiles::BakedTile,
+    ) {
+        let dimension = TILE_VERTS as usize;
+        let layer = dimension * dimension;
+        let mut splice = |handle: &Handle<Image>, texels: &Image| {
+            let image = &mut *images.get_mut(handle).expect("atlas array asset");
+            let format = image.texture_descriptor.format;
+            let bytes = image.data.as_mut().expect("atlas array data");
+            let src = texels.data.as_ref().expect("bake data");
+            assert_eq!(src.len(), layer * bytes_per_texel(&format));
+            let at = slot as usize * layer * bytes_per_texel(&format);
+            bytes[at..at + src.len()].copy_from_slice(src);
+        };
+        splice(&self.height, &bake.height);
+        splice(&self.slope, &bake.slope);
+        splice(&self.color, &bake.color);
+        splice(&self.coarse, &bake.coarse);
+    }
+}
+
+/// Texel size in bytes of the atlas formats (compressed formats need
+/// not apply).
+fn bytes_per_texel(format: &TextureFormat) -> usize {
+    match format {
+        TextureFormat::R32Float | TextureFormat::Rgba8Unorm => 4,
+        TextureFormat::Rg32Float => 8,
+        _ => unreachable!("unexpected atlas texture format {format:?}"),
+    }
+}
 
 /// Registers the terrain material's plugin.
 #[derive(Default)]
