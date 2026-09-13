@@ -13,6 +13,7 @@ use bevy::settings::{ReflectSettingsGroup, SaveSettingsDeferred, SettingsGroup, 
 use bevy_egui::egui;
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+
 use bevy_rts_camera::RtsCameraControls;
 
 use crate::freecam::CameraMode;
@@ -198,6 +199,7 @@ fn pause_menu_ui(
 fn options_ui(
     mut contexts: EguiContexts,
     mut options_open: ResMut<OptionsOpen>,
+    mut bindings_open: ResMut<crate::input::BindingsOpen>,
     mut settings: ResMut<OptionsSettings>,
     mut commands: Commands,
 ) -> Result {
@@ -230,6 +232,9 @@ fn options_ui(
                 )
                 .changed();
             ui.add_space(6.0);
+            if ui.button("Key bindings…").clicked() {
+                bindings_open.0 = !bindings_open.0;
+            }
             if ui.button("Reset to defaults").clicked() {
                 *settings = OptionsSettings::default();
                 changed = true;
@@ -294,12 +299,12 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
 /// the drag releases (see `terrain::demo::rebuild_terrain`).
 fn debug_panel_ui(
     mut contexts: EguiContexts,
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Query<(&crate::input::ActionTag, &crate::input::TriggerState, &crate::input::ActionEvents)>,
     mut shown: Local<bool>,
     mut camera_mode: ResMut<CameraMode>,
     mut demo: ResMut<DemoTerrain>,
 ) -> Result {
-    if keys.just_pressed(KeyCode::F3) {
+    if crate::input::started(&actions, crate::input::ActionId::ToggleTerrain) {
         *shown = !*shown;
     }
     if !*shown {
@@ -458,12 +463,12 @@ fn component_sliders(
 /// Escape pauses/resumes; with the Options window open it closes that
 /// instead, and in the main menu it just closes the Options window.
 fn toggle_pause(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Query<(&crate::input::ActionTag, &crate::input::TriggerState, &crate::input::ActionEvents)>,
     state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
 ) {
-    if !keys.just_pressed(KeyCode::Escape) {
+    if !crate::input::started(&actions, crate::input::ActionId::Pause) {
         return;
     }
     match state.get() {

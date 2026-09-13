@@ -6,7 +6,9 @@
 //! `Slider::new` line in the matching section here.
 
 use crate::boid::BoidTuning;
+use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
+use crate::input::{ActionEvents, ActionId, ActionTag, TriggerState};
 use crate::kinematics::KinematicsTuning;
 use crate::sky::SkyTuning;
 use crate::ui::GameState;
@@ -15,6 +17,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
+
 use bevy_rts_camera::RtsCameraControls;
 
 /// Debug-only view state. Consumers (`draw_cursor`,
@@ -58,8 +61,11 @@ impl Plugin for DebugUiPlugin {
 }
 
 /// F1 shows/hides the debug panel.
-fn toggle_debug_panel(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<DebugConfig>) {
-    if keys.just_pressed(KeyCode::F1) {
+fn toggle_debug_panel(
+    actions: Query<(&ActionTag, &TriggerState, &ActionEvents)>,
+    mut config: ResMut<DebugConfig>,
+) {
+    if crate::input::started(&actions, ActionId::ToggleDebug) {
         config.open = !config.open;
     }
 }
@@ -72,6 +78,7 @@ fn debug_panel(
     mut boid: ResMut<BoidTuning>,
     mut form: ResMut<FormationTuning>,
     mut sky: ResMut<SkyTuning>,
+    mut crowd: ResMut<CrowdTuning>,
     mut lod: ResMut<LODGuard>,
     mut q_controls: Query<&mut RtsCameraControls>,
     time: Res<Time>,
@@ -207,6 +214,26 @@ fn debug_panel(
                 changed |= reset(ui, sky);
                 changed
             });
+
+            tuned(
+                &mut crowd,
+                ui,
+                "Crowd",
+                false,
+                |ui, crowd: &mut CrowdTuning| {
+                    let mut changed = false;
+                    changed |= slider(ui, &mut crowd.density, 0.2..=1.2, "crowd density").changed();
+                    changed |= slider(ui, &mut crowd.glint_rate_hz, 0.0..=1.0, "glint rate (Hz)")
+                        .changed();
+                    changed |=
+                        slider(ui, &mut crowd.glint_strength, 0.0..=3.0, "glint strength")
+                            .changed();
+                    changed |= slider(ui, &mut crowd.dust_density, 0.0..=3.0, "dust density")
+                        .changed();
+                    changed |= reset(ui, crowd);
+                    changed
+                },
+            );
 
             // The camera controls are a component on the camera entity, not
             // a tuning resource, but the don't-flag-changes-without-edits

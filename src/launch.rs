@@ -58,6 +58,13 @@ pub struct LaunchConfig {
     pub environment_map: bool,
     /// Whether cameras get the bloom post-process.
     pub bloom: bool,
+    /// Whether the formation crowd-shell experiment spawns (src/crowd.rs).
+    pub crowd: bool,
+    /// Bench-only: pin the camera at this angle from nadir, degrees
+    /// (0 = looking straight down). The crowd experiment's design cone is
+    /// the upper 30°; this flag makes `--shot` captures reproducible
+    /// inside it instead of riding the zoom-dependent dynamic angle.
+    pub cam_angle_deg: Option<f32>,
     /// Bake impostor atlases (`preprocess::run`) and exit instead of
     /// launching the game.
     pub preprocess: bool,
@@ -81,6 +88,8 @@ impl Default for LaunchConfig {
             atmosphere: false,
             environment_map: false,
             bloom: true,
+            crowd: false,
+            cam_angle_deg: None,
             preprocess: false,
         }
     }
@@ -106,11 +115,11 @@ fn value(
 }
 
 /// Parses `--bench`, `--secs <s>`, `--zoom <z>`, `--shot <path>`,
-/// `--focus <x,z>`,
+/// `--focus <x,z>`, `--cam-angle <deg>`,
 /// `--boids <n>`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
 /// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`,
-/// `--bloom|--no-bloom`, and `--preprocess`. Later flags win. Unrelated
-/// arguments are ignored so other tooling can pass through.
+/// `--bloom|--no-bloom`, `--crowd`, and `--preprocess`. Later flags win.
+/// Unrelated arguments are ignored so other tooling can pass through.
 pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
     let mut config = LaunchConfig::default();
 
@@ -204,6 +213,21 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
                 config.bloom = !flag.starts_with("--no-");
                 i += 1;
             }
+            "--crowd" => {
+                config.crowd = true;
+                i += 1;
+            }
+            "--cam-angle" => {
+                let parsed: f32 = value(args, &mut i, flag, inline_value)?
+                    .parse()
+                    .map_err(|_| format!("{flag}: value is not a number"))?;
+                // 70° is past the RTS camera's shallowest angle (72° at
+                // max zoom); anything more would look at the underside.
+                if !parsed.is_finite() || !(0.0..=70.0).contains(&parsed) {
+                    return Err(format!("{flag} must be within 0.0..=70.0, got {parsed}"));
+                }
+                config.cam_angle_deg = Some(parsed);
+            }
             "--preprocess" => {
                 config.preprocess = true;
                 i += 1;
@@ -219,6 +243,13 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
 /// spawning even in a normal (non-bench) launch.
 pub fn launch_terrain_enabled(config: Res<LaunchConfig>) -> bool {
     config.terrain
+}
+
+/// Run condition for `spawn_crowd`: the crowd-shell experiment is opt-in
+/// via `--crowd` (works with or without benching, like the other
+/// scenario flags).
+pub fn launch_crowd_enabled(config: Res<LaunchConfig>) -> bool {
+    config.crowd
 }
 
 /// Added unconditionally by `main`; it is a no-op without `--bench`.
@@ -262,6 +293,15 @@ fn pin_bench_camera(
             camera.focus.translation.z = focus.y;
             camera.target_focus.translation.x = focus.x;
             camera.target_focus.translation.z = focus.y;
+        }
+        if let Some(angle) = config.cam_angle_deg {
+            // Freeze the view at a fixed angle from nadir: the default
+            // dynamic angle swings with zoom (up to 72°), which would put
+            // captures outside the crowd experiment's 30° design cone.
+            camera.angle = angle.to_radians();
+            camera.target_angle = angle.to_radians();
+            camera.min_angle = angle.to_radians();
+            camera.dynamic_angle = false;
         }
         controls.enabled = false;
     }
@@ -466,6 +506,21 @@ mod tests {
     fn preprocess_flag_switches_to_the_baker() {
         assert!(!parse_launch_args(&[]).unwrap().preprocess);
         assert!(parse_launch_args(&args(&["--preprocess"])).unwrap().preprocess);
+    }
+
+    #[test]
+    fn crowd_flags_parse() {
+        let config = parse_launch_args(&args(&["--crowd"])).unwrap();
+        assert!(config.crowd);
+        assert_eq!(config.cam_angle_deg, None);
+
+        let config = parse_launch_args(&args(&["--bench", "--cam-angle=25"])).unwrap();
+        assert_eq!(config.cam_angle_deg, Some(25.0));
+
+        assert!(parse_launch_args(&args(&["--cam-angle", "90"])).is_err());
+        assert!(parse_launch_args(&args(&["--cam-angle", "-5"])).is_err());
+        assert!(parse_launch_args(&args(&["--cam-angle", "abc"])).is_err());
+        assert!(parse_launch_args(&args(&["--cam-angle"])).is_err());
     }
 
     #[test]

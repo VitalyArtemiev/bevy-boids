@@ -15,9 +15,14 @@ pub enum FormationOrder {
     /// center of mass arrives within [`ARRIVE_TOLERANCE`] of `pos`.
     Move { pos: Vec3, facing_dir: Vec3 },
     /// Re-fill slots from current member positions (after a kind/column
-    /// change, or when a boid died or left). Finished once every member has
-    /// a valid slot.
-    Reform,
+    /// change, or when a boid died or left), first applying the carried
+    /// layout (`kind`, `columns`) — e.g. reforming into a marching column
+    /// and later restoring the original layout. Finished once every member
+    /// has a valid slot.
+    Reform {
+        kind: FormationKind,
+        columns: Option<usize>,
+    },
     /// Rotate the slot frame to `to`; executes as a facing change followed by
     /// a [`FormationOrder::Reform`].
     /// todo: this is wrong. Rotate should be smooth rotation about center with
@@ -433,7 +438,9 @@ pub fn transition_formation_orders(
                     commands.entity(entity).insert(SlotsStale);
                 }
             }
-            FormationOrder::Reform => {
+            FormationOrder::Reform { kind, columns } => {
+                formation.kind = kind;
+                formation.columns = columns;
                 if velocity.is_some() {
                     formation.tasks.pop_front();
                 } else {
@@ -532,14 +539,14 @@ pub fn assign_slots(
         // changing between this system and the sync point.
         if matches!(
             formation.tasks.front(),
-            Some(FormationOrder::Reform | FormationOrder::Rotate { .. })
+            Some(FormationOrder::Reform { .. } | FormationOrder::Rotate { .. })
         ) {
             commands.queue(move |world: &mut World| {
                 let poppable = matches!(
                     world
                         .get::<Formation>(entity)
                         .and_then(|f| f.tasks.front().copied()),
-                    Some(FormationOrder::Reform | FormationOrder::Rotate { .. })
+                    Some(FormationOrder::Reform { .. } | FormationOrder::Rotate { .. })
                 );
                 if poppable {
                     world

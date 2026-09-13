@@ -1,12 +1,15 @@
 mod boid;
+mod crowd;
 mod debug_ui;
 mod formations;
 mod freecam;
 mod horse;
+mod input;
 mod kinematics;
 mod launch;
 mod player;
 mod preprocess;
+mod radial;
 mod resources;
 mod sky;
 mod target;
@@ -15,7 +18,9 @@ mod ui;
 mod util;
 
 use crate::boid::*;
+use crate::crowd::CrowdPlugin;
 use crate::debug_ui::DebugUiPlugin;
+use crate::input::InputPlugin;
 use crate::formations::{
     FormationTuning, LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
     plan_formation_goals, propagate_formation_targets, transition_formation_orders,
@@ -27,11 +32,12 @@ use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
     height_scaled_zoom, mouse_click_system, quick_group_system, selection_indicator_face,
 };
+use crate::radial::{RadialPlugin, radial_closed};
 use crate::resources::{Materials, Meshes};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
-    CameraClearance, ErosionDemoPlugin, HeightField, ObstacleBundle, TerrainMesh,
+    CameraClearance, DemoTerrain, ErosionDemoPlugin, HeightField, ObstacleBundle, TerrainMesh,
     camera_terrain_clearance,
     focus_camera_on_ground, ground_boids, project_obstacles_onto_field, reset_ground_caches,
     spawn_ground,
@@ -70,7 +76,7 @@ fn main() {
 
     // Read out the scalar flags the plugin chain needs before `launch`
     // moves into the resource.
-    let (bench, shadows) = (launch.bench, launch.shadows);
+    let (bench, shadows, crowd_scene) = (launch.bench, launch.shadows, launch.crowd);
 
     let mut wgpu_settings = WgpuSettings::default();
     // Browsers have no Vulkan; let wgpu pick (WebGL2/WebGPU) on wasm
@@ -79,8 +85,8 @@ fn main() {
         wgpu_settings.backends = Some(Backends::VULKAN);
     }
 
-    App::new()
-        .init_resource::<Materials>()
+    let mut app = App::new();
+    app.init_resource::<Materials>()
         .init_resource::<Meshes>()
         .init_resource::<Player>()
         .init_resource::<LODGuard>()
@@ -101,12 +107,14 @@ fn main() {
                 }),
         )
         .add_plugins(RtsCameraPlugin)
-        // The 1 km² ground mesh (needs Assets<Mesh> from the plugins)
-        // and the erosion-demo settings/water/rebuild wiring.
-        .init_resource::<TerrainMesh>()
-        .add_plugins(ErosionDemoPlugin)
         .add_plugins(SkyPlugin)
+        // Formation crowd-shell experiment (spawns only with --crowd).
+        .add_plugins(CrowdPlugin)
+        // Before UiPlugin: UiPlugin's SettingsPlugin scans the registry at
+        // build time, so BindingsSettings must be registered first.
+        .add_plugins(InputPlugin)
         .add_plugins(UiPlugin)
+        .add_plugins(RadialPlugin)
         // No-op without --bench; skips the main menu when enabled.
         .add_plugins(BenchPlugin(bench))
         .add_plugins(DebugUiPlugin)
@@ -122,7 +130,25 @@ fn main() {
                 .with_frequency(Duration::from_secs_f32(1.0))
                 .with_transform(TransformMode::Transform),
         )
-        .add_systems(Startup, (setup, spawn_ground.run_if(launch_terrain_enabled)))
+        .add_systems(Startup, setup);
+
+    if crowd_scene {
+        // Isolated crowd experiment: a flat plane instead of the erosion
+        // terrain (and no water/obstacles — `setup` skips those too), so
+        // screenshots show the shader against a clean ground. The terrain
+        // settings resource still exists so the F3 panel's `Res` is valid;
+        // without the plugin it just has nothing to rebuild.
+        app.add_systems(Startup, crowd::spawn_crowd_ground)
+            .init_resource::<DemoTerrain>();
+    } else {
+        // The 1 km² ground mesh (needs Assets<Mesh> from the plugins)
+        // and the erosion-demo settings/water/rebuild wiring.
+        app.init_resource::<TerrainMesh>()
+            .add_plugins(ErosionDemoPlugin)
+            .add_systems(Startup, spawn_ground.run_if(launch_terrain_enabled));
+    }
+
+    app
         .add_systems(
             Update,
             (
@@ -132,13 +158,19 @@ fn main() {
                 bob,
                 draw_cursor,
                 // Input-consuming systems stand down while egui has the
-                // pointer/keyboard (an open menu or text field).
-                mouse_click_system.run_if(not(egui_wants_any_pointer_input)),
+                // pointer/keyboard (an open menu or text field) and while
+                // the radial menu owns the pointer.
+                mouse_click_system.run_if(
+                    radial_closed
+                        .and_then(not(egui_wants_any_pointer_input)),
+                ),
                 quick_group_system.run_if(not(egui_wants_any_keyboard_input)),
                 frontage_position_system.run_if(
                     not(egui_wants_any_pointer_input).and_then(not(egui_wants_any_keyboard_input)),
                 ),
-                height_scaled_zoom.run_if(not(egui_wants_any_pointer_input)),
+                height_scaled_zoom.run_if(
+                    radial_closed.and_then(not(egui_wants_any_pointer_input)),
+                ),
                 selection_indicator_face,
                 reset_ground_caches,
                 project_obstacles_onto_field,
@@ -253,7 +285,7 @@ fn setup(
             commands.spawn(BoidBundle::with_target(
                 Target {
                     pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
-                    dir: Default::default(),
+                    ..default()
                 },
                 mesh_list.capsule.clone(),
                 mat_list.debug_material.clone(),
@@ -261,20 +293,24 @@ fn setup(
         }
     }
 
-    for _ in 1..100 {
-        let mut rng = rand::rng();
-        let x = rng.random_range(-100.0..100.0);
-        let z = rng.random_range(-100.0..100.0);
-        // Obstacles sit on the terrain surface (cube is 1 m, so +0.5 to
-        // its centre).
-        let y = field.height(x, z) + 0.5;
+    // Isolated crowd scene: no obstacle scatter — cubes landing inside
+    // the armies would only pollute the experiment's screenshots.
+    if !launch.crowd {
+        for _ in 1..100 {
+            let mut rng = rand::rng();
+            let x = rng.random_range(-100.0..100.0);
+            let z = rng.random_range(-100.0..100.0);
+            // Obstacles sit on the terrain surface (cube is 1 m, so +0.5 to
+            // its centre).
+            let y = field.height(x, z) + 0.5;
 
-        commands.spawn(ObstacleBundle::new(
-            mesh_list.cube.clone(),
-            mat_list.black.clone(),
-            Vec3::from_array([1.0, 0.0, 0.0]),
-            Vec3::from_array([x, y, z]),
-        ));
+            commands.spawn(ObstacleBundle::new(
+                mesh_list.cube.clone(),
+                mat_list.black.clone(),
+                Vec3::from_array([1.0, 0.0, 0.0]),
+                Vec3::from_array([x, y, z]),
+            ));
+        }
     }
 
     let camera = commands

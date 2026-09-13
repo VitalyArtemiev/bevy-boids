@@ -155,11 +155,13 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | Module | Contents |
 | --- | --- |
 | `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/camera/ground; the sun/sky lives in `sky.rs`) |
+| `input.rs` | `InputPlugin`: the single `PlayerContext` enhanced-input context with all gameplay actions (`Select`, `Frontage`, quick groups 1-6, `Pause`, panel toggles), `ActionId` identity + defaults, `BindingsSettings` persistence (bevy-settings), rebind logic (`rebind`/`replace_binding` — `Binding` is immutable, so rebinds despawn/respawn binding entities) and the Key Bindings window (capture next press, conflict swap, reset). Poll helpers: `started`/`fired`/`completed` over `Query<(&ActionTag, &TriggerState, &ActionEvents)>` |
+| `radial.rs` | `RadialPlugin`: radial context menu. RMB *click* (press+release within `CLICK_TOLERANCE_PX`, with a selection) opens `RadialMenu` (resource presence = state; `radial_closed` gates gameplay input systems while open). egui painter wedges, hover navigation, sub-rings exclude the parent-direction wedge (that gap + the inner hole = back). Commands: Walk (keep formation / reform into 4-wide Grid column then restore via `Reform{kind, columns}` orders) and Run (`Target::speed_scale` walk 0.5 / run 1.0) |
 | `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`, `--preprocess`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
 | `preprocess/` | The `--preprocess` far-LOD impostor baker (standalone app, never added to the game). `atlas.rs` — pure layout: views sampled as concentric rings inside `MAX_ANGLE_FROM_VERTICAL` (30°) from nadir (nadir + rings at 10°/20°/30° with 8/16/24 azimuth slots; `view_index` is the runtime's (polar, azimuth) → index lookup; boid yaw folds into view azimuth because models are upright — no separate yaw axis). Packing: albedo cells fill the top half flat row-major, normal cells sit at the whole-texture 180° rotation (`nuv = 1 - uv` pairs them), 7×14 cells for the current counts = zero waste — a test pins the exact fit. `mod.rs` — the bake: two co-located orthographic cameras (fitted to the bounding sphere) on separate render layers render the model unlit (`unlit: true` — baked lighting would lie at folded yaw) and with `NormalMaterial` (custom wgsl in `assets/shaders/impostor_normal.wgsl` outputting view-space normals, stored sRGB-encoded — decode `n = 2v - 1`); `Screenshot::image` captures both targets per view (probes repeat until non-blank on BOTH pipelines, since compile time outlasts any fixed warmup), strictly serialised dispatch pairs captures with cells, composited into `assets/impostors/<variation>.png`. New model variations = an entry in `variations()` |
 | `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob`, `BoidTuning` |
 | `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts + `KinematicsTuning`, `move_step` integrator, `NNTree`/`TrackedByTree` |
-| `target.rs` | `Target` component, `follow_target` steering |
+| `target.rs` | `Target { pos, dir, speed_scale }` (scale multiplies the tuning velocity cap — Walk/Run), `follow_target` steering |
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, `FormationTuning`, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks, `height_scaled_zoom` (constant-ratio wheel steps: `max(h × 0.125, 0.5 m)` per notch × the Options zoom-speed multiplier; easing into max zoom; tuned by feel, half the original 0.25 ratio). The crate's own zoom MUST stay neutralized (`zoom_sensitivity: 0`, see `apply_options`) — its constant-units step (7.5 km/notch) stacks on top of ours and dominates near the ground |
 | `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); `sun_transform` + `flat_ambient` helpers with unit tests, shared with the impostor preprocessor |
@@ -201,6 +203,20 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   `res.bypass_change_detection()` for the widgets, accumulate
   `Response::changed()` from every widget, call `res.set_changed()` only if
   something actually changed.
+- **Gameplay input is actions, not raw keys**: systems poll
+  `Query<(&ActionTag, &TriggerState, &ActionEvents)>` through the
+  `input.rs` helpers (`started` ≈ just-pressed, `fired` ≈ held,
+  `completed` ≈ just-released). New actions = new `InputAction` struct +
+  `ActionId` variant + default binding + a row in `spawn_input_context`.
+  Raw `ButtonInput` reads are confined to the rebind capture, the camera
+  plugin's own fields, and `freecam.rs` (not yet migrated). `Binding`
+  components are immutable — rebinds go through `input::replace_binding`
+  (despawn/respawn).
+- The radial menu owns RMB *clicks*: `frontage_position_system` skips
+  releases within `radial::CLICK_TOLERANCE_PX` of the press, and gameplay
+  input systems carry the `radial_closed` run condition. New radial
+  commands = `RadialCommand` variant + a wedge in `radial::menu_items` +
+  handling in `radial::execute`.
 - The whole formation pipeline runs in `FixedUpdate`, explicitly chained
   (see `main.rs`): `init_formation_speed` → `propagate_formation_targets`
   (LOD `Velocity` state) → `transition_formation_orders` (task state

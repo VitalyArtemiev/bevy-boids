@@ -1,8 +1,9 @@
 use crate::boid::Boid;
 use crate::formations::{
-    Formation, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
+    Formation, FormationKind, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
     QuickCommandGroup,
 };
+use crate::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, fired, started};
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
 use crate::terrain::HeightField;
@@ -31,6 +32,9 @@ pub struct Player {
     corner3: Vec3,
     /// Left front corner of a frontage being designated by RMB drag.
     front_left: Option<Vec3>,
+    /// Screen position of the RMB press, for click-vs-drag classification
+    /// (a click without drag opens the radial menu instead).
+    front_press: Vec2,
 }
 
 pub struct Selected;
@@ -183,7 +187,7 @@ fn march_ray_against_height(field: &HeightField, ray: Ray3d) -> Option<Vec3> {
     None
 }
 
-fn get_intersection(
+pub(crate) fn get_intersection(
     field: &HeightField,
     cursor_position: &Vec2,
     camera: &Camera,
@@ -234,8 +238,7 @@ pub fn mouse_click_system(
     mut player: ResMut<Player>,
     field: Res<HeightField>,
     mut q_camera: Query<(&Camera, &GlobalTransform)>,
-    mouse_button_input: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Query<(&ActionTag, &TriggerState, &ActionEvents)>,
     windows: Query<&Window>,
     q_selected: Query<(Entity, &Children), With<Selected>>,
     tree: Res<NNTree>,
@@ -250,15 +253,15 @@ pub fn mouse_click_system(
         return;
     };
 
-    if mouse_button_input.just_pressed(MouseButton::Left) {
+    if started(&actions, ActionId::Select) {
         player.selecting = true;
         player.corner1 = point;
     }
 
-    if mouse_button_input.just_released(MouseButton::Left) && player.selecting {
+    if completed(&actions, ActionId::Select) && player.selecting {
         player.selecting = false;
 
-        if !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        if !fired(&actions, ActionId::SelectAdditive) {
             for (entity, _) in &q_selected {
                 commands.entity(entity).remove::<Selected>();
             }
@@ -288,7 +291,7 @@ pub fn mouse_click_system(
         }
     }
 
-    if mouse_button_input.pressed(MouseButton::Left) {
+    if fired(&actions, ActionId::Select) {
         player.corner3 = point;
 
         let right = camera_transform.right();
@@ -314,29 +317,18 @@ pub fn mouse_click_system(
 ///   a selected formation: re-slot it)
 /// - N alone -> select the formation stored in slot N (replacing selection)
 pub fn quick_group_system(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Query<(&ActionTag, &TriggerState, &ActionEvents)>,
     q_selected: Query<(Entity, &Transform), (With<Selected>, Without<Formation>)>,
     q_selected_formations: Query<Entity, (With<Selected>, With<Formation>)>,
     q_formations: Query<(Entity, &QuickCommandGroup, &Members), With<Formation>>,
     mut commands: Commands,
 ) {
-    const SLOT_KEYS: [KeyCode; 6] = [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-        KeyCode::Digit6,
-    ];
-    let Some(slot) = SLOT_KEYS
-        .iter()
-        .position(|key| keys.just_pressed(*key))
-        .map(|i| i as u8)
-    else {
+    let assign = |n: u8| started(&actions, ActionId::AssignGroup(n));
+    let recall = |n: u8| started(&actions, ActionId::RecallGroup(n));
+    let Some(slot) = (1..=6u8).find(|n| assign(*n) || recall(*n)) else {
         return;
     };
-
-    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let ctrl = assign(slot);
 
     if ctrl {
         if let Ok(selected_formation) = q_selected_formations.single() {
@@ -402,8 +394,7 @@ pub fn quick_group_system(
 /// formations being positioned.
 pub fn frontage_position_system(
     mut player: ResMut<Player>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Query<(&ActionTag, &TriggerState, &ActionEvents)>,
     field: Res<HeightField>,
     q_camera: Query<(&Camera, &GlobalTransform)>,
     windows: Query<&Window>,
@@ -437,17 +428,23 @@ pub fn frontage_position_system(
         return;
     };
 
-    if mouse.just_pressed(MouseButton::Right) {
+    if started(&actions, ActionId::Frontage) {
         player.front_left = Some(point);
+        player.front_press = cursor;
     }
 
     if let Some(left) = player.front_left {
-        if mouse.pressed(MouseButton::Right) {
+        if fired(&actions, ActionId::Frontage) {
             gizmos.line(left, point, Color::srgb(0.3, 1.0, 0.3));
         }
-        if mouse.just_released(MouseButton::Right) {
+        if completed(&actions, ActionId::Frontage) {
             player.front_left = None;
-            let adjust_width = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+            // Click without drag: not a frontage — the radial menu owns
+            // that gesture (see `radial::radial_input`).
+            if cursor.distance(player.front_press) < crate::radial::CLICK_TOLERANCE_PX {
+                return;
+            }
+            let adjust_width = fired(&actions, ActionId::AdjustWidth);
             designate_frontage(
                 left,
                 point,
@@ -517,14 +514,9 @@ fn designate_frontage(
     // extent when any formation is among the units.
     // Ctrl held: fit each formation's internal grid width to the frontage
     // (columns = width / spacing); the slot system re-maps members.
+    let mut width_cols: Option<usize> = None;
     if adjust_width {
-        let new_cols = (width / spacing_m).round().max(1.0) as usize;
-        for &unit in &units {
-            if let Ok(mut formation) = q_formation_mut.get_mut(unit) {
-                formation.columns = Some(new_cols);
-                info!("[width] formation {unit:?} columns={new_cols}");
-            }
-        }
+        width_cols = Some((width / spacing_m).round().max(1.0) as usize);
     }
 
     let mut spacing: f32 = 1.0;
@@ -555,8 +547,12 @@ fn designate_frontage(
             // replaces pending tasks. Move handles the facing-change slot
             // re-map; a width change reforms first (new columns).
             formation.tasks.clear();
-            if adjust_width {
-                formation.tasks.push_back(FormationOrder::Reform);
+            if let Some(new_cols) = width_cols {
+                let kind = formation.kind;
+                formation.tasks.push_back(FormationOrder::Reform {
+                    kind,
+                    columns: Some(new_cols),
+                });
             }
             formation.tasks.push_back(FormationOrder::Move {
                 pos,

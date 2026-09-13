@@ -53,7 +53,7 @@ impl BoidBundle {
             transform: Transform::from_xyz(x, 0.5, z),
             target: Target {
                 pos: Vec3::from_array([-x, 1.0, -z]),
-                dir: Default::default(),
+                ..default()
             },
             mesh: Mesh3d(mesh),
             material: MeshMaterial3d(material),
