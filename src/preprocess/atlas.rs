@@ -4,39 +4,41 @@
 //! Far-away boids render as billboards whose texture is picked by the view
 //! direction. Because the billboard camera looks mostly down, only a cone
 //! around straight down (nadir) is baked: [`MAX_ANGLE_FROM_VERTICAL`] wide,
-//! sampled as concentric rings — the straight-down render sits at the centre
-//! of the conceptual disk (atlas row 0) and every further row is one ring at
-//! a larger polar angle, its cells spread evenly around the azimuth.
+//! sampled as concentric rings — the straight-down render first, then every
+//! ring at a larger polar angle, its samples spread evenly around the
+//! azimuth.
 //!
-//! # Why rings-in-rows instead of a literal disk
+//! # Packing: albedo and mirrored normals in one texture
 //!
-//! Rasterising a disk of views into a square cell grid leaves collisions
-//! (two samples rounding into the same cell) and holes (grid cells no ring
-//! passes through). Unrolling each ring into its own atlas row keeps the
-//! spiral-around-the-centre structure while making every sample addressable
-//! with plain `(row, column)` arithmetic: row = polar angle, column =
-//! azimuth, with the column count per row growing with ring circumference
-//! so adjacent samples stay roughly equal arc length apart.
+//! Every view is baked twice — an unlit albedo render and a view-space
+//! normal render — and both live in one atlas with zero wasted cells:
+//! albedo cells fill the top half in flat view-index order, and normal
+//! cells sit at the whole-texture 180° rotation of their albedo cell
+//! (bottom half, reversed order). A runtime shader therefore samples the
+//! normal for any albedo uv with the single mirror `nuv = 1.0 - uv`, and
+//! the texture spends every cell on data.
+//!
+//! Both halves are stored sRGB-encoded (the capture target writes through
+//! an sRGB view): load the atlas as an sRGB texture — Bevy's default for
+//! color images — and decode normals with `n = 2 * sampled - 1`.
 //!
 //! # Orientation folding
 //!
 //! Boid models are upright, so rotating the model by yaw φ and
 //! counter-rotating the view azimuth by φ produce the same projection. The
 //! atlas therefore needs no separate yaw axis: a boid at world yaw φ seen at
-//! view azimuth α uses the cell for azimuth α − φ (see [`cell_for`]). This
-//! folds the (view direction × boid yaw) parameter space into the 2-D disk.
-//! The cost is lighting: the sun stays fixed while the geometry effectively
-//! rotates, so baked shading is exact only near the yaw the model was baked
-//! at (identity) and drifts with the folded angle — acceptable at billboard
-//! size, worth revisiting if distant units ever look flat.
+//! view azimuth α uses the view sampled at azimuth α − φ (see
+//! [`view_index`]). This folds the (view direction × boid yaw) parameter
+//! space into the 2-D cone. The cost is lighting, which is exactly why the
+//! albedo bakes unlit and normals bake separately: shading is applied at
+//! runtime from the normal render instead of being baked at one yaw.
 //!
 //! # Addressing
 //!
-//! Cell `(x, y)`: `y == 0` is the nadir render; `y == r` (for
-//! `r` in `1..=RING_CELL_COUNTS.len()`) is the ring at polar angle
-//! `r · MAX_ANGLE_FROM_VERTICAL / RING_CELL_COUNTS.len()` with
-//! `RING_CELL_COUNTS[r - 1]` azimuth slots, slot `x` covering
-//! `[x/n · τ, (x+1)/n · τ)` sampled at its centre.
+//! View `i` (in [`view_samples`] order: nadir, then ring slots innermost to
+//! outermost) occupies [`albedo_cell`]`(i)` and [`normal_cell`]`(i)`. A
+//! runtime view at (polar, azimuth) maps to its nearest view index via
+//! [`view_index`].
 
 use std::f32::consts::TAU;
 
@@ -53,21 +55,29 @@ use bevy::prelude::{Transform, UVec2};
 /// lookup must clamp to this cone (or fall back to the mesh) beyond it.
 pub const MAX_ANGLE_FROM_VERTICAL: f32 = 30.0_f32.to_radians();
 
-/// Azimuth slots per ring, innermost first. Proportional to ring
+/// Azimuth samples per ring, innermost first. Proportional to ring
 /// circumference (`sin` of the polar angle), keeping the angular distance
-/// between neighbouring samples roughly constant across the disk.
+/// between neighbouring samples roughly constant across the cone.
 pub const RING_CELL_COUNTS: [usize; 3] = [8, 16, 24];
 
 /// Edge length of one atlas cell, pixels.
 pub const CELL_SIZE_PX: u32 = 64;
 
-/// Atlas size in cells: width = widest ring, height = rings + nadir row.
-/// (`RING_CELL_COUNTS` is ascending; a test pins that so the indexing here
-/// can rely on it.)
-pub const ATLAS_GRID: UVec2 = UVec2::new(
-    RING_CELL_COUNTS[RING_CELL_COUNTS.len() - 1] as u32,
-    RING_CELL_COUNTS.len() as u32 + 1,
-);
+/// Total baked views: the nadir plus every ring slot.
+const VIEW_COUNT: usize =
+    1 + RING_CELL_COUNTS[0] + RING_CELL_COUNTS[1] + RING_CELL_COUNTS[2];
+
+/// Atlas width in cells. Chosen so the albedo half packs exactly for the
+/// current [`RING_CELL_COUNTS`] (49 views = a clean 7×7 half, 98 = 7×14
+/// texture, zero waste); a test pins the exact fit so ring changes must
+/// revisit it.
+pub const ATLAS_WIDTH_CELLS: u32 = 7;
+
+/// Rows used by one render kind (albedo or normals).
+pub const HALF_ROWS: u32 = (VIEW_COUNT as u32 + ATLAS_WIDTH_CELLS - 1) / ATLAS_WIDTH_CELLS;
+
+/// Atlas size in cells: albedo fills the top half, normals the bottom half.
+pub const ATLAS_GRID: UVec2 = UVec2::new(ATLAS_WIDTH_CELLS, 2 * HALF_ROWS);
 
 /// Atlas size in pixels.
 pub const ATLAS_SIZE_PX: UVec2 = UVec2::new(
@@ -83,26 +93,20 @@ pub struct ViewSample {
     /// Azimuth of the view direction around the vertical, radians
     /// (0 = world +X, growing toward +Z, matching `sky::sun_transform`).
     pub azimuth: f32,
-    /// Atlas grid cell the render lands in.
-    pub cell: UVec2,
 }
 
-/// Every view the preprocessor bakes, nadir first then rings outward.
+/// Every view the preprocessor bakes, nadir first then rings outward. The
+/// position in this list is the view's index into the atlas.
 pub fn view_samples() -> Vec<ViewSample> {
     let mut samples = vec![ViewSample {
         polar: 0.0,
         azimuth: 0.0,
-        cell: UVec2::ZERO,
     }];
     for (ring, count) in RING_CELL_COUNTS.iter().enumerate() {
         let polar = (ring + 1) as f32 / RING_CELL_COUNTS.len() as f32 * MAX_ANGLE_FROM_VERTICAL;
         for slot in 0..*count {
             let azimuth = (slot as f32 + 0.5) * TAU / *count as f32;
-            samples.push(ViewSample {
-                polar,
-                azimuth,
-                cell: UVec2::new(slot as u32, ring as u32 + 1),
-            });
+            samples.push(ViewSample { polar, azimuth });
         }
     }
     samples
@@ -119,7 +123,7 @@ pub fn view_direction(polar: f32, azimuth: f32) -> Vec3 {
 /// Camera pose rendering the model at `center` from the given sample. The
 /// up hint is the horizontal azimuth vector, which is perpendicular to the
 /// view direction at nadir and never parallel to it inside the cone, so the
-/// pose varies continuously across the whole disk (at nadir the image up
+/// pose varies continuously across the whole cone (at nadir the image up
 /// axis is exactly world +X rotated to the sample's azimuth).
 pub fn camera_transform(sample: &ViewSample, center: Vec3, distance: f32) -> Transform {
     let view = view_direction(sample.polar, sample.azimuth);
@@ -128,20 +132,37 @@ pub fn camera_transform(sample: &ViewSample, center: Vec3, distance: f32) -> Tra
     Transform::from_translation(center - view * distance).looking_to(view, up)
 }
 
-/// Nearest atlas cell for a runtime view at `polar` from nadir and
-/// `azimuth` (any value; wrapped). Polar angles beyond
+/// Flat index of the nearest baked view for a runtime view at `polar` from
+/// nadir and `azimuth` (any value; wrapped) — the index
+/// [`albedo_cell`]/[`normal_cell`] address. Polar angles beyond
 /// [`MAX_ANGLE_FROM_VERTICAL`] clamp to the outermost ring — the documented
 /// approximation for views outside the baked cone.
-pub fn cell_for(polar: f32, azimuth: f32) -> UVec2 {
+pub fn view_index(polar: f32, azimuth: f32) -> usize {
     let rings = RING_CELL_COUNTS.len() as f32;
-    let ring = (polar / MAX_ANGLE_FROM_VERTICAL * rings).round().clamp(0.0, rings) as u32;
+    let ring = (polar / MAX_ANGLE_FROM_VERTICAL * rings).round().clamp(0.0, rings) as usize;
     if ring == 0 {
         // Nadir: an upright model's projection does not depend on azimuth.
-        return UVec2::ZERO;
+        return 0;
     }
-    let count = RING_CELL_COUNTS[(ring - 1) as usize] as u32;
-    let slot = (azimuth.rem_euclid(TAU) / TAU * count as f32).floor() as u32 % count;
-    UVec2::new(slot, ring)
+    let count = RING_CELL_COUNTS[ring - 1];
+    let slot = (azimuth.rem_euclid(TAU) / TAU * count as f32).floor() as usize % count;
+    1 + RING_CELL_COUNTS[..ring - 1].iter().sum::<usize>() + slot
+}
+
+/// Albedo cell of view `index`: flat row-major order in the top half.
+pub fn albedo_cell(index: usize) -> UVec2 {
+    UVec2::new(index as u32 % ATLAS_GRID.x, index as u32 / ATLAS_GRID.x)
+}
+
+/// Normal cell of view `index`: the albedo cell mirrored through the
+/// texture centre — the whole-texture 180° rotation that lets a shader
+/// fetch it with `nuv = 1.0 - uv`.
+pub fn normal_cell(index: usize) -> UVec2 {
+    let albedo = albedo_cell(index);
+    UVec2::new(
+        ATLAS_GRID.x - 1 - albedo.x,
+        ATLAS_GRID.y - 1 - albedo.y,
+    )
 }
 
 /// Copies one `cell_size`-square RGBA8 cell into a row-major atlas buffer.
@@ -163,32 +184,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn samples_fill_unique_cells_within_the_grid() {
-        // `ATLAS_GRID` indexes the widest ring last, so the counts must
-        // ascend for the const to hold.
+    fn samples_cover_the_cone_in_ring_order() {
+        // `ATLAS_WIDTH_CELLS` packs the albedo half exactly for the current
+        // counts — keep the two in sync when retuning the rings.
         assert!(
             RING_CELL_COUNTS.is_sorted(),
             "ring cell counts must ascend with circumference"
         );
-        let samples = view_samples();
         assert_eq!(
-            samples.len(),
-            1 + RING_CELL_COUNTS.iter().sum::<usize>(),
-            "one nadir cell plus every ring slot"
+            view_samples().len(),
+            VIEW_COUNT,
+            "one nadir sample plus every ring slot"
         );
-        let mut seen = std::collections::HashSet::new();
-        for sample in &samples {
-            assert!(seen.insert(sample.cell), "duplicate cell {:?}", sample.cell);
-            assert!(sample.cell.x < ATLAS_GRID.x && sample.cell.y < ATLAS_GRID.y);
-            assert!((0.0..=MAX_ANGLE_FROM_VERTICAL).contains(&sample.polar));
-        }
+        assert_eq!(
+            ATLAS_GRID.x * ATLAS_GRID.y,
+            2 * VIEW_COUNT as u32,
+            "the atlas must spend every cell on data"
+        );
         for (ring, count) in RING_CELL_COUNTS.iter().enumerate() {
-            let in_row = samples
+            let in_ring = view_samples()
                 .iter()
-                .filter(|s| s.cell.y == ring as u32 + 1)
+                .filter(|s| (s.polar.to_degrees() - 10.0 * (ring + 1) as f32).abs() < 0.5)
                 .count();
-            assert_eq!(in_row, *count, "ring {ring} row occupancy");
+            assert_eq!(in_ring, *count, "ring {ring} occupancy");
         }
+        assert!(view_samples().iter().all(|s| s.polar <= MAX_ANGLE_FROM_VERTICAL));
     }
 
     #[test]
@@ -240,31 +260,49 @@ mod tests {
     }
 
     #[test]
-    fn cell_for_round_trips_every_sample() {
-        for sample in view_samples() {
-            assert_eq!(cell_for(sample.polar, sample.azimuth), sample.cell);
+    fn view_index_round_trips_every_sample() {
+        for (index, sample) in view_samples().iter().enumerate() {
+            assert_eq!(view_index(sample.polar, sample.azimuth), index);
         }
     }
 
     #[test]
-    fn cell_for_wraps_azimuth_and_clamps_polar() {
-        assert_eq!(cell_for(0.0, -0.1), UVec2::ZERO);
-        assert_eq!(cell_for(MAX_ANGLE_FROM_VERTICAL, TAU - 0.01), {
-            let count = RING_CELL_COUNTS[RING_CELL_COUNTS.len() - 1] as u32;
-            UVec2::new(count - 1, RING_CELL_COUNTS.len() as u32)
-        });
+    fn view_index_wraps_azimuth_and_clamps_polar() {
+        assert_eq!(view_index(0.0, -0.1), 0);
+        assert_eq!(
+            view_index(MAX_ANGLE_FROM_VERTICAL, TAU - 0.01),
+            VIEW_COUNT - 1
+        );
         // Far beyond the cone clamps onto the outer ring instead of
-        // indexing out of the atlas.
-        let outer = cell_for(2.0 * MAX_ANGLE_FROM_VERTICAL, 0.0);
-        assert_eq!(outer.y, RING_CELL_COUNTS.len() as u32);
-        assert!(outer.x < RING_CELL_COUNTS[RING_CELL_COUNTS.len() - 1] as u32);
+        // indexing out of the atlas: azimuth 0 maps to its first slot.
+        let outer_ring_start = 1 + RING_CELL_COUNTS[0] + RING_CELL_COUNTS[1];
+        assert!(view_index(2.0 * MAX_ANGLE_FROM_VERTICAL, 0.0) >= outer_ring_start);
     }
 
     quickcheck::quickcheck! {
-        fn cell_for_stays_in_grid(polar: f32, azimuth: f32) -> bool {
-            let cell = cell_for(polar, azimuth);
-            cell.x < ATLAS_GRID.x && cell.y < ATLAS_GRID.y
+        fn view_index_stays_in_range(polar: f32, azimuth: f32) -> bool {
+            view_index(polar, azimuth) < view_samples().len()
         }
+    }
+
+    #[test]
+    fn normals_mirror_albedo_through_the_texture_centre() {
+        let mut seen = std::collections::HashSet::new();
+        for index in 0..VIEW_COUNT {
+            let albedo = albedo_cell(index);
+            let normal = normal_cell(index);
+            assert!(albedo.x < ATLAS_GRID.x && albedo.y < HALF_ROWS);
+            assert!(normal.x < ATLAS_GRID.x && normal.y >= HALF_ROWS);
+            // The exact whole-texture 180° rotation — the `nuv = 1 - uv`
+            // pairing the runtime shader relies on.
+            assert_eq!(
+                normal,
+                UVec2::new(ATLAS_GRID.x - 1 - albedo.x, ATLAS_GRID.y - 1 - albedo.y)
+            );
+            assert!(seen.insert(albedo), "duplicate albedo cell for view {index}");
+            assert!(seen.insert(normal), "duplicate normal cell for view {index}");
+        }
+        assert_eq!(seen.len(), 2 * VIEW_COUNT, "no cell is shared or wasted");
     }
 
     #[test]

@@ -139,9 +139,10 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   `RUST_LOG='warn,bevy_boids=trace,bevy_ecs::system::function_system=trace,bevy_ecs::schedule=trace,bevy_app=trace,bevy_render=trace,bevy_time=trace' TRACE_CHROME=trace.json cargo run --features chrome -- --bench --secs 5`
 - Wasm check: `cargo check --target wasm32-unknown-unknown`.
 - Impostor atlas bake (native tool mode): `cargo run -- --preprocess` —
-  renders every registered boid model variation from the
-  `preprocess::atlas` view cone into RGBA PNGs under `assets/impostors/`
-  and exits; never enters the game's plugin graph.
+  bakes every registered boid model variation (unlit albedo + view-space
+  normals, packed 180°-mirrored into one zero-waste texture) into RGBA
+  PNGs under `assets/impostors/` and exits; never enters the game's
+  plugin graph.
 - Web build (what CI deploys to Pages):
   `cargo build --profile wasm-release --target wasm32-unknown-unknown`, then
   `wasm-bindgen --target web --out-dir dist --out-name bevy_boids
@@ -155,7 +156,7 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | --- | --- |
 | `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/camera/ground; the sun/sky lives in `sky.rs`) |
 | `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`, `--preprocess`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
-| `preprocess/` | The `--preprocess` far-LOD impostor baker (standalone app, never added to the game). `atlas.rs` — pure layout: views sampled as concentric rings inside `MAX_ANGLE_FROM_VERTICAL` (30°) from nadir, straight-down render in atlas row 0, further rows = rings at 10°/20°/30° with 8/16/24 azimuth slots (`cell_for` is the runtime's (polar, azimuth) → cell lookup; boid yaw folds into view azimuth because models are upright — no separate yaw axis). `mod.rs` — the bake: orthographic camera fitted to each variation's bounding sphere renders into one offscreen target, `Screenshot::image` captures each view (probe-primed: throwaway captures repeat until one is non-blank, since pipeline compile outlasts any fixed warmup), captures land per-cell via strictly serialised dispatch, composited into `assets/impostors/<variation>.png`. Lighting reuses `sky::sun_transform`/`flat_ambient` with shadows off (a baked shadow would lie at folded yaw). New model variations = an entry in `variations()` |
+| `preprocess/` | The `--preprocess` far-LOD impostor baker (standalone app, never added to the game). `atlas.rs` — pure layout: views sampled as concentric rings inside `MAX_ANGLE_FROM_VERTICAL` (30°) from nadir (nadir + rings at 10°/20°/30° with 8/16/24 azimuth slots; `view_index` is the runtime's (polar, azimuth) → index lookup; boid yaw folds into view azimuth because models are upright — no separate yaw axis). Packing: albedo cells fill the top half flat row-major, normal cells sit at the whole-texture 180° rotation (`nuv = 1 - uv` pairs them), 7×14 cells for the current counts = zero waste — a test pins the exact fit. `mod.rs` — the bake: two co-located orthographic cameras (fitted to the bounding sphere) on separate render layers render the model unlit (`unlit: true` — baked lighting would lie at folded yaw) and with `NormalMaterial` (custom wgsl in `assets/shaders/impostor_normal.wgsl` outputting view-space normals, stored sRGB-encoded — decode `n = 2v - 1`); `Screenshot::image` captures both targets per view (probes repeat until non-blank on BOTH pipelines, since compile time outlasts any fixed warmup), strictly serialised dispatch pairs captures with cells, composited into `assets/impostors/<variation>.png`. New model variations = an entry in `variations()` |
 | `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob`, `BoidTuning` |
 | `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts + `KinematicsTuning`, `move_step` integrator, `NNTree`/`TrackedByTree` |
 | `target.rs` | `Target` component, `follow_target` steering |
