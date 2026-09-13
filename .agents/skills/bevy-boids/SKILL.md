@@ -138,6 +138,10 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   the run to ~8 FPS):
   `RUST_LOG='warn,bevy_boids=trace,bevy_ecs::system::function_system=trace,bevy_ecs::schedule=trace,bevy_app=trace,bevy_render=trace,bevy_time=trace' TRACE_CHROME=trace.json cargo run --features chrome -- --bench --secs 5`
 - Wasm check: `cargo check --target wasm32-unknown-unknown`.
+- Impostor atlas bake (native tool mode): `cargo run -- --preprocess` —
+  renders every registered boid model variation from the
+  `preprocess::atlas` view cone into RGBA PNGs under `assets/impostors/`
+  and exits; never enters the game's plugin graph.
 - Web build (what CI deploys to Pages):
   `cargo build --profile wasm-release --target wasm32-unknown-unknown`, then
   `wasm-bindgen --target web --out-dir dist --out-name bevy_boids
@@ -150,13 +154,14 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | Module | Contents |
 | --- | --- |
 | `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/camera/ground; the sun/sky lives in `sky.rs`) |
-| `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
+| `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`, `--preprocess`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
+| `preprocess/` | The `--preprocess` far-LOD impostor baker (standalone app, never added to the game). `atlas.rs` — pure layout: views sampled as concentric rings inside `MAX_ANGLE_FROM_VERTICAL` (30°) from nadir, straight-down render in atlas row 0, further rows = rings at 10°/20°/30° with 8/16/24 azimuth slots (`cell_for` is the runtime's (polar, azimuth) → cell lookup; boid yaw folds into view azimuth because models are upright — no separate yaw axis). `mod.rs` — the bake: orthographic camera fitted to each variation's bounding sphere renders into one offscreen target, `Screenshot::image` captures each view (probe-primed: throwaway captures repeat until one is non-blank, since pipeline compile outlasts any fixed warmup), captures land per-cell via strictly serialised dispatch, composited into `assets/impostors/<variation>.png`. Lighting reuses `sky::sun_transform`/`flat_ambient` with shadows off (a baked shadow would lie at folded yaw). New model variations = an entry in `variations()` |
 | `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob`, `BoidTuning` |
 | `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts + `KinematicsTuning`, `move_step` integrator, `NNTree`/`TrackedByTree` |
 | `target.rs` | `Target` component, `follow_target` steering |
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, `FormationTuning`, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks, `height_scaled_zoom` (constant-ratio wheel steps: `max(h × 0.125, 0.5 m)` per notch × the Options zoom-speed multiplier; easing into max zoom; tuned by feel, half the original 0.25 ratio). The crate's own zoom MUST stay neutralized (`zoom_sensitivity: 0`, see `apply_options`) — its constant-units step (7.5 km/notch) stacks on top of ours and dominates near the ground |
-| `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); pure `sun_transform` helper with unit tests |
+| `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); `sun_transform` + `flat_ambient` helpers with unit tests, shared with the impostor preprocessor |
 | `ui.rs` | `UiPlugin`: egui (`bevy_egui`), `GameState { MainMenu, Playing, Paused }`, main/pause menus, Options menu (`OptionsSettings` persisted via bevy-settings, `apply_options` pushes to live values), terrain-tuning panel on F3 (world-gen sliders + the `LodMode` and `CameraMode` debug toggles), pause plumbing (`Time<Virtual>` + camera kill-switch) |
 | `debug_ui.rs` | `DebugUiPlugin`: F1 debug panel — sliders over the `*Tuning` resources, gizmo/LOD/sky toggles, FPS; `DebugConfig` consumed by gizmo systems |
 | `freecam.rs` | `CameraMode { Rts, Free }` resource (F3 toggle) + `Freecam`: free-fly camera. `apply_camera_mode` (gated `resource_changed`) swaps by component presence — freecam removes `RtsCamera`/`RtsCameraControls` (standing the crate's systems down) parked on `Freecam::saved` for restoration; `freecam_move` is WASD/QE/RMB-drag/wheel input, inert without a `Freecam` camera |

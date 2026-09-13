@@ -88,13 +88,20 @@ fn setup_sky(
     // every steep face readable with a strong half-Lambert bounce term
     // (~30% of its sun); with Bevy's near-zero default ambient, shadowed
     // 45°+ mountain faces collapse to black and the terrain reads as
-    // high-contrast noise. Tinted sky-blue because the fill comes from
-    // the sky dome.
-    commands.insert_resource(GlobalAmbientLight {
+    // high-contrast noise. Tinted sky-blue because the fill comes from the
+    // sky dome.
+    commands.insert_resource(flat_ambient());
+}
+
+/// The flat sky-dome ambient fill used while the atmosphere's environment
+/// probe is off. Also selected by the impostor preprocessor, which bakes
+/// under the same light the game shows.
+pub fn flat_ambient() -> GlobalAmbientLight {
+    GlobalAmbientLight {
         color: Color::srgb(0.75, 0.8, 0.9),
         brightness: 0.07 * lux::FULL_DAYLIGHT,
         affects_lightmapped_meshes: true,
-    });
+    }
 }
 
 /// Applies [`SkyTuning`] to the sun light. Runs only when the tuning
@@ -111,8 +118,9 @@ fn update_sun(
 
 /// Places a directional light `elevation_deg` above the horizon at
 /// `azimuth_deg` (from +X around +Y), looking at the origin so its forward
-/// axis — the direction light travels — points down at the scene.
-fn sun_transform(elevation_deg: f32, azimuth_deg: f32) -> Transform {
+/// axis — the direction light travels — points down at the scene. Also used
+/// by the impostor preprocessor to bake under the game's sun.
+pub fn sun_transform(elevation_deg: f32, azimuth_deg: f32) -> Transform {
     let (el_sin, el_cos) = elevation_deg.to_radians().sin_cos();
     let (az_sin, az_cos) = azimuth_deg.to_radians().sin_cos();
     let dir = Vec3::new(el_cos * az_cos, el_sin, el_cos * az_sin);

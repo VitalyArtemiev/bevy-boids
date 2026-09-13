@@ -58,6 +58,9 @@ pub struct LaunchConfig {
     pub environment_map: bool,
     /// Whether cameras get the bloom post-process.
     pub bloom: bool,
+    /// Bake impostor atlases (`preprocess::run`) and exit instead of
+    /// launching the game.
+    pub preprocess: bool,
 }
 
 impl Default for LaunchConfig {
@@ -78,6 +81,7 @@ impl Default for LaunchConfig {
             atmosphere: false,
             environment_map: false,
             bloom: true,
+            preprocess: false,
         }
     }
 }
@@ -104,9 +108,9 @@ fn value(
 /// Parses `--bench`, `--secs <s>`, `--zoom <z>`, `--shot <path>`,
 /// `--focus <x,z>`,
 /// `--boids <n>`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
-/// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`, and
-/// `--bloom|--no-bloom`. Later flags win. Unrelated arguments are ignored so
-/// other tooling can pass through.
+/// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`,
+/// `--bloom|--no-bloom`, and `--preprocess`. Later flags win. Unrelated
+/// arguments are ignored so other tooling can pass through.
 pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
     let mut config = LaunchConfig::default();
 
@@ -198,6 +202,10 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
             }
             "--bloom" | "--no-bloom" => {
                 config.bloom = !flag.starts_with("--no-");
+                i += 1;
+            }
+            "--preprocess" => {
+                config.preprocess = true;
                 i += 1;
             }
             _ => i += 1,
@@ -452,6 +460,12 @@ mod tests {
             parse_launch_args(&args(&["--shot"])).unwrap_err(),
             "--shot needs a value"
         );
+    }
+
+    #[test]
+    fn preprocess_flag_switches_to_the_baker() {
+        assert!(!parse_launch_args(&[]).unwrap().preprocess);
+        assert!(parse_launch_args(&args(&["--preprocess"])).unwrap().preprocess);
     }
 
     #[test]

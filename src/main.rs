@@ -6,6 +6,7 @@ mod horse;
 mod kinematics;
 mod launch;
 mod player;
+mod preprocess;
 mod resources;
 mod sky;
 mod target;
@@ -60,6 +61,12 @@ fn main() {
             return;
         }
     };
+
+    // Bake impostor atlases and exit instead of launching the game.
+    if launch.preprocess {
+        preprocess::run();
+        return;
+    }
 
     // Read out the scalar flags the plugin chain needs before `launch`
     // moves into the resource.
