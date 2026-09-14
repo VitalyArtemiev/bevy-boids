@@ -887,6 +887,7 @@ mod tests {
     use super::*;
     use crate::kinematics::{TrackedByTree, move_step};
     use crate::target::follow_target;
+    use crate::terrain::HeightField;
     use bevy::gizmos::AppGizmoBuilder;
     use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
     use bevy::time::{Fixed, Time, TimePlugin, TimeUpdateStrategy};
@@ -909,6 +910,9 @@ mod tests {
             .init_resource::<LODGuard>()
             .init_resource::<FormationTuning>()
             .init_resource::<crate::kinematics::KinematicsTuning>()
+            // move_step samples the (flat by default) height field for
+            // slope physics.
+            .init_resource::<HeightField>()
             .init_resource::<crate::debug_ui::DebugConfig>()
             .init_resource::<GizmoConfigStore>()
             .init_gizmo_group::<DefaultGizmoConfigGroup>()

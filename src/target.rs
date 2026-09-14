@@ -1,4 +1,4 @@
-use crate::kinematics::{KinematicsTuning, Velocity};
+use crate::kinematics::{KinematicsTuning, Velocity, arrival_plan};
 use bevy::math::Vec3;
 use bevy::prelude::{Component, Query, Res, Transform};
 
@@ -22,22 +22,26 @@ impl Default for Target {
     }
 }
 
-///Add force in target direction
+/// Steer toward [`Target`] as desired-velocity control: brake toward the
+/// arrival-damped, misalignment-slowed preferred velocity (see
+/// [`arrival_plan`]) instead of accelerating along the target bearing.
+///
+/// The old bearing-only math never braked the velocity component
+/// perpendicular to the bearing, so a fast flyby of a perpendicular target
+/// settled into a stable orbit at the turn radius v²/a. Steering toward a
+/// preferred velocity kills that tangential component, while the
+/// acceleration clamp keeps every turn at a physical radius — the momentum
+/// and turn limits live in the clamp, not in the plan.
 pub fn follow_target(
     mut query: Query<(&Transform, &Target, &mut Velocity)>,
     tuning: Res<KinematicsTuning>,
 ) {
-    let t = tuning.deceleration_time_sec;
     for (transform, target, mut vel) in &mut query {
-        let dir: Vec3 = target.pos - transform.translation;
-        let v_sign = dir.dot(vel.v).signum();
-        let l = dir.length();
-        let v = vel.v.length() * v_sign;
-        //we always wanna be there in DECELERATION_TIME_SEC
-        //a = (l-vt)/t2
-        let a = (l - v * t) / (t * t);
         let cap = tuning.max_velocity_mps * target.speed_scale.max(0.0);
-        vel.target_v = 0.99 * (l / t).clamp(0., cap);
-        vel.a = (dir.normalize_or_zero() * a).clamp_length_max(tuning.max_acceleration_mpss);
+        let (desired_v, speed) =
+            arrival_plan(transform.translation, target.pos, vel.v, cap, &tuning);
+        vel.target_v = speed;
+        vel.a = ((desired_v - vel.v) / tuning.steer_response_sec)
+            .clamp_length_max(tuning.max_acceleration_mpss);
     }
 }

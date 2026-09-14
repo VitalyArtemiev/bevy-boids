@@ -141,6 +141,35 @@ fn debug_panel(
                     "deceleration time (s)",
                 )
                 .changed();
+                changed |= slider(
+                    ui,
+                    &mut kin.steer_response_sec,
+                    0.05..=2.0,
+                    "steer response (s)",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut kin.misalign_slowdown,
+                    0.0..=1.0,
+                    "misalignment slowdown",
+                )
+                .changed();
+                changed |= slider(ui, &mut kin.gravity_mpss, 0.0..=30.0, "gravity (m/s²)").changed();
+                changed |= slider(
+                    ui,
+                    &mut kin.slope_accel_coef,
+                    0.0..=3.0,
+                    "uphill thrust loss",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut kin.slope_cap_coef,
+                    0.0..=3.0,
+                    "downhill cap gain",
+                )
+                .changed();
                 changed |= reset(ui, kin);
                 changed
             });
