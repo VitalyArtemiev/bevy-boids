@@ -1,3 +1,4 @@
+mod billboard;
 mod boid;
 mod crowd;
 mod debug_ui;
@@ -18,8 +19,9 @@ mod ui;
 mod util;
 
 use crate::boid::*;
+use crate::billboard::{BillboardPlugin, force_render, swap_boid_lod, update_billboard_yaw};
 use crate::crowd::CrowdPlugin;
-use crate::debug_ui::DebugUiPlugin;
+use crate::debug_ui::{DebugConfig, DebugUiPlugin};
 use crate::input::InputPlugin;
 use crate::formations::{
     FormationTuning, LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
@@ -43,7 +45,6 @@ use crate::terrain::{
     spawn_ground,
 };
 use crate::ui::{GameState, UiPlugin};
-use bevy::asset::RenderAssetUsages;
 use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
 use bevy::light::{AtmosphereEnvironmentMapLight, GlobalAmbientLight};
 use bevy::math::bounding::Aabb2d;
@@ -51,8 +52,8 @@ use bevy::pbr::AtmosphereSettings;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
+use bevy::window::{PresentMode, WindowPlugin};
 use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraPlugin, RtsCameraSystemSet};
 use bevy_spatial::{AutomaticUpdate, TransformMode};
@@ -76,7 +77,25 @@ fn main() {
 
     // Read out the scalar flags the plugin chain needs before `launch`
     // moves into the resource.
-    let (bench, shadows, crowd_scene) = (launch.bench, launch.shadows, launch.crowd);
+    let (bench, shadows, crowd_scene, flat_scene, forced_render, no_vsync, lab) = (
+        launch.bench,
+        launch.shadows,
+        launch.crowd,
+        launch.flat,
+        launch.force_meshes || launch.force_billboards,
+        launch.no_vsync,
+        launch.billboard_lab,
+    );
+    let mut sky = SkyTuning {
+        shadows,
+        ..default()
+    };
+    if let Some(azimuth) = launch.sun_azimuth_deg {
+        sky.sun_azimuth_deg = azimuth;
+    }
+    if let Some(elevation) = launch.sun_elevation_deg {
+        sky.sun_elevation_deg = elevation;
+    }
 
     let mut wgpu_settings = WgpuSettings::default();
     // Browsers have no Vulkan; let wgpu pick (WebGL2/WebGPU) on wasm
@@ -85,31 +104,44 @@ fn main() {
         wgpu_settings.backends = Some(Backends::VULKAN);
     }
 
+    let mut default_plugins = DefaultPlugins
+        .set(ImagePlugin::default_nearest())
+        .set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(Box::new(wgpu_settings)),
+            ..default()
+        });
+    if no_vsync {
+        // Benches on light scenes would otherwise pin to the refresh rate
+        // and compare nothing.
+        default_plugins = default_plugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                present_mode: PresentMode::Immediate,
+                ..default()
+            }),
+            ..default()
+        });
+    }
+
     let mut app = App::new();
     app.init_resource::<Materials>()
         .init_resource::<Meshes>()
         .init_resource::<Player>()
         .init_resource::<LODGuard>()
         .init_resource::<HeightField>()
-        // RTS camera vs freecam, toggled from the F3 panel.
+        // Boid identity counter: spawn order today, persisted formation
+        // state once boids stream with LOD.
+        .init_resource::<BoidIds>()
         .init_resource::<CameraMode>()
         .insert_resource(launch)
-        .insert_resource(SkyTuning {
-            shadows,
-            ..default()
-        })
-        .add_plugins(
-            DefaultPlugins
-                .set(ImagePlugin::default_nearest())
-                .set(RenderPlugin {
-                    render_creation: RenderCreation::Automatic(Box::new(wgpu_settings)),
-                    ..default()
-                }),
-        )
+        .insert_resource(sky)
+        .add_plugins(default_plugins)
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
         // Formation crowd-shell experiment (spawns only with --crowd).
         .add_plugins(CrowdPlugin)
+        // Per-boid impostor LOD: mesh <-> baked-atlas billboard by camera
+        // distance (builds the shared BoidVariations catalog).
+        .add_plugins(BillboardPlugin)
         // Before UiPlugin: UiPlugin's SettingsPlugin scans the registry at
         // build time, so BindingsSettings must be registered first.
         .add_plugins(InputPlugin)
@@ -118,6 +150,13 @@ fn main() {
         // No-op without --bench; skips the main menu when enabled.
         .add_plugins(BenchPlugin(bench))
         .add_plugins(DebugUiPlugin)
+        // --force-meshes/--force-billboards bench overrides: stand the
+        // distance swap down while a render path is forced manually
+        // (`billboard::force_render` does the one-shot conversion).
+        .insert_resource(DebugConfig {
+            impostor_lod: !forced_render,
+            ..default()
+        })
         // Runtime-tunable values exposed by the debug panel (F1).
         .init_resource::<KinematicsTuning>()
         .init_resource::<BoidTuning>()
@@ -132,12 +171,13 @@ fn main() {
         )
         .add_systems(Startup, setup);
 
-    if crowd_scene {
-        // Isolated crowd experiment: a flat plane instead of the erosion
-        // terrain (and no water/obstacles — `setup` skips those too), so
-        // screenshots show the shader against a clean ground. The terrain
-        // settings resource still exists so the F3 panel's `Res` is valid;
-        // without the plugin it just has nothing to rebuild.
+    if crowd_scene || flat_scene || lab {
+        // Isolated flat scene (the crowd experiment's, `--flat` for
+        // render-path benches, or `--billboard-lab`): a plain plane instead
+        // of the erosion terrain, no water/obstacles, so nothing but the
+        // units cost GPU time. The terrain settings resource still exists
+        // so the F3 panel's `Res` is valid; without the plugin it just has
+        // nothing to rebuild.
         app.add_systems(Startup, crowd::spawn_crowd_ground)
             .init_resource::<DemoTerrain>();
     } else {
@@ -176,6 +216,12 @@ fn main() {
                 project_obstacles_onto_field,
                 focus_camera_on_ground.before(RtsCameraSystemSet),
                 camera_terrain_clearance.after(RtsCameraSystemSet),
+                // Impostor LOD rides the settled camera position; yaw
+                // refresh follows any fresh billboards; the one-shot
+                // --force-billboards conversion trails both.
+                swap_boid_lod.after(RtsCameraSystemSet),
+                update_billboard_yaw,
+                force_render,
                 // Freecam (F3 toggle) takes the camera over by component
                 // swap when the mode resource changes; the move system is
                 // inert without a Freecam camera.
@@ -215,41 +261,14 @@ fn main() {
 /// closer reads as an abrupt void edge over the hazy far terrain.
 const CAMERA_FAR_PLANE_M: f32 = 500_000.0;
 
-fn uv_debug_texture() -> Image {
-    const TEXTURE_SIZE: usize = 8;
-
-    let mut palette: [u8; 32] = [
-        255, 102, 159, 255, 255, 159, 102, 255, 236, 255, 102, 255, 121, 255, 102, 255, 102, 255,
-        198, 255, 102, 198, 255, 255, 121, 102, 255, 255, 236, 102, 255, 255,
-    ];
-
-    let mut texture_data = [0; TEXTURE_SIZE * TEXTURE_SIZE * 4];
-    for y in 0..TEXTURE_SIZE {
-        let offset = TEXTURE_SIZE * y * 4;
-        texture_data[offset..(offset + TEXTURE_SIZE * 4)].copy_from_slice(&palette);
-        palette.rotate_right(4);
-    }
-
-    Image::new_fill(
-        Extent3d {
-            width: TEXTURE_SIZE as u32,
-            height: TEXTURE_SIZE as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &texture_data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut mesh_list: ResMut<Meshes>,
     mut mat_list: ResMut<Materials>,
+    variations: Res<BoidVariations>,
+    mut ids: ResMut<BoidIds>,
     field: Res<HeightField>,
     launch: Res<LaunchConfig>,
     mut ambient_light: ResMut<GlobalAmbientLight>,
@@ -262,19 +281,12 @@ fn setup(
 
     mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
     mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
-    // Terrain tiles render through `terrain::render`'s displaced-mesh
-    // material (per-tile baked textures), not a shared StandardMaterial.
-    mat_list.debug_material = materials.add(StandardMaterial {
-        base_color_texture: Some(images.add(uv_debug_texture())),
-        ..default()
-    });
 
     mesh_list.cube = meshes.add(Cuboid::default());
-    mesh_list.capsule = meshes.add(Capsule3d::default());
 
     // `--boids` works in normal launches too; the default is the full
-    // historical 99x99 grid.
-    let boid_budget = launch.boids;
+    // historical 99x99 grid. The lab spawns its own two-boid pair instead.
+    let boid_budget = if launch.billboard_lab { 0 } else { launch.boids };
     let mut boids_spawned = 0;
     'grid: for i in 1..100 {
         for j in 1..100 {
@@ -282,20 +294,20 @@ fn setup(
                 break 'grid;
             }
             boids_spawned += 1;
-            commands.spawn(BoidBundle::with_target(
+            commands.spawn(BoidBundle::with_id(
+                ids.next(),
                 Target {
                     pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
                     ..default()
                 },
-                mesh_list.capsule.clone(),
-                mat_list.debug_material.clone(),
+                &variations,
             ));
         }
     }
 
-    // Isolated crowd scene: no obstacle scatter — cubes landing inside
-    // the armies would only pollute the experiment's screenshots.
-    if !launch.crowd {
+    // Isolated flat scene: no obstacle scatter — nothing but the units
+    // should cost render time (matches the crowd experiment's scene).
+    if !launch.crowd && !launch.flat && !launch.billboard_lab {
         for _ in 1..100 {
             let mut rng = rand::rng();
             let x = rng.random_range(-100.0..100.0);
@@ -313,8 +325,15 @@ fn setup(
         }
     }
 
-    let camera = commands
-        .spawn((
+    // The billboard lab brings its own plain camera; skipping the RTS one
+    // keeps the scene single-camera (several input systems `single()` it)
+    // and the lab pose immune to bench zoom pinning.
+    let camera = if launch.billboard_lab {
+        None
+    } else {
+        Some(
+            commands
+                .spawn((
             Camera3d::default(),
             // Smoothed terrain-clearance lift state (see camera_terrain_clearance).
             CameraClearance::default(),
@@ -365,14 +384,19 @@ fn setup(
                 zoom_sensitivity: 0.0,
                 enabled: true,
             },
-        ))
-        .id();
+                ))
+                .id(),
+        )
+    };
 
     // Atmosphere is opt-in for now: Bevy 0.19 refilters its environment-map
     // cubemap every frame, and the caching/on-demand fix is still open
     // upstream. `--atmosphere` and `--env-map` work in normal launches too;
     // the bench just inherits the same configuration.
     let environment_map = launch.atmosphere && launch.environment_map;
+    let Some(camera) = camera else {
+        return;
+    };
     if launch.atmosphere {
         // Enables atmosphere rendering for this view; requires HDR.
         commands

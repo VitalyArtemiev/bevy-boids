@@ -11,12 +11,13 @@
 //! # Packing: albedo and mirrored normals in one texture
 //!
 //! Every view is baked twice — an unlit albedo render and a view-space
-//! normal render — and both live in one atlas with zero wasted cells:
-//! albedo cells fill the top half in flat view-index order, and normal
-//! cells sit at the whole-texture 180° rotation of their albedo cell
-//! (bottom half, reversed order). A runtime shader therefore samples the
-//! normal for any albedo uv with the single mirror `nuv = 1.0 - uv`, and
-//! the texture spends every cell on data.
+//! normal render — for every animation pose, and all of it lives in one
+//! atlas with zero wasted cells: each pose's albedo cells fill a horizontal
+//! band of the top half in flat view-index order, and normal cells sit at
+//! the whole-texture 180° rotation of their albedo cell (bottom half,
+//! reversed). A runtime shader therefore samples the normal for any albedo
+//! uv with the single mirror `nuv = 1.0 - uv` — for any pose — and the
+//! texture spends every cell on data.
 //!
 //! Both halves are stored sRGB-encoded (the capture target writes through
 //! an sRGB view): load the atlas as an sRGB texture — Bevy's default for
@@ -36,9 +37,9 @@
 //! # Addressing
 //!
 //! View `i` (in [`view_samples`] order: nadir, then ring slots innermost to
-//! outermost) occupies [`albedo_cell`]`(i)` and [`normal_cell`]`(i)`. A
-//! runtime view at (polar, azimuth) maps to its nearest view index via
-//! [`view_index`].
+//! outermost) in pose `p` occupies [`albedo_cell`]`(i, p)` and
+//! [`normal_cell`]`(i, p)`. A runtime view at (polar, azimuth) maps to its
+//! nearest view index via [`view_index`].
 
 use std::f32::consts::TAU;
 
@@ -63,21 +64,36 @@ pub const RING_CELL_COUNTS: [usize; 3] = [8, 16, 24];
 /// Edge length of one atlas cell, pixels.
 pub const CELL_SIZE_PX: u32 = 64;
 
+/// Headroom around the fitted bounding sphere, fraction of its radius: the
+/// silhouette must not touch the cell edge, or bilinear filtering at
+/// billboard time would bleed the neighbouring cell in. The bake frustum
+/// and the runtime billboard quad both size themselves from this, so the
+/// swap never pops in apparent size.
+pub const FIT_MARGIN: f32 = 1.1;
+
+/// Animation poses baked per variation (see `bake_poses` in the bake
+/// module). Every pose reuses the same view cone, stacked as horizontal
+/// bands — future walk/attack frames become additional poses without any
+/// layout change. Currently just the idle pose: the axis is plumbed and
+/// tested, but no animation exists to feed it yet.
+pub const POSE_COUNT: u32 = 1;
+
 /// Total baked views: the nadir plus every ring slot.
 const VIEW_COUNT: usize =
     1 + RING_CELL_COUNTS[0] + RING_CELL_COUNTS[1] + RING_CELL_COUNTS[2];
 
 /// Atlas width in cells. Chosen so the albedo half packs exactly for the
-/// current [`RING_CELL_COUNTS`] (49 views = a clean 7×7 half, 98 = 7×14
-/// texture, zero waste); a test pins the exact fit so ring changes must
-/// revisit it.
+/// current [`RING_CELL_COUNTS`] (49 views = a clean 7×7 half per pose,
+/// zero waste for any pose count); a test pins the exact fit so ring
+/// changes must revisit it.
 pub const ATLAS_WIDTH_CELLS: u32 = 7;
 
-/// Rows used by one render kind (albedo or normals).
+/// Rows used by one render kind (albedo or normals) of one pose.
 pub const HALF_ROWS: u32 = (VIEW_COUNT as u32 + ATLAS_WIDTH_CELLS - 1) / ATLAS_WIDTH_CELLS;
 
-/// Atlas size in cells: albedo fills the top half, normals the bottom half.
-pub const ATLAS_GRID: UVec2 = UVec2::new(ATLAS_WIDTH_CELLS, 2 * HALF_ROWS);
+/// Atlas size in cells: every pose's albedo band stacks in the top half,
+/// the mirrored normal bands in the bottom half.
+pub const ATLAS_GRID: UVec2 = UVec2::new(ATLAS_WIDTH_CELLS, 2 * HALF_ROWS * POSE_COUNT);
 
 /// Atlas size in pixels.
 pub const ATLAS_SIZE_PX: UVec2 = UVec2::new(
@@ -137,6 +153,11 @@ pub fn camera_transform(sample: &ViewSample, center: Vec3, distance: f32) -> Tra
 /// [`albedo_cell`]/[`normal_cell`] address. Polar angles beyond
 /// [`MAX_ANGLE_FROM_VERTICAL`] clamp to the outermost ring — the documented
 /// approximation for views outside the baked cone.
+///
+/// The billboard shader mirrors this lookup in wgsl
+/// (`assets/shaders/impostor_billboard.wgsl`); this Rust twin is the
+/// test-pinned reference the shader must match.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn view_index(polar: f32, azimuth: f32) -> usize {
     let rings = RING_CELL_COUNTS.len() as f32;
     let ring = (polar / MAX_ANGLE_FROM_VERTICAL * rings).round().clamp(0.0, rings) as usize;
@@ -149,16 +170,20 @@ pub fn view_index(polar: f32, azimuth: f32) -> usize {
     1 + RING_CELL_COUNTS[..ring - 1].iter().sum::<usize>() + slot
 }
 
-/// Albedo cell of view `index`: flat row-major order in the top half.
-pub fn albedo_cell(index: usize) -> UVec2 {
-    UVec2::new(index as u32 % ATLAS_GRID.x, index as u32 / ATLAS_GRID.x)
+/// Albedo cell of view `index` in pose `pose`: flat row-major order within
+/// the pose's band of the top half.
+pub fn albedo_cell(index: usize, pose: usize) -> UVec2 {
+    UVec2::new(
+        index as u32 % ATLAS_GRID.x,
+        pose as u32 * HALF_ROWS + index as u32 / ATLAS_GRID.x,
+    )
 }
 
-/// Normal cell of view `index`: the albedo cell mirrored through the
-/// texture centre — the whole-texture 180° rotation that lets a shader
-/// fetch it with `nuv = 1.0 - uv`.
-pub fn normal_cell(index: usize) -> UVec2 {
-    let albedo = albedo_cell(index);
+/// Normal cell of view `index` in pose `pose`: the albedo cell mirrored
+/// through the texture centre — the whole-texture 180° rotation that lets a
+/// shader fetch it with `nuv = 1.0 - uv` regardless of pose count.
+pub fn normal_cell(index: usize, pose: usize) -> UVec2 {
+    let albedo = albedo_cell(index, pose);
     UVec2::new(
         ATLAS_GRID.x - 1 - albedo.x,
         ATLAS_GRID.y - 1 - albedo.y,
@@ -198,7 +223,7 @@ mod tests {
         );
         assert_eq!(
             ATLAS_GRID.x * ATLAS_GRID.y,
-            2 * VIEW_COUNT as u32,
+            2 * VIEW_COUNT as u32 * POSE_COUNT,
             "the atlas must spend every cell on data"
         );
         for (ring, count) in RING_CELL_COUNTS.iter().enumerate() {
@@ -288,21 +313,45 @@ mod tests {
     #[test]
     fn normals_mirror_albedo_through_the_texture_centre() {
         let mut seen = std::collections::HashSet::new();
-        for index in 0..VIEW_COUNT {
-            let albedo = albedo_cell(index);
-            let normal = normal_cell(index);
-            assert!(albedo.x < ATLAS_GRID.x && albedo.y < HALF_ROWS);
-            assert!(normal.x < ATLAS_GRID.x && normal.y >= HALF_ROWS);
-            // The exact whole-texture 180° rotation — the `nuv = 1 - uv`
-            // pairing the runtime shader relies on.
-            assert_eq!(
-                normal,
-                UVec2::new(ATLAS_GRID.x - 1 - albedo.x, ATLAS_GRID.y - 1 - albedo.y)
-            );
-            assert!(seen.insert(albedo), "duplicate albedo cell for view {index}");
-            assert!(seen.insert(normal), "duplicate normal cell for view {index}");
+        for pose in 0..POSE_COUNT as usize {
+            for index in 0..VIEW_COUNT {
+                let albedo = albedo_cell(index, pose);
+                let normal = normal_cell(index, pose);
+                assert!(albedo.x < ATLAS_GRID.x && albedo.y < HALF_ROWS * (pose as u32 + 1));
+                assert!(albedo.y >= HALF_ROWS * pose as u32, "band containment");
+                assert!(normal.y >= ATLAS_GRID.y - HALF_ROWS * (pose as u32 + 1));
+                // The exact whole-texture 180° rotation — the `nuv = 1 - uv`
+                // pairing the runtime shader relies on.
+                assert_eq!(
+                    normal,
+                    UVec2::new(ATLAS_GRID.x - 1 - albedo.x, ATLAS_GRID.y - 1 - albedo.y)
+                );
+                assert!(seen.insert(albedo), "duplicate albedo cell for view {index}");
+                assert!(seen.insert(normal), "duplicate normal cell for view {index}");
+            }
         }
-        assert_eq!(seen.len(), 2 * VIEW_COUNT, "no cell is shared or wasted");
+        assert_eq!(
+            seen.len(),
+            2 * VIEW_COUNT * POSE_COUNT as usize,
+            "no cell is shared or wasted"
+        );
+    }
+
+    #[test]
+    fn pose_bands_stack_for_future_pose_counts() {
+        // The pose axis ships a single idle pose, so pin the band
+        // arithmetic for indices the atlas doesn't currently use: albedo
+        // bands stack at HALF_ROWS stride. (`normal_cell`'s mirror is
+        // defined against the shipped grid height, so a larger pose count
+        // regenerates the atlas and the mirror together — the 180°
+        // relation itself is pinned by the test above for shipped poses.)
+        for pose in 1..=3usize {
+            assert_eq!(
+                albedo_cell(0, pose).y,
+                pose as u32 * HALF_ROWS,
+                "band starts at its stride"
+            );
+        }
     }
 
     #[test]

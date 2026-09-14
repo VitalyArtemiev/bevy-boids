@@ -6,6 +6,7 @@
 //! `Slider::new` line in the matching section here.
 
 use crate::boid::BoidTuning;
+use crate::billboard::BillboardTuning;
 use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
 use crate::input::{ActionEvents, ActionId, ActionTag, TriggerState};
@@ -30,6 +31,9 @@ pub struct DebugConfig {
     pub show_cursor_circle: bool,
     /// Formation steering lines (`dispatch_formation_goals`).
     pub show_formation_goals: bool,
+    /// Kill-switch for the per-boid impostor LOD (`swap_boid_lod`): off
+    /// holds every boid on its mesh regardless of distance.
+    pub impostor_lod: bool,
 }
 
 impl Default for DebugConfig {
@@ -38,6 +42,7 @@ impl Default for DebugConfig {
             open: false,
             show_cursor_circle: true,
             show_formation_goals: true,
+            impostor_lod: true,
         }
     }
 }
@@ -79,6 +84,7 @@ fn debug_panel(
     mut form: ResMut<FormationTuning>,
     mut sky: ResMut<SkyTuning>,
     mut crowd: ResMut<CrowdTuning>,
+    mut billboard: ResMut<BillboardTuning>,
     mut lod: ResMut<LODGuard>,
     mut q_controls: Query<&mut RtsCameraControls>,
     time: Res<Time>,
@@ -264,6 +270,32 @@ fn debug_panel(
                 },
             );
 
+            tuned(
+                &mut billboard,
+                ui,
+                "Billboards",
+                false,
+                |ui, billboard: &mut BillboardTuning| {
+                    let mut changed = false;
+                    changed |= slider(
+                        ui,
+                        &mut billboard.swap_distance_m,
+                        5.0..=500.0,
+                        "swap distance (m)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut billboard.hysteresis_m,
+                        0.0..=50.0,
+                        "hysteresis band (m)",
+                    )
+                    .changed();
+                    changed |= reset(ui, billboard);
+                    changed
+                },
+            );
+
             // The camera controls are a component on the camera entity, not
             // a tuning resource, but the don't-flag-changes-without-edits
             // rule is the same. No zoom slider here: the crate's
@@ -303,6 +335,9 @@ fn debug_panel(
                         .changed();
                     toggles_changed |= ui
                         .checkbox(&mut config.show_formation_goals, "formation goal lines")
+                        .changed();
+                    toggles_changed |= ui
+                        .checkbox(&mut config.impostor_lod, "impostor billboards by distance")
                         .changed();
                     let lod: &mut LODGuard = lod.bypass_change_detection();
                     toggles_changed |= ui

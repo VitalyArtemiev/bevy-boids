@@ -4,24 +4,28 @@
 //! textured billboard per boid. The billboard needs an unlit albedo and a
 //! normal for every view direction in a steep-down cone (plus the boid's
 //! facing, which [`atlas`] folds into the view azimuth); one disk of
-//! pre-rendered views per model variation covers both.
+//! pre-rendered views per animation pose per model variation covers all of
+//! it.
 //!
 //! This is a self-contained app mode, never merged into the game's plugin
-//! graph: `cargo run -- --preprocess` renders every registered variation
-//! from every [`atlas::view_samples`] direction with two co-located
-//! orthographic cameras (albedo and normals on separate render layers,
-//! so both captures happen in the same frame), captures each through the
-//! renderer's own screenshot readback, and composites the cells into one
-//! zero-waste RGBA PNG under `assets/impostors/` — albedo cells fill the
-//! top half, normal cells sit mirrored through the texture centre, so a
-//! runtime shader pairs them with `nuv = 1.0 - uv`.
+//! graph: `cargo run -- --preprocess` renders every catalog variation (see
+//! `boid::boid_variations` — the game spawns from the same list) in every
+//! [`bake_poses`] pose from every [`atlas::view_samples`] direction, with
+//! two co-located orthographic cameras (albedo and normals on separate
+//! render layers, so both captures happen in the same frame), captures each
+//! through the renderer's own screenshot readback, and composites the cells
+//! into one zero-waste RGBA PNG per variation under `assets/impostors/` —
+//! each pose's albedo cells fill a band of the top half, normal cells sit
+//! mirrored through the texture centre, so a runtime shader pairs them with
+//! `nuv = 1.0 - uv`.
 //!
 //! Nothing is lit at bake time: baked lighting would be wrong at every
 //! yaw except the one the model was baked at (the folding note in
-//! [`atlas`]), so the albedo renders unlit and the normals render as raw
-//! view-space directions for the runtime shader to shade with. Normal
-//! cells are stored sRGB-encoded like the albedo — decode with
-//! `n = 2 * sampled - 1` after sampling the atlas as an sRGB texture.
+//! [`atlas`]), so the albedo renders an unlit clone of the game material
+//! and the normals render as raw view-space directions for the runtime
+//! shader to shade with. Normal cells are stored sRGB-encoded like the
+//! albedo — decode with `n = 2 * sampled - 1` after sampling the atlas as
+//! an sRGB texture.
 
 pub mod atlas;
 
@@ -41,10 +45,10 @@ use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::shader::ShaderRef;
 use bevy::window::{WindowPlugin, WindowResolution};
 
-use crate::uv_debug_texture;
+use crate::boid::boid_variations;
 use atlas::ViewSample;
 
-/// Where baked atlases land, under `assets/` so the future billboard LOD can
+/// Where baked atlases land, under `assets/` so the billboard LOD can
 /// `AssetServer::load` them.
 const OUTPUT_DIR: &str = "assets/impostors";
 
@@ -54,11 +58,6 @@ const OUTPUT_DIR: &str = "assets/impostors";
 const ALBEDO_LAYER: usize = 1;
 const NORMAL_LAYER: usize = 2;
 
-/// Headroom around the fitted bounding sphere, fraction of its radius: the
-/// silhouette must not touch the cell edge, or bilinear filtering at
-/// billboard time would bleed the neighbouring cell in.
-const FIT_MARGIN: f32 = 1.1;
-
 /// Camera distance from the model centre, in fitted-span units. Far enough
 /// that near/far planes never clip the model for any view in the cone.
 const DISTANCE_SPANS: f32 = 4.0;
@@ -66,7 +65,8 @@ const DISTANCE_SPANS: f32 = 4.0;
 /// Far plane, in fitted-span units (the model spans about ±1 span).
 const FAR_SPANS: f32 = 7.0;
 
-/// Frames burned between variations — only the mesh swap needs to settle.
+/// Frames burned between stages — only the mesh swap or pose transform
+/// needs to settle.
 const RETUNE_WARMUP_FRAMES: u32 = 2;
 
 /// Marker for the two offscreen baking cameras.
@@ -94,17 +94,38 @@ impl Material for NormalMaterial {
     }
 }
 
-/// One bake job: a model variation and the parameters its bake needs.
+/// One bake job derived from a catalog entry: the same mesh the game
+/// spawns, with an unlit clone of its material (the bake stores raw
+/// albedo; runtime lighting comes from the normal half).
 #[derive(Clone)]
-struct VariationBake {
+struct BakeEntry {
     name: &'static str,
     mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
-    /// Mesh AABB centre in world space — what the cameras orbit.
+    albedo: Handle<StandardMaterial>,
     center: Vec3,
-    /// Bounding-sphere radius, metres: the frustum is fitted to the sphere,
-    /// not the box, so every view direction in the cone sees the whole model.
+    /// Bounding-sphere radius, metres. The frustum is fitted to the sphere,
+    /// not the box, so every view direction — and every pose, however the
+    /// model is transformed — frames the whole model.
     radius: f32,
+}
+
+/// One baked animation state. Only the idle pose ships — the axis (and the
+/// stage machine that walks it) is plumbed for any pose count, but no
+/// animation exists to feed it yet. Real soldier meshes plug skeletal
+/// animation in here (each animation frame becomes a pose) at the same
+/// stage boundary: set the model's pose, `POSE_COUNT` in `atlas.rs` and
+/// its wgsl mirror, and re-run the bake. Cameras and the frustum stay
+/// fixed across poses so all poses of a variation share framing.
+struct Pose {
+    name: &'static str,
+    transform: Transform,
+}
+
+fn bake_poses() -> Vec<Pose> {
+    vec![Pose {
+        name: "idle",
+        transform: Transform::IDENTITY,
+    }]
 }
 
 /// Drives the bake: which view is in flight, what has landed.
@@ -112,13 +133,19 @@ struct VariationBake {
 struct PreprocessState {
     albedo_target: Handle<Image>,
     normal_target: Handle<Image>,
-    variations: Vec<VariationBake>,
+    entries: Vec<BakeEntry>,
+    poses: Vec<Pose>,
+    /// Current variation / pose stage.
     current: usize,
+    pose: usize,
     samples: Vec<ViewSample>,
+    /// Flat `pose · views + view` capture storage for the current stage
+    /// block (all poses of the current variation).
     captured_albedo: Vec<Option<Image>>,
     captured_normals: Vec<Option<Image>>,
-    /// Next sample to dispatch; strictly serialised so both of a view's
-    /// captures are confirmed before the cameras move on.
+    /// Next sample to dispatch within the current pose; strictly
+    /// serialised so both of a view's captures are confirmed before the
+    /// cameras move on.
     next: usize,
     /// Frames left to burn before the next dispatch.
     warmup: u32,
@@ -133,8 +160,8 @@ struct PreprocessState {
 }
 
 impl PreprocessState {
-    fn variation(&self) -> &VariationBake {
-        &self.variations[self.current]
+    fn entry(&self) -> &BakeEntry {
+        &self.entries[self.current]
     }
 
     fn primed(&self) -> bool {
@@ -143,8 +170,22 @@ impl PreprocessState {
 
     fn previous_view_complete(&self) -> bool {
         self.next == 0
-            || (self.captured_albedo[self.next - 1].is_some()
-                && self.captured_normals[self.next - 1].is_some())
+            || (self.captured_albedo[self.stage_slot(self.next - 1)].is_some()
+                && self.captured_normals[self.stage_slot(self.next - 1)].is_some())
+    }
+
+    /// Flat capture index of view `view` of the current pose.
+    fn stage_slot(&self, view: usize) -> usize {
+        self.pose * self.samples.len() + view
+    }
+
+    /// Whether the current pose's every view has landed on the CPU.
+    fn pose_complete(&self) -> bool {
+        let views = self.samples.len();
+        self.captured_albedo[self.pose * views..][..views].iter().all(|c| c.is_some())
+            && self.captured_normals[self.pose * views..][..views]
+                .iter()
+                .all(|c| c.is_some())
     }
 }
 
@@ -188,40 +229,17 @@ impl Plugin for PreprocessPlugin {
             Update,
             // Dispatch before finish so the last capture's completion is
             // acted on the same frame it arrives.
-            (dispatch_next_view, finish_variation).chain(),
+            (dispatch_next_view, advance_stage).chain(),
         );
     }
-}
-
-/// The bake list. Today: the classic capsule boid with its UV-debug
-/// material, baked unlit (runtime lighting comes from the normal half).
-/// Extend with armed/armoured/cavalry meshes here — each entry bakes to
-/// `<OUTPUT_DIR>/<name>.png` with the same view sampling.
-fn variations(
-    meshes: &mut Assets<Mesh>,
-    images: &mut Assets<Image>,
-    materials: &mut Assets<StandardMaterial>,
-) -> Vec<VariationBake> {
-    let mesh = meshes.add(Capsule3d::default());
-    let material = materials.add(StandardMaterial {
-        base_color_texture: Some(images.add(uv_debug_texture())),
-        unlit: true,
-        ..default()
-    });
-    let (center, radius) = mesh_bounds(&meshes.get(&mesh).expect("just added"));
-    vec![VariationBake {
-        name: "boid-capsule",
-        mesh,
-        material,
-        center,
-        radius,
-    }]
 }
 
 /// Centre and radius of a mesh's bounding sphere, from its position
 /// attribute. Called at startup only — after the first render frame the
 /// mesh data is extracted to the render world and no longer readable.
-fn mesh_bounds(mesh: &Mesh) -> (Vec3, f32) {
+/// Shared with `boid::boid_variations`, which fits the catalog's bake data
+/// from the same meshes the game spawns.
+pub(crate) fn mesh_bounds(mesh: &Mesh) -> (Vec3, f32) {
     let positions = mesh
         .attributes()
         .find(|(attribute, _)| attribute.id == Mesh::ATTRIBUTE_POSITION.id)
@@ -245,12 +263,37 @@ fn mesh_bounds(mesh: &Mesh) -> (Vec3, f32) {
     (center, radius)
 }
 
+/// Derives the bake list from the shared catalog: same meshes, unlit
+/// material clones for the albedo pass.
+fn bake_entries(
+    catalog: &[crate::boid::BoidVariation],
+    materials: &mut Assets<StandardMaterial>,
+) -> Vec<BakeEntry> {
+    catalog
+        .iter()
+        .map(|variation| {
+            let mut albedo = materials
+                .get(&variation.material)
+                .expect("catalog material just built")
+                .clone();
+            albedo.unlit = true;
+            BakeEntry {
+                name: variation.name,
+                mesh: variation.mesh.clone(),
+                albedo: materials.add(albedo),
+                center: variation.center,
+                radius: variation.radius,
+            }
+        })
+        .collect()
+}
+
 /// Ortho projection fitted to a bounding sphere: a square frustum of
-/// `FIT_MARGIN · radius`, the only projection that shows the whole model
+/// `atlas::FIT_MARGIN · radius`, the only projection that shows the whole model
 /// from every direction in the cone at a constant scale. `area` mirrors
 /// the scaling mode (the camera system recomputes it anyway).
 fn fitted_projection(radius: f32) -> Projection {
-    let span = radius * FIT_MARGIN;
+    let span = radius * atlas::FIT_MARGIN;
     Projection::Orthographic(OrthographicProjection {
         scaling_mode: ScalingMode::Fixed {
             width: 2.0 * span,
@@ -284,20 +327,29 @@ fn preprocess_setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut normal_materials: ResMut<Assets<NormalMaterial>>,
 ) {
-    let variations = variations(&mut meshes, &mut images, &mut materials);
-    let first = variations[0].clone();
+    // The game spawns from the same constructor — one catalog, no drift.
+    let catalog = boid_variations(&mut meshes, &mut images, &mut materials);
+    let entries = bake_entries(&catalog, &mut materials);
+    let poses = bake_poses();
+    assert_eq!(
+        poses.len() as u32,
+        atlas::POSE_COUNT,
+        "atlas::POSE_COUNT must match bake_poses()"
+    );
+
+    let first = entries[0].clone();
     let samples = atlas::view_samples();
 
     let albedo_target = capture_target(&mut images);
     let normal_target = capture_target(&mut images);
 
-    // The same mesh rendered twice at the same spot: once unlit for albedo,
-    // once with the normal material — on separate layers so each camera
-    // sees exactly one of them.
+    // The same mesh rendered twice at the same place: once unlit for
+    // albedo, once with the normal material — on separate layers so each
+    // camera sees exactly one of them.
     commands.spawn((
         Mesh3d(first.mesh.clone()),
-        MeshMaterial3d(first.material.clone()),
-        Transform::IDENTITY,
+        MeshMaterial3d(first.albedo.clone()),
+        poses[0].transform,
         RenderLayers::layer(ALBEDO_LAYER),
         PreprocessModel,
         AlbedoModel,
@@ -305,7 +357,7 @@ fn preprocess_setup(
     commands.spawn((
         Mesh3d(first.mesh),
         MeshMaterial3d(normal_materials.add(NormalMaterial {})),
-        Transform::IDENTITY,
+        poses[0].transform,
         RenderLayers::layer(NORMAL_LAYER),
         PreprocessModel,
     ));
@@ -316,7 +368,7 @@ fn preprocess_setup(
     let initial_pose = atlas::camera_transform(
         &samples[0],
         first.center,
-        first.radius * FIT_MARGIN * DISTANCE_SPANS,
+        first.radius * atlas::FIT_MARGIN * DISTANCE_SPANS,
     );
     for (target, layer) in [
         (albedo_target.clone(), ALBEDO_LAYER),
@@ -336,13 +388,16 @@ fn preprocess_setup(
         ));
     }
 
+    let cells_per_variation = samples.len() * poses.len();
     commands.insert_resource(PreprocessState {
         albedo_target,
         normal_target,
-        variations,
+        entries,
+        poses,
         current: 0,
-        captured_albedo: vec![None; samples.len()],
-        captured_normals: vec![None; samples.len()],
+        pose: 0,
+        captured_albedo: vec![None; cells_per_variation],
+        captured_normals: vec![None; cells_per_variation],
         samples,
         next: 0,
         warmup: 0,
@@ -400,15 +455,19 @@ fn dispatch_next_view(
     let Some(sample) = state.samples.get(state.next).copied() else {
         return;
     };
-    let span = state.variation().radius * FIT_MARGIN;
+    let span = state.entry().radius * atlas::FIT_MARGIN;
     for mut transform in &mut cameras {
-        *transform = atlas::camera_transform(&sample, state.variation().center, span * DISTANCE_SPANS);
+        *transform =
+            atlas::camera_transform(&sample, state.entry().center, span * DISTANCE_SPANS);
     }
 
+    let slot = state.stage_slot(state.next);
+    let name = state.entry().name;
+    let pose = state.poses[state.pose].name;
     let index = state.next;
     let total = state.samples.len();
     info!(
-        "preprocess: dispatching view {}/{} at polar {:.0}° azimuth {:.0}°",
+        "preprocess: {name}/{pose} view {}/{} at polar {:.0}° azimuth {:.0}°",
         index + 1,
         total,
         sample.polar.to_degrees(),
@@ -419,11 +478,13 @@ fn dispatch_next_view(
         &state.albedo_target,
         move |state: &mut PreprocessState, image: &Image| {
             debug!(
-                "preprocess: view {} albedo arrived ({} opaque px)",
+                "preprocess: {}/{} view {} albedo arrived ({} opaque px)",
+                state.entries[state.current].name,
+                state.poses[state.pose].name,
                 index + 1,
                 opaque_px(image)
             );
-            state.captured_albedo[index] = Some(image.clone());
+            state.captured_albedo[slot] = Some(image.clone());
         },
     );
     spawn_capture(
@@ -431,11 +492,13 @@ fn dispatch_next_view(
         &state.normal_target,
         move |state: &mut PreprocessState, image: &Image| {
             debug!(
-                "preprocess: view {} normals arrived ({} opaque px)",
+                "preprocess: {}/{} view {} normals arrived ({} opaque px)",
+                state.entries[state.current].name,
+                state.poses[state.pose].name,
                 index + 1,
                 opaque_px(image)
             );
-            state.captured_normals[index] = Some(image.clone());
+            state.captured_normals[slot] = Some(image.clone());
         },
     );
     state.next += 1;
@@ -466,30 +529,53 @@ fn opaque_px(image: &Image) -> usize {
         .unwrap_or(0)
 }
 
-/// Saves the finished variation's atlas, then either retargets the model at
-/// the next variation or exits the app.
-fn finish_variation(
+/// Completes the current pose: saves the variation's atlas after the last
+/// pose, or rolls the stage machine to the next pose / variation.
+fn advance_stage(
     mut state: ResMut<PreprocessState>,
     mut cameras: Query<&mut Projection, With<PreprocessCamera>>,
-    // Both queries touch `Mesh3d`, so they must be provably disjoint: the
-    // normal model versus the albedo model (which also swaps its material).
-    mut normal_models: Query<&mut Mesh3d, (With<PreprocessModel>, Without<AlbedoModel>)>,
+    // Both queries touch `Mesh3d`/`Transform`, so they must be provably
+    // disjoint: the normal model versus the albedo model (which also swaps
+    // its material).
+    mut normal_models: Query<
+        (&mut Transform, &mut Mesh3d),
+        (With<PreprocessModel>, Without<AlbedoModel>),
+    >,
     mut albedo_models: Query<
-        (&mut Mesh3d, &mut MeshMaterial3d<StandardMaterial>),
+        (&mut Transform, &mut Mesh3d, &mut MeshMaterial3d<StandardMaterial>),
         With<AlbedoModel>,
     >,
     mut app_exit: MessageWriter<AppExit>,
 ) {
-    if state.captured_albedo.iter().any(|c| c.is_none())
-        || state.captured_normals.iter().any(|c| c.is_none())
-    {
+    if !state.pose_complete() {
         return;
     }
 
-    let name = state.variation().name;
+    // More poses of this variation? Roll to the next one; earlier poses'
+    // captures stay for the compose at the end.
+    if state.pose + 1 < state.poses.len() {
+        state.pose += 1;
+        let pose_transform = state.poses[state.pose].transform;
+        for (mut transform, _) in &mut normal_models {
+            *transform = pose_transform;
+        }
+        for (mut transform, _, _) in &mut albedo_models {
+            *transform = pose_transform;
+        }
+        state.next = 0;
+        state.warmup = RETUNE_WARMUP_FRAMES;
+        return;
+    }
+
+    // Last pose of the variation: compose and save.
+    let name = state.entry().name;
     let path = Path::new(OUTPUT_DIR).join(format!("{name}.png"));
-    let baked = compose_atlas(&state.captured_albedo, &state.captured_normals);
-    for (kind, captured) in [("albedo", &state.captured_albedo), ("normals", &state.captured_normals)] {
+    let baked =
+        compose_atlas(&state.samples, &state.captured_albedo, &state.captured_normals);
+    for (kind, captured) in [
+        ("albedo", &state.captured_albedo),
+        ("normals", &state.captured_normals),
+    ] {
         if let Some(empty) = empty_cells(captured) {
             warn!(
                 "preprocess: {name}: {empty} {kind} cell(s) captured nothing — blank model, missing asset or too little warmup?"
@@ -497,7 +583,12 @@ fn finish_variation(
         }
     }
     match save_atlas(&baked, &path) {
-        Ok(()) => info!("preprocess: wrote {} ({} views)", path.display(), state.samples.len()),
+        Ok(()) => info!(
+            "preprocess: wrote {} ({} poses × {} views)",
+            path.display(),
+            state.poses.len(),
+            state.samples.len()
+        ),
         Err(error) => {
             error!("preprocess: failed to write {}: {error}", path.display());
             app_exit.write(AppExit::error());
@@ -505,38 +596,55 @@ fn finish_variation(
         }
     }
 
-    state.current += 1;
-    if state.current >= state.variations.len() {
-        info!(
-            "preprocess: all {} variation(s) baked in {:.1}s",
-            state.variations.len(),
-            state.started.elapsed().as_secs_f32()
-        );
-        app_exit.write(AppExit::Success);
+    // More variations? Retarget the models at the next one.
+    if state.current + 1 < state.entries.len() {
+        state.current += 1;
+        state.pose = 0;
+        let next = state.entry().clone();
+        let pose_transform = state.poses[0].transform;
+        for mut projection in &mut cameras {
+            *projection = fitted_projection(next.radius);
+        }
+        for (mut transform, mut mesh) in &mut normal_models {
+            *transform = pose_transform;
+            mesh.0 = next.mesh.clone();
+        }
+        for (mut transform, mut mesh, mut material) in &mut albedo_models {
+            *transform = pose_transform;
+            mesh.0 = next.mesh.clone();
+            material.0 = next.albedo.clone();
+        }
+        state.reset_stage();
         return;
     }
 
-    let next = state.variation().clone();
-    for mut projection in &mut cameras {
-        *projection = fitted_projection(next.radius);
-    }
-    for mut mesh in &mut normal_models {
-        mesh.0 = next.mesh.clone();
-    }
-    for (mut mesh, mut material) in &mut albedo_models {
-        mesh.0 = next.mesh.clone();
-        material.0 = next.material.clone();
-    }
-    state.captured_albedo = vec![None; state.samples.len()];
-    state.captured_normals = vec![None; state.samples.len()];
-    state.next = 0;
-    state.warmup = RETUNE_WARMUP_FRAMES;
+    info!(
+        "preprocess: all {} variation(s) baked in {:.1}s",
+        state.entries.len(),
+        state.started.elapsed().as_secs_f32()
+    );
+    app_exit.write(AppExit::Success);
 }
 
-/// Stitches the per-view captures into one atlas-sized RGBA8 image:
-/// albedo cells row-major in the top half, normal cells mirrored through
-/// the texture centre (see the module docs).
-fn compose_atlas(albedo: &[Option<Image>], normals: &[Option<Image>]) -> Image {
+impl PreprocessState {
+    /// Clears the current variation's captures and parks the dispatcher.
+    fn reset_stage(&mut self) {
+        let cells = self.samples.len() * self.poses.len();
+        self.captured_albedo = vec![None; cells];
+        self.captured_normals = vec![None; cells];
+        self.next = 0;
+        self.warmup = RETUNE_WARMUP_FRAMES;
+    }
+}
+
+/// Stitches the per-view captures into one atlas-sized RGBA8 image: each
+/// pose's albedo cells fill a band of the top half, normal cells mirror
+/// them through the texture centre (see the module docs).
+fn compose_atlas(
+    samples: &[ViewSample],
+    albedo: &[Option<Image>],
+    normals: &[Option<Image>],
+) -> Image {
     let mut atlas = Image::new_fill(
         Extent3d {
             width: atlas::ATLAS_SIZE_PX.x,
@@ -549,34 +657,41 @@ fn compose_atlas(albedo: &[Option<Image>], normals: &[Option<Image>]) -> Image {
         RenderAssetUsages::MAIN_WORLD,
     );
     let data = atlas.data.as_mut().expect("new_fill keeps CPU data");
-    for (index, (albedo, normal)) in albedo.iter().zip(normals).enumerate() {
-        if let Some(albedo) = albedo {
-            debug_assert_eq!(
-                (albedo.width(), albedo.height()),
-                (atlas::CELL_SIZE_PX, atlas::CELL_SIZE_PX)
-            );
-            let src = albedo.data.as_deref().expect("captures carry CPU data");
-            atlas::blit_cell(
-                data,
-                atlas::ATLAS_SIZE_PX.x,
-                atlas::albedo_cell(index),
-                atlas::CELL_SIZE_PX,
-                src,
-            );
-        }
-        if let Some(normal) = normal {
-            debug_assert_eq!(
-                (normal.width(), normal.height()),
-                (atlas::CELL_SIZE_PX, atlas::CELL_SIZE_PX)
-            );
-            let src = normal.data.as_deref().expect("captures carry CPU data");
-            atlas::blit_cell(
-                data,
-                atlas::ATLAS_SIZE_PX.x,
-                atlas::normal_cell(index),
-                atlas::CELL_SIZE_PX,
-                src,
-            );
+    for pose in 0..atlas::POSE_COUNT as usize {
+        for (view, (albedo, normal)) in albedo
+            .iter()
+            .skip(pose * samples.len())
+            .zip(normals.iter().skip(pose * samples.len()))
+            .enumerate()
+        {
+            if let Some(albedo) = albedo {
+                debug_assert_eq!(
+                    (albedo.width(), albedo.height()),
+                    (atlas::CELL_SIZE_PX, atlas::CELL_SIZE_PX)
+                );
+                let src = albedo.data.as_deref().expect("captures carry CPU data");
+                atlas::blit_cell(
+                    data,
+                    atlas::ATLAS_SIZE_PX.x,
+                    atlas::albedo_cell(view, pose),
+                    atlas::CELL_SIZE_PX,
+                    src,
+                );
+            }
+            if let Some(normal) = normal {
+                debug_assert_eq!(
+                    (normal.width(), normal.height()),
+                    (atlas::CELL_SIZE_PX, atlas::CELL_SIZE_PX)
+                );
+                let src = normal.data.as_deref().expect("captures carry CPU data");
+                atlas::blit_cell(
+                    data,
+                    atlas::ATLAS_SIZE_PX.x,
+                    atlas::normal_cell(view, pose),
+                    atlas::CELL_SIZE_PX,
+                    src,
+                );
+            }
         }
     }
     atlas

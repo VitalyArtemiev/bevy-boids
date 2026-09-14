@@ -60,6 +60,31 @@ pub struct LaunchConfig {
     pub bloom: bool,
     /// Whether the formation crowd-shell experiment spawns (src/crowd.rs).
     pub crowd: bool,
+    /// Flat-plane scene: skip the erosion demo and obstacles, spawn the
+    /// plain ground mesh (the crowd experiment's stand-in terrain) — used
+    /// by render-path benches so nothing but the boids costs GPU time.
+    pub flat: bool,
+    /// Bench scenario: hold every boid on its full mesh, auto-swap off.
+    /// Mutually exclusive with [`Self::force_billboards`] (last flag wins).
+    pub force_meshes: bool,
+    /// Bench scenario: convert every boid to its impostor billboard once,
+    /// auto-swap off — the manual counterpart of [`Self::force_meshes`],
+    /// so the two paths can be compared at the same camera and scale.
+    pub force_billboards: bool,
+    /// Present without waiting for vblank (`PresentMode::Immediate`), for
+    /// benches on scenes light enough to ride the refresh-rate ceiling —
+    /// a vsync-capped 60 fps comparison says nothing.
+    pub no_vsync: bool,
+    /// Initial sun azimuth, degrees (0 = +X, growing toward +Z — the
+    /// `sun_transform` frame). For reproducible lighting in test shots;
+    /// the F1 sliders still move it live afterwards.
+    pub sun_azimuth_deg: Option<f32>,
+    /// Initial sun elevation above the horizon, degrees.
+    pub sun_elevation_deg: Option<f32>,
+    /// The billboard lab: one forced-billboard boid beside its mesh twin
+    /// up close on the flat plane (implies the `--flat` scene), for
+    /// comparing the two render paths under a moved sun.
+    pub billboard_lab: bool,
     /// Bench-only: pin the camera at this angle from nadir, degrees
     /// (0 = looking straight down). The crowd experiment's design cone is
     /// the upper 30°; this flag makes `--shot` captures reproducible
@@ -89,6 +114,13 @@ impl Default for LaunchConfig {
             environment_map: false,
             bloom: true,
             crowd: false,
+            flat: false,
+            force_meshes: false,
+            force_billboards: false,
+            no_vsync: false,
+            sun_azimuth_deg: None,
+            sun_elevation_deg: None,
+            billboard_lab: false,
             cam_angle_deg: None,
             preprocess: false,
         }
@@ -118,7 +150,8 @@ fn value(
 /// `--focus <x,z>`, `--cam-angle <deg>`,
 /// `--boids <n>`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
 /// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`,
-/// `--bloom|--no-bloom`, `--crowd`, and `--preprocess`. Later flags win.
+/// `--bloom|--no-bloom`, `--crowd`, `--flat`, `--force-meshes`,
+/// `--force-billboards`, `--no-vsync`, and `--preprocess`. Later flags win.
 /// Unrelated arguments are ignored so other tooling can pass through.
 pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
     let mut config = LaunchConfig::default();
@@ -215,6 +248,46 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
             }
             "--crowd" => {
                 config.crowd = true;
+                i += 1;
+            }
+            "--flat" => {
+                config.flat = true;
+                i += 1;
+            }
+            "--force-meshes" => {
+                config.force_meshes = true;
+                config.force_billboards = false;
+                i += 1;
+            }
+            "--force-billboards" => {
+                config.force_billboards = true;
+                config.force_meshes = false;
+                i += 1;
+            }
+            "--no-vsync" => {
+                config.no_vsync = true;
+                i += 1;
+            }
+            "--sun-azimuth" => {
+                let parsed: f32 = value(args, &mut i, flag, inline_value)?
+                    .parse()
+                    .map_err(|_| format!("{flag}: value is not a number"))?;
+                if !parsed.is_finite() || !(0.0..=360.0).contains(&parsed) {
+                    return Err(format!("{flag} must be within 0.0..=360.0, got {parsed}"));
+                }
+                config.sun_azimuth_deg = Some(parsed);
+            }
+            "--sun-elevation" => {
+                let parsed: f32 = value(args, &mut i, flag, inline_value)?
+                    .parse()
+                    .map_err(|_| format!("{flag}: value is not a number"))?;
+                if !parsed.is_finite() || !(0.0..=89.0).contains(&parsed) {
+                    return Err(format!("{flag} must be within 0.0..=89.0, got {parsed}"));
+                }
+                config.sun_elevation_deg = Some(parsed);
+            }
+            "--billboard-lab" => {
+                config.billboard_lab = true;
                 i += 1;
             }
             "--cam-angle" => {
@@ -521,6 +594,35 @@ mod tests {
         assert!(parse_launch_args(&args(&["--cam-angle", "-5"])).is_err());
         assert!(parse_launch_args(&args(&["--cam-angle", "abc"])).is_err());
         assert!(parse_launch_args(&args(&["--cam-angle"])).is_err());
+    }
+
+    #[test]
+    fn render_force_flags_are_mutually_exclusive_last_wins() {
+        assert!(!parse_launch_args(&[]).unwrap().force_meshes);
+        assert!(!parse_launch_args(&[]).unwrap().force_billboards);
+
+        let config = parse_launch_args(&args(&["--force-billboards"])).unwrap();
+        assert!(config.force_billboards && !config.force_meshes);
+
+        // Giving both keeps only the last one.
+        let config =
+            parse_launch_args(&args(&["--force-billboards", "--force-meshes"])).unwrap();
+        assert!(config.force_meshes && !config.force_billboards);
+
+        assert!(parse_launch_args(&args(&["--flat"])).unwrap().flat);
+    }
+
+    #[test]
+    fn sun_and_lab_flags_parse_with_validation() {
+        let config = parse_launch_args(&args(&["--sun-azimuth", "125", "--sun-elevation", "35"]))
+            .unwrap();
+        assert_eq!(config.sun_azimuth_deg, Some(125.0));
+        assert_eq!(config.sun_elevation_deg, Some(35.0));
+
+        assert!(parse_launch_args(&args(&["--sun-azimuth", "400"])).is_err());
+        assert!(parse_launch_args(&args(&["--sun-elevation", "90"])).is_err());
+        assert!(parse_launch_args(&args(&["--sun-azimuth", "abc"])).is_err());
+        assert!(parse_launch_args(&args(&["--billboard-lab"])).unwrap().billboard_lab);
     }
 
     #[test]
