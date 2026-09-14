@@ -38,7 +38,7 @@ fn vertex(v: Vertex) -> bevy_boids::crowd_common::CrowdOut {
 }
 
 @fragment
-fn fragment(in: CrowdOut) -> @location(0) vec4<f32> {
+fn fragment(in: crowd_common::CrowdOut) -> @location(0) vec4<f32> {
     let rd = normalize(in.crowd_position - in.camera_local);
     let ro = in.crowd_position;
     let t = globals.time;
@@ -67,13 +67,16 @@ fn fragment(in: CrowdOut) -> @location(0) vec4<f32> {
     for (var i = 0; i < 5; i = i + 1) {
         let u = (f32(i) + 0.5) / 5.0;
         let p = ro + rd * mix(t0, t1, u);
-        let agitation = exp(-abs(p.z - crowd_common::front_z(p.x, t)) / 5.0);
-        let settle = exp(-p.y / 0.9);
+        let agitation = exp(-abs(p.z - crowd_common::front_z(p.x, t)) / 3.5);
+        let settle = exp(-p.y / 1.3);
         let drift = 0.35 + 0.65 * crowd_common::fbm2(p.xz * 0.09 + wind);
         acc = acc + agitation * settle * drift;
     }
     let density = params.x * acc / 5.0;
-    let alpha = clamp(1.0 - exp(-density * (t1 - t0) * 1.6), 0.0, 0.5);
+    // Capped well below fog: dust is atmosphere. Beyond ~0.65 it starts
+    // desaturating the team colours underneath, which are the mass's most
+    // important distant cue.
+    let alpha = clamp(1.0 - exp(-density * (t1 - t0) * 1.6), 0.0, 0.65);
 
     // Forward scattering: dust on the camera-sun line glows warm.
     let fs = pow(max(dot(rd, sun.xyz), 0.0), 3.0);

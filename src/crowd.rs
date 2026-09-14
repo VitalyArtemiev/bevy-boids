@@ -12,12 +12,17 @@
 //! The shader does the rest: a jittered grid of soldiers (cylinder body +
 //! helmet sphere per cell) lives inside the box, sampled by walking the
 //! view ray through the cells (2-D DDA — exact, because jitter keeps every
-//! body disk inside its cell). A time-varying occupancy field carves the
-//! fluid leading edge, sparse like a skirmish screen up front and solid
-//! behind. Within the top-down 30° cone the trace yields shoulder disks
-//! and helmets from nadir and body-wall silhouettes at the rim, with
-//! periodic armour/spear glints; rays that thread the gaps shade a dark
-//! trampled floor. A translucent dust volume rides each box (`crowd_dust`).
+//! body disk inside its cell). Occupancy is fully static — no soldier ever
+//! pops in or out; the fluid frontline instead moves by WARPING the walk's
+//! z coordinate with the surge (`front_z(x, t) − front_z(x, 0)`), so the
+//! whole column breathes back and forth while keeping its identity. A
+//! sparse skirmish screen leads and solid ranks follow. Within the
+//! top-down 30° cone the trace yields shoulder disks and helmets from
+//! nadir and body-wall silhouettes at the rim, with periodic armour and
+//! spear-tip glints. The box itself is invisible: the material is alpha
+//! masked, and rays that neither hit a soldier nor pass beneath occupied
+//! cells are discarded — only the crowd and its dark shadowed interior
+//! draw. A translucent dust volume rides each box (`crowd_dust`).
 //!
 //! Two armies face off across a gap near the origin so the bench camera
 //! (`--crowd --shot ...`, optionally `--cam-angle <deg from nadir>`)
@@ -40,13 +45,18 @@ use crate::terrain::HeightField;
 /// `DEPTH_M` in `assets/shaders/crowd_common.wgsl`).
 pub const CROWD_LENGTH_M: f32 = 140.0;
 pub const CROWD_DEPTH_M: f32 = 36.0;
-/// Box height: a unit is up to 1.95 m; the rest is helmet/spear headroom
-/// (must exceed the shader's max unit height, or heads clip at the lid).
-pub const CROWD_HEIGHT_M: f32 = 2.5;
-/// Empty ground between the two armies' front edges.
+/// Box height: a unit is up to 1.95 m tall (helmet included); the rest is
+/// headroom for the swell (±0.19 m), which rides the lid. Keep this tight
+/// to the soldiers: the lid must stay above every helmet at every phase,
+/// or heads poke through it and vanish from above.
+pub const CROWD_HEIGHT_M: f32 = 2.3;
+/// Z offset of each army's box origin from the world centre; the second
+/// army is rotated π so local -z (toward its own front) faces the first.
+/// Rendered front lines sit `front_z` ≈ 5 m deeper inside each box.
 const CROWD_GAP_M: f32 = 7.0;
-/// Dust volume height above the crowd box lid.
-const DUST_HEIGHT_M: f32 = 1.8;
+/// Dust volume height above the crowd box lid. Tall enough for the plume
+/// to read as haze hanging over the fight, not a thin skirt on the roof.
+const DUST_HEIGHT_M: f32 = 3.0;
 /// Soldier grid cell — the DDA's march step (matches the default the
 /// shader receives through `CrowdMaterial::sun_spacing.w`).
 const SOLDIER_SPACING_M: f32 = 0.85;
@@ -75,9 +85,9 @@ impl Default for CrowdTuning {
     fn default() -> Self {
         Self {
             density: 1.0,
-            glint_rate_hz: 0.2,
+            glint_rate_hz: 0.5,
             glint_strength: 1.0,
-            dust_density: 1.0,
+            dust_density: 1.6,
         }
     }
 }
@@ -103,6 +113,14 @@ impl Material for CrowdMaterial {
     }
     fn fragment_shader() -> ShaderRef {
         "shaders/crowd.wgsl".into()
+    }
+    // Cutout transparency: the shader discards rays that miss every
+    // soldier and never pass beneath occupied cells, so the box shows
+    // only the crowd and its shadowed interior — bare terrain elsewhere.
+    // Masked (not blended) keeps the crowd in the opaque pass: no sorting
+    // against the dust volume, no depth-write surprises.
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Mask(0.5)
     }
 }
 
@@ -159,7 +177,9 @@ impl Plugin for CrowdPlugin {
                 // `--crowd` runs as an isolated scene (see main.rs): the
                 // default flat HeightField, no erosion demo — so there is
                 // no `rebuild_terrain` to order against.
-                spawn_crowd.run_if(launch_crowd_enabled),
+                spawn_crowd
+                    .run_if(launch_crowd_enabled)
+                    .run_if(crowd_module_loaded),
             )
             .add_systems(
                 Update,
@@ -172,6 +192,13 @@ impl Plugin for CrowdPlugin {
 /// before any crowd pipeline specializes.
 fn load_crowd_module(mut commands: Commands, server: Res<AssetServer>) {
     commands.insert_resource(CrowdCommonShader(server.load("shaders/crowd_common.wgsl")));
+}
+
+/// Run condition for `spawn_crowd`: the shared module must be fully loaded
+/// first. Creating the material earlier races the async load, and a
+/// pipeline that specializes against a missing import silently never draws.
+fn crowd_module_loaded(server: Res<AssetServer>, module: Res<CrowdCommonShader>) -> bool {
+    server.is_loaded_with_dependencies(&module.0)
 }
 
 /// The isolated test scene's stand-in terrain: one matte plane at y = 0
@@ -227,9 +254,9 @@ fn spawn_crowd(
     // (tunic rgb + team seed, yaw, z offset). The second army is the same
     // box rotated to face the first: local -z is "toward the enemy".
     let armies = [
-        (Vec4::new(0.55, 0.14, 0.10, 1.0), 0.0, CROWD_GAP_M / 2.0),
+        (Vec4::new(0.62, 0.12, 0.08, 1.0), 0.0, CROWD_GAP_M / 2.0),
         (
-            Vec4::new(0.16, 0.26, 0.48, 7.3),
+            Vec4::new(0.10, 0.22, 0.68, 7.3),
             std::f32::consts::PI,
             -CROWD_GAP_M / 2.0,
         ),
@@ -237,7 +264,6 @@ fn spawn_crowd(
     for (team, yaw, z) in armies {
         let rotation = Quat::from_rotation_y(yaw);
         let seat = seat_height(&field, rotation, z);
-        info!("crowd: spawning army team={team:?} seat={seat} z={z}");
         // Lighting runs in local space, so the sun rotates with the box.
         let sun_local = rotation.inverse() * sun_world;
 

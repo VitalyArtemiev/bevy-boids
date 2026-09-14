@@ -54,6 +54,25 @@ memory, grep `src/` for it and copy the in-repo spelling. If the codebase is
 silent, check `references/bevy-019-idioms.md` (read it before writing new
 Bevy code), and verify against the 0.19 docs rather than guessing.
 
+Custom material shaders (the `crowd.rs` / wgsl stack) have two silent
+failure modes that cost a full debugging session each:
+
+- A custom wgsl module (`#define_import_path bevy_boids::foo`) is only
+  visible to `#import bevy_boids::foo` if the module's `.wgsl` is actually
+  a *loaded* asset — nothing references it by path, so it must be
+  preloaded (`CrowdCommonShader` + the `crowd_module_loaded` spawn gate in
+  `crowd.rs`; the deleted terrain render module needed the same resource).
+  Otherwise the pipeline silently never specializes: nothing draws, no
+  error is logged.
+- naga-oil shader errors DO get logged by `pipeline_cache` as
+  `failed to process shader error:` — but the message spans two lines, so
+  grepping logs for `error|naga` with `head` can hide it behind cargo
+  warnings. Grep for `failed to process` specifically, or run with
+  `RUST_LOG` trace. The classic trigger: a type imported from a module
+  must be fully qualified in *every* signature (`fn fragment(in:
+  crowd_common::CrowdOut)`, not bare `CrowdOut` — WGSL has no type
+  aliases and no implicit module-name resolution).
+
 ## Hard constraints — breaking these breaks the build or CI
 
 1. **Bevy 0.19 + Rust nightly, both pinned.** Nightly is required:
@@ -125,15 +144,20 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   timings (`cargo test --release nearest_solver`).
 - Bench: `cargo run -- --bench` (plays 30 s with no main menu, camera
   pinned at zoom 0.99 ≈ 302 m, logs FPS on exit). Bench-only values:
-  `--secs N`, `--zoom 0..1`, `--shot <path>` (captures one screenshot
+  `--secs N`, `--zoom 0..1`, `--cam-angle <deg>` (pin the view angle from
+  nadir, 0 = straight down — default dynamic angle swings to 72° at high
+  zoom, outside the crowd experiment's 30° design cone),
+  `--shot <path>` (captures one screenshot
   near the end of the run via the renderer's own readback — visual
   verification that needs no desktop capture tooling and works on
   occluded/locked Wayland sessions, where compositor throttling makes
   the FPS number meaningless). Scenario flags work with or without `--bench`:
   `--boids N`, `--zoom-sweep low:high` (oscillate zoom, exercising LOD churn), `--shadows|--no-shadows`, `--terrain|--no-terrain`,
   `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map` (implies
-  atmosphere), `--bloom|--no-bloom`. Atmosphere is off by default (see
-  `sky.rs`).
+  atmosphere), `--bloom|--no-bloom`, `--crowd` (isolated crowd-shell
+  experiment scene: flat ground plane replaces the erosion terrain, no
+  obstacles — pair with `--cam-angle`/`--shot` to verify the shader).
+  Atmosphere is off by default (see `sky.rs`).
 - Chrome trace of the bench (low-overhead: the full unfiltered trace drops
   the run to ~8 FPS):
   `RUST_LOG='warn,bevy_boids=trace,bevy_ecs::system::function_system=trace,bevy_ecs::schedule=trace,bevy_app=trace,bevy_render=trace,bevy_time=trace' TRACE_CHROME=trace.json cargo run --features chrome -- --bench --secs 5`
@@ -157,11 +181,12 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
 | `main.rs` | App assembly, all schedules, `setup` (boids/obstacles/camera/ground; the sun/sky lives in `sky.rs`) |
 | `input.rs` | `InputPlugin`: the single `PlayerContext` enhanced-input context with all gameplay actions (`Select`, `Frontage`, quick groups 1-6, `Pause`, panel toggles), `ActionId` identity + defaults, `BindingsSettings` persistence (bevy-settings), rebind logic (`rebind`/`replace_binding` — `Binding` is immutable, so rebinds despawn/respawn binding entities) and the Key Bindings window (capture next press, conflict swap, reset). Poll helpers: `started`/`fired`/`completed` over `Query<(&ActionTag, &TriggerState, &ActionEvents)>` |
 | `radial.rs` | `RadialPlugin`: radial context menu. RMB *click* (press+release within `CLICK_TOLERANCE_PX`, with a selection) opens `RadialMenu` (resource presence = state; `radial_closed` gates gameplay input systems while open). egui painter wedges, hover navigation, sub-rings exclude the parent-direction wedge (that gap + the inner hole = back). Commands: Walk (keep formation / reform into 4-wide Grid column then restore via `Reform{kind, columns}` orders) and Run (`Target::speed_scale` walk 0.5 / run 1.0) |
-| `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`, `--preprocess`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
+| `launch.rs` | `LaunchConfig` + short CLI flags (`--bench`, `--secs`, `--zoom`, `--cam-angle`, `--boids`, `--shadows`, `--terrain`, `--atmosphere`, `--env-map`, `--bloom`, `--crowd`, `--preprocess`); `BenchPlugin` skips the main menu, pins camera zoom, disables camera input, exits after a duration and logs FPS |
+| `crowd.rs` | `CrowdPlugin` — the formation crowd-shell experiment (`--crowd`, isolated scene: flat ground plane replaces the erosion terrain): a whole massed formation rendered as one deformable box plus a procedural crowd shader instead of one draw per unit. `crowd_box` builds the subdivided bounding-volume box (unit height + swell headroom, 2 m vertex grid for CPU deformation later; the experiment deforms it in the vertex stage via `swell_y`). The fragment shader walks the view ray through a jittered soldier grid (cylinder body + helmet sphere per cell — exact per-cell tests because jitter keeps every disk inside its cell), warping z by the frontline surge so the whole column breathes without any soldier popping in or out (occupancy rolls are static). It shades helmet/shoulder disks from nadir, body-wall silhouettes at the cone rim, and periodic armour/spear glints (a per-soldier emissive flash carries the shimmer — pure specular can't fire from nadir); rays beneath occupied cells shade dark crowd shadow, and every other ray is discarded — the material is alpha masked, so the box is invisible against the terrain. `CrowdDustMaterial` rides a taller translucent box above each crowd. Two opposing armies face off near the origin. Shaders: `assets/shaders/crowd.wgsl` + `crowd_dust.wgsl` over shared `crowd_common.wgsl`. `CrowdTuning` (F1) pushes density/glint/dust into the material uniforms |
 | `preprocess/` | The `--preprocess` far-LOD impostor baker (standalone app, never added to the game). `atlas.rs` — pure layout: views sampled as concentric rings inside `MAX_ANGLE_FROM_VERTICAL` (30°) from nadir (nadir + rings at 10°/20°/30° with 8/16/24 azimuth slots; `view_index` is the runtime's (polar, azimuth) → index lookup; boid yaw folds into view azimuth because models are upright — no separate yaw axis). Packing: albedo cells fill the top half flat row-major, normal cells sit at the whole-texture 180° rotation (`nuv = 1 - uv` pairs them), 7×14 cells for the current counts = zero waste — a test pins the exact fit. `mod.rs` — the bake: two co-located orthographic cameras (fitted to the bounding sphere) on separate render layers render the model unlit (`unlit: true` — baked lighting would lie at folded yaw) and with `NormalMaterial` (custom wgsl in `assets/shaders/impostor_normal.wgsl` outputting view-space normals, stored sRGB-encoded — decode `n = 2v - 1`); `Screenshot::image` captures both targets per view (probes repeat until non-blank on BOTH pipelines, since compile time outlasts any fixed warmup), strictly serialised dispatch pairs captures with cells, composited into `assets/impostors/<variation>.png`. New model variations = an entry in `variations()` |
 | `boid.rs` | `Boid`, `BoidBundle`, separation (`soft_collisions`), walls (`hard_collisions`), `bob`, `BoidTuning` |
-| `kinematics.rs` | `Velocity { v, a, push, target_v }`, tuning consts + `KinematicsTuning`, `move_step` integrator, `NNTree`/`TrackedByTree` |
-| `target.rs` | `Target { pos, dir, speed_scale }` (scale multiplies the tuning velocity cap — Walk/Run), `follow_target` steering |
+| `kinematics.rs` | `Velocity { v, a, push, target_v, slope, slope_col }` (slope = cached uphill gradient, resampled per metre column), tuning consts + `KinematicsTuning`, `arrival_plan` (arrival-damped, misalignment-slowed preferred velocity — the anti-orbit fix), slope-aware `move_step` (downhill gravity, uphill thrust loss, downhill cap relaxation; sheds cap excess with bounded decel, never snaps), `NNTree`/`TrackedByTree` |
+| `target.rs` | `Target { pos, dir, speed_scale }` (scale multiplies the tuning velocity cap — Walk/Run), `follow_target` desired-velocity steering (brakes toward the preferred velocity; see `kinematics::arrival_plan`) |
 | `formations.rs` | `Formation`, `FormationKind` (Line/Column/Grid/Wedge/Ring), `FormationSlot`, relationship components, `FormationOrder` queue, `SlotsStale`/`FormationGoal` message components, the chained executor pipeline (`transition_formation_orders`, `plan_formation_goals`, `dispatch_formation_goals`), Morton-order slot assignment, LOD, `FormationTuning`, most tests |
 | `player.rs` | Selection state, drag-select, frontage designation, quick groups, selection gizmos, component hooks, `height_scaled_zoom` (constant-ratio wheel steps: `max(h × 0.125, 0.5 m)` per notch × the Options zoom-speed multiplier; easing into max zoom; tuned by feel, half the original 0.25 ratio). The crate's own zoom MUST stay neutralized (`zoom_sensitivity: 0`, see `apply_options`) — its constant-units step (7.5 km/notch) stacks on top of ours and dominates near the ground |
 | `sky.rs` | `SkyPlugin`: directional sun + opt-in atmosphere (`Atmosphere`, `ScatteringMedium`, `SunDisk`, `Bloom`), `SkyTuning` + live `update_sun`, 128 px env-map default (atmosphere stays off because Bevy 0.19 refilters it every frame; upstream #24522/#24738 track the fix/lower default); `sun_transform` + `flat_ambient` helpers with unit tests, shared with the impostor preprocessor |
@@ -289,9 +314,13 @@ Bevy code), and verify against the 0.19 docs rather than guessing.
   into a system each frame; propose that before adding it.
 - **Movement model**: steering writes `vel.a` / `vel.target_v`
   (`follow_target`, `soft_collisions`); `move_step` integrates
-  semi-implicit-Euler and clamps. Never teleport entities from steering
-  code; the intentional exceptions (formation origin snapping to center of
-  mass, `bob` animating y) are marked by their comments.
+  semi-implicit-Euler with slope physics (gravity along the terrain,
+  slope-scaled thrust and speed cap) and clamps — the steering cap sheds
+  excess speed with bounded deceleration, never a snap. Never teleport
+  entities from steering code; the intentional exceptions (formation origin
+  snapping to center of mass, `bob` animating y) are marked by their
+  comments. Planned successor for `soft_collisions`/`hard_collisions`: the
+  PBD crowd-solver stages in `docs/pbd-anticipation.md`.
 
 ## Testing conventions
 
