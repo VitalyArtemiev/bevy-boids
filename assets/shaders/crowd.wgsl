@@ -26,7 +26,7 @@
 // Team colour (rgb) + per-team hash seed.
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> team: vec4<f32>;
 // x: occupancy density scale, y: glint rate (rad/s), z: glint strength,
-// w: box height the trace clips to.
+// w: unused (the trace y range moved to crowd_common::terrain_c.zw with terrain follow).
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> params: vec4<f32>;
 // xyz: direction TO the sun in local space, w: soldier spacing (m).
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> sun_spacing: vec4<f32>;
@@ -35,13 +35,18 @@
 fn vertex(v: Vertex) -> bevy_boids::crowd_common::CrowdOut {
     let world_from_local = mesh_functions::get_world_from_local(v.instance_index);
     var local = v.position;
-    local.y += crowd_common::swell_y(local.xz, globals.time);
+    // The box deforms to ride the terrain (plus the swell); the same
+    // displacement is re-derived per fragment for the ray anchor, so the
+    // two agree to within the heightmap's texel resolution.
+    local.y += crowd_common::terrain_h_rel(local.xz)
+        + crowd_common::swell_y(local.xz, globals.time);
     let world = mesh_functions::mesh_position_local_to_world(
         world_from_local,
         vec4<f32>(local, 1.0),
     );
     // Rigid (rotation + translation) inverse: rotate the camera into local
-    // space with the transposed basis. Entity transforms here are rigid.
+    // space with the transposed basis. Entity transforms here are rigid —
+    // the crowd is anchored to the box's local frame and follows it.
     let basis = maths::mat4x4_to_mat3x3(world_from_local);
     let cam_local = transpose(basis) * (view.world_position - world_from_local[3].xyz);
 
@@ -71,7 +76,8 @@ struct FieldParams {
     density: f32,
     glint_rate: f32,
     glint_strength: f32,
-    height: f32, // box height the trace clips to
+    y_min: f32, // local y range the trace clips to — low enough for the
+    y_max: f32, // lowest ground and high enough for the highest ground
     sun_l: vec3<f32>, // direction TO the sun, local space
 };
 
@@ -121,7 +127,10 @@ fn make_soldier(cell: vec2<i32>, fp: FieldParams, t: f32) -> Soldier {
     s.height = mix(1.55, 1.95, h.x);
     s.base = vec3<f32>(
         c.x + jitter.x + 0.05 * sin(t * 1.1 + phase_ang),
-        crowd_common::swell_y(c, t) + 0.03 * sin(t * 2.2 + s.phase * 12.566),
+        // Feet ride the terrain (height relative to the box's seat) under
+        // the cell, plus the swell and a small step-bob on top.
+        crowd_common::terrain_h_rel(c) + crowd_common::swell_y(c, t)
+            + 0.03 * sin(t * 2.2 + s.phase * 12.566),
         c.y + jitter.y + 0.05 * cos(t * 0.9 + phase_ang),
     );
     // Helmet smaller than the shoulders: from above the team-coloured
@@ -276,9 +285,11 @@ fn crowd_trace(ro: vec3<f32>, rd: vec3<f32>, t: f32, fp: FieldParams) -> Trace {
         return best;
     }
 
-    // Clip to the box, with swell headroom in y.
-    let box_min = vec3<f32>(-crowd_common::LEN_M / 2.0, -crowd_common::FLOOR_PAD_M, 0.0);
-    let box_max = vec3<f32>(crowd_common::LEN_M / 2.0, fp.height + crowd_common::FLOOR_PAD_M, crowd_common::DEPTH_M);
+    // Clip to the box. The y range spans the terrain rise across the
+    // footprint plus the box height (uniforms, computed on the CPU from
+    // the heightfield), so sloped ground stays inside the trace.
+    let box_min = vec3<f32>(-crowd_common::LEN_M / 2.0, fp.y_min, 0.0);
+    let box_max = vec3<f32>(crowd_common::LEN_M / 2.0, fp.y_max, crowd_common::DEPTH_M);
     var t0 = 0.0;
     var t1 = 1e9;
     for (var i = 0; i < 3; i = i + 1) {
@@ -361,23 +372,31 @@ fn crowd_trace(ro: vec3<f32>, rd: vec3<f32>, t: f32, fp: FieldParams) -> Trace {
         }
     }
 
-    let t_floor = clamp((0.0 - ro.y) / rd.y, t0, t1);
+    // Exit through the terrain under the ray (approximate — exit_xz only
+    // feeds the shadow floor's hash mottling).
+    let t_floor = clamp((crowd_common::terrain_h_rel(ro.xz) - ro.y) / rd.y, t0, t1);
     best.exit_xz = (ro + rd * t_floor).xz;
     return best;
 }
 
 @fragment
 fn fragment(in: crowd_common::CrowdOut) -> @location(0) vec4<f32> {
-    let rd = normalize(in.crowd_position - in.camera_local);
+    // Re-derive the same displacement the vertex stage applied, so the
+    // ray anchors on the rendered (terrain-riding) surface.
+    let lift = crowd_common::terrain_h_rel(in.crowd_position.xz)
+        + crowd_common::swell_y(in.crowd_position.xz, globals.time);
+    let ro = in.crowd_position + vec3<f32>(0.0, lift, 0.0);
+    let rd = normalize(ro - in.camera_local);
     var fp: FieldParams;
     fp.spacing = sun_spacing.w;
     fp.team_seed = team.w;
     fp.density = params.x;
     fp.glint_rate = params.y;
     fp.glint_strength = params.z;
-    fp.height = params.w;
+    fp.y_min = crowd_common::terrain_c.z;
+    fp.y_max = crowd_common::terrain_c.w;
     fp.sun_l = sun_spacing.xyz;
-    let tr = crowd_trace(in.crowd_position, rd, globals.time, fp);
+    let tr = crowd_trace(ro, rd, globals.time, fp);
 
     // The box itself is invisible: rays that neither hit a soldier nor
     // passed beneath occupied cells fall through to the real terrain.

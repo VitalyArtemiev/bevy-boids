@@ -34,7 +34,9 @@ use bevy::pbr::{Material, MaterialPlugin, MeshMaterial3d};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::mesh::{Indices, Mesh};
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, TextureDimension, TextureFormat,
+};
 use bevy::shader::ShaderRef;
 
 use crate::launch::launch_crowd_enabled;
@@ -54,9 +56,12 @@ pub const CROWD_HEIGHT_M: f32 = 2.3;
 /// army is rotated π so local -z (toward its own front) faces the first.
 /// Rendered front lines sit `front_z` ≈ 5 m deeper inside each box.
 const CROWD_GAP_M: f32 = 7.0;
-/// Dust volume height above the crowd box lid. Tall enough for the plume
+/// Dust volume height above the local ground. Tall enough for the plume
 /// to read as haze hanging over the fight, not a thin skirt on the roof.
 const DUST_HEIGHT_M: f32 = 3.0;
+/// Dust volume's floor above the local ground: the plume hangs over the
+/// fight instead of wrapping the soldiers' legs.
+const DUST_BASE_M: f32 = 1.0;
 /// Soldier grid cell — the DDA's march step (matches the default the
 /// shader receives through `CrowdMaterial::sun_spacing.w`).
 const SOLDIER_SPACING_M: f32 = 0.85;
@@ -66,6 +71,23 @@ const VERTEX_STEP_M: f32 = 2.0;
 const SIDE_Y_STEP_M: f32 = 1.2;
 /// Side of the isolated scene's ground plane.
 const TEST_GROUND_M: f32 = 800.0;
+/// How far below the highest soldier the trace box's floor reaches
+/// (mirrors the headroom the WGSL used to hard-code).
+const TRACE_Y_PAD_M: f32 = 0.7;
+/// Terrain heightmap side, in metres and texels (≈0.47 m/texel — coarse,
+/// but the heightfield is low-frequency by design).
+const HEIGHT_MAP_SPAN_M: f32 = 240.0;
+const HEIGHT_MAP_RES: u32 = 512;
+
+/// Rolling test hills for the isolated `--crowd` scene: gentle enough to
+/// march armies across (worst grade ~3%), steep enough to exercise
+/// terrain following. The ground mesh, the HeightField and the crowd
+/// heightmap all come from this one function, so grounding, camera and
+/// crowd agree by construction.
+pub fn crowd_test_height(x: f32, z: f32) -> f32 {
+    4.0 * (x * 0.008).sin() * (z * 0.0075).cos()
+        + 2.0 * (x * 0.019 + 1.3).sin() * (z * 0.016 + 0.7).sin()
+}
 
 /// Runtime-tunable crowd look; exposed as sliders by the debug UI and
 /// pushed into the material uniforms by [`sync_crowd_tuning`].
@@ -93,18 +115,32 @@ impl Default for CrowdTuning {
 }
 
 /// The opaque formation crowd. Uniform layout mirrors the declarations
-/// at the top of `assets/shaders/crowd.wgsl`.
+/// at the top of `assets/shaders/crowd.wgsl`; bindings 3-6 (terrain) are
+/// shared with `CrowdDustMaterial` and declared in `crowd_common.wgsl`.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct CrowdMaterial {
     /// rgb: team tunic colour; w: per-team hash seed.
     #[uniform(0)]
     pub team: Vec4,
-    /// x: density, y: glint rate (rad/s), z: glint strength, w: box height.
+    /// x: density, y: glint rate (rad/s), z: glint strength, w: unused.
     #[uniform(1)]
     pub params: Vec4,
     /// xyz: direction TO the sun in the box's local space, w: spacing (m).
     #[uniform(2)]
     pub sun_spacing: Vec4,
+    /// Battlefield heightmap (R8Unorm over `HEIGHT_MAP_SPAN_M`), decoded
+    /// with `terrain_c.xy`.
+    #[texture(3)]
+    pub height_map: Handle<Image>,
+    /// (origin.x, origin.z, sin(yaw), cos(yaw)) — box-local xz → world.
+    #[uniform(4)]
+    pub terrain_a: Vec4,
+    /// (map_min.x, map_min.z, 1/map_span, seat) — world xz → heightmap.
+    #[uniform(5)]
+    pub terrain_b: Vec4,
+    /// (h_min, h_max, trace_y_min, trace_y_max), all box-local.
+    #[uniform(6)]
+    pub terrain_c: Vec4,
 }
 
 impl Material for CrowdMaterial {
@@ -124,7 +160,8 @@ impl Material for CrowdMaterial {
     }
 }
 
-/// The translucent dust volume above a crowd box.
+/// The translucent dust volume above a crowd box. Bindings 3-6 match
+/// `CrowdMaterial` — both shaders import the terrain module.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct CrowdDustMaterial {
     /// x: density, y: box height (m), z/w: unused.
@@ -133,6 +170,15 @@ pub struct CrowdDustMaterial {
     /// xyz: direction TO the sun in local space.
     #[uniform(1)]
     pub sun: Vec4,
+    /// See `CrowdMaterial` — same battlefield heightmap.
+    #[texture(3)]
+    pub height_map: Handle<Image>,
+    #[uniform(4)]
+    pub terrain_a: Vec4,
+    #[uniform(5)]
+    pub terrain_b: Vec4,
+    #[uniform(6)]
+    pub terrain_c: Vec4,
 }
 
 impl Material for CrowdDustMaterial {
@@ -201,19 +247,55 @@ fn crowd_module_loaded(server: Res<AssetServer>, module: Res<CrowdCommonShader>)
     server.is_loaded_with_dependencies(&module.0)
 }
 
-/// The isolated test scene's stand-in terrain: one matte plane at y = 0
-/// over the flat default HeightField, so the experiment renders against a
-/// clean ground instead of the erosion demo's gullies (main.rs skips the
-/// erosion plugin entirely while `--crowd` is set).
+/// The isolated test scene's stand-in terrain: a gently rolling grid mesh
+/// and a HeightField from the same [`crowd_test_height`], so the crowd's
+/// boxes have real slopes to ride (main.rs skips the erosion demo
+/// entirely while `--crowd` is set).
 pub fn spawn_crowd_ground(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut field: ResMut<HeightField>,
 ) {
+    let quads = 128;
+    let step = TEST_GROUND_M / quads as f32;
+    let half = TEST_GROUND_M / 2.0;
+    let eps = step;
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    for iz in 0..=quads {
+        for ix in 0..=quads {
+            let x = -half + ix as f32 * step;
+            let z = -half + iz as f32 * step;
+            positions.push([x, crowd_test_height(x, z), z]);
+            // Central-difference normal of the height function.
+            let dx = (crowd_test_height(x + eps, z) - crowd_test_height(x - eps, z))
+                / (2.0 * eps);
+            let dz = (crowd_test_height(x, z + eps) - crowd_test_height(x, z - eps))
+                / (2.0 * eps);
+            normals.push(Vec3::new(-dx, 1.0, -dz).normalize().to_array());
+            let v = iz * (quads + 1) + ix;
+            if ix < quads && iz < quads {
+                // Winding so faces point up.
+                indices.extend_from_slice(&[v, v + quads + 1, v + 1]);
+                indices.extend_from_slice(&[v + 1, v + quads + 1, v + quads + 2]);
+            }
+        }
+    }
+    let mut mesh = Mesh::new(
+        bevy::render::render_resource::PrimitiveTopology::TriangleList,
+        Default::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_indices(Indices::U32(indices));
+    // Grounding, camera focus and the crowd heightmap sample this exact
+    // function, so everything agrees with the rendered mesh.
+    *field = HeightField::from_fn(crowd_test_height);
+
     commands.spawn((
-        Mesh3d(meshes.add(
-            Plane3d::default().mesh().size(TEST_GROUND_M, TEST_GROUND_M),
-        )),
+        Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.40, 0.42, 0.31),
             ..default()
@@ -222,12 +304,51 @@ pub fn spawn_crowd_ground(
     ));
 }
 
+/// Bakes the battlefield heights into an R8Unorm heightmap texture for
+/// the crowd shaders (they cannot call the CPU `HeightField`). The decode
+/// range `(min, max)` rides to the GPU in `terrain_c.xy`.
+fn bake_height_map(images: &mut Assets<Image>, field: &HeightField) -> (Handle<Image>, f32, f32) {
+    let mut min = f32::MAX;
+    let mut max = f32::MIN;
+    let mut heights = Vec::with_capacity((HEIGHT_MAP_RES * HEIGHT_MAP_RES) as usize);
+    for iz in 0..HEIGHT_MAP_RES {
+        for ix in 0..HEIGHT_MAP_RES {
+            let x = -HEIGHT_MAP_SPAN_M / 2.0 + (ix as f32 + 0.5) / HEIGHT_MAP_RES as f32
+                * HEIGHT_MAP_SPAN_M;
+            let z = -HEIGHT_MAP_SPAN_M / 2.0 + (iz as f32 + 0.5) / HEIGHT_MAP_RES as f32
+                * HEIGHT_MAP_SPAN_M;
+            let h = field.height(x, z);
+            min = min.min(h);
+            max = max.max(h);
+            heights.push(h);
+        }
+    }
+    let range = (max - min).max(1e-3);
+    let data = heights
+        .iter()
+        .map(|h| (((h - min) / range).clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect::<Vec<u8>>();
+    let image = Image::new_fill(
+        Extent3d {
+            width: HEIGHT_MAP_RES,
+            height: HEIGHT_MAP_RES,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &data,
+        TextureFormat::R8Unorm,
+        Default::default(),
+    );
+    (images.add(image), min, max)
+}
+
 /// Spawns the two opposing armies and their dust volumes, seated on the
 /// terrain. Runs once (the `Local` guard) on the first frame the launch
 /// flag allows; entities stay put afterwards.
 fn spawn_crowd(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut crowd_materials: ResMut<Assets<CrowdMaterial>>,
     mut dust_materials: ResMut<Assets<CrowdDustMaterial>>,
     field: Res<HeightField>,
@@ -246,7 +367,15 @@ fn spawn_crowd(
         0.0,
         CROWD_HEIGHT_M,
     ));
-    let dust_mesh = meshes.add(crowd_box(CROWD_LENGTH_M, CROWD_DEPTH_M, 0.0, DUST_HEIGHT_M));
+    // Dust floats one metre above the local ground so the plume hangs
+    // over the fight rather than wrapping the soldiers' legs.
+    let dust_mesh = meshes.add(crowd_box(
+        CROWD_LENGTH_M,
+        CROWD_DEPTH_M,
+        DUST_BASE_M,
+        DUST_BASE_M + DUST_HEIGHT_M,
+    ));
+    let (height_map, h_min, h_max) = bake_height_map(&mut images, &field);
     let sun_world = sun_transform(sky.sun_elevation_deg, sky.sun_azimuth_deg)
         .translation
         .normalize();
@@ -263,9 +392,12 @@ fn spawn_crowd(
     ];
     for (team, yaw, z) in armies {
         let rotation = Quat::from_rotation_y(yaw);
-        let seat = seat_height(&field, rotation, z);
+        let (min_h, max_h) = footprint_y_range(&field, rotation, z);
+        // Sit slightly buried: hiding beats floating.
+        let seat = min_h + 0.05;
         // Lighting runs in local space, so the sun rotates with the box.
         let sun_local = rotation.inverse() * sun_world;
+        let (terrain_a, terrain_b, terrain_c) = terrain_uniforms(yaw, z, seat, min_h, max_h);
 
         commands.spawn((
             Mesh3d(crowd_mesh.clone()),
@@ -275,9 +407,13 @@ fn spawn_crowd(
                     tuning.density,
                     tuning.glint_rate_hz * std::f32::consts::TAU,
                     tuning.glint_strength,
-                    CROWD_HEIGHT_M,
+                    0.0,
                 ),
                 sun_spacing: Vec4::new(sun_local.x, sun_local.y, sun_local.z, SOLDIER_SPACING_M),
+                height_map: height_map.clone(),
+                terrain_a,
+                terrain_b,
+                terrain_c,
             })),
             Transform::from_xyz(0.0, seat, z).with_rotation(rotation),
             // The crowd's own shading handles self-occlusion; a lid-less
@@ -290,19 +426,53 @@ fn spawn_crowd(
             MeshMaterial3d(dust_materials.add(CrowdDustMaterial {
                 params: Vec4::new(tuning.dust_density, DUST_HEIGHT_M, 0.0, 0.0),
                 sun: Vec4::new(sun_local.x, sun_local.y, sun_local.z, 0.0),
+                height_map: height_map.clone(),
+                terrain_a,
+                terrain_b,
+                terrain_c,
             })),
-            Transform::from_xyz(0.0, seat + CROWD_HEIGHT_M, z).with_rotation(rotation),
+            Transform::from_xyz(0.0, seat, z).with_rotation(rotation),
             NotShadowCaster,
             CrowdDust,
         ));
     }
 }
 
-/// Ground height to seat a box at: the minimum over a coarse sample of
-/// its rotated footprint plus a hair — burying beats floating.
-fn seat_height(field: &HeightField, rotation: Quat, z_offset: f32) -> f32 {
+/// The terrain uniforms shared by both crowd materials: (origin.x,
+/// origin.z, sin(yaw), cos(yaw)), the heightmap window plus this army's
+/// seat, and the height decode range plus the trace's local y range.
+fn terrain_uniforms(
+    yaw: f32,
+    z_offset: f32,
+    seat: f32,
+    min_h: f32,
+    max_h: f32,
+) -> (Vec4, Vec4, Vec4) {
+    (
+        Vec4::new(0.0, z_offset, yaw.sin(), yaw.cos()),
+        Vec4::new(
+            -HEIGHT_MAP_SPAN_M / 2.0,
+            -HEIGHT_MAP_SPAN_M / 2.0,
+            1.0 / HEIGHT_MAP_SPAN_M,
+            seat,
+        ),
+        Vec4::new(
+            min_h,
+            max_h,
+            (min_h - seat) - TRACE_Y_PAD_M,
+            (max_h - min_h) + CROWD_HEIGHT_M + TRACE_Y_PAD_M,
+        ),
+    )
+}
+
+/// Local y range a box's trace must cover on this ground: heights run
+/// from the footprint's lowest sample (the seat, minus a hair of burial)
+/// to its highest plus the box height. Returned as `(min_h, max_h)` in
+/// world y; [`terrain_uniforms`] converts to box-local.
+fn footprint_y_range(field: &HeightField, rotation: Quat, z_offset: f32) -> (f32, f32) {
     let half = CROWD_LENGTH_M / 2.0;
     let mut lowest = f32::MAX;
+    let mut highest = f32::MIN;
     for ix in 0..=8usize {
         for iz in 0..=4usize {
             let local = Vec3::new(
@@ -311,10 +481,12 @@ fn seat_height(field: &HeightField, rotation: Quat, z_offset: f32) -> f32 {
                 CROWD_DEPTH_M * iz as f32 / 4.0,
             );
             let world = rotation * local + Vec3::new(0.0, 0.0, z_offset);
-            lowest = lowest.min(field.height(world.x, world.z));
+            let h = field.height(world.x, world.z);
+            lowest = lowest.min(h);
+            highest = highest.max(h);
         }
     }
-    lowest + 0.05
+    (lowest, highest)
 }
 
 /// Pushes [`CrowdTuning`] edits into the live material instances.
@@ -526,15 +698,17 @@ mod tests {
     }
 
     #[test]
-    fn seating_takes_the_lowest_sampled_ground() {
+    fn footprint_y_range_spans_the_ground_under_the_box() {
         let flat = HeightField::from_fn(|_, _| 0.0);
-        assert!((seat_height(&flat, Quat::IDENTITY, 10.0) - 0.05).abs() < 1e-4);
+        let (min, max) = footprint_y_range(&flat, Quat::IDENTITY, 10.0);
+        assert!((min - 0.0).abs() < 1e-4 && (max - 0.0).abs() < 1e-4);
 
-        // A slope rising with z: the seat must sit at the low (-z) edge of
-        // the rotated footprint, not under the entity centre.
+        // A slope rising with z: the range must cover the whole rotated
+        // footprint, not just under the entity centre.
         let slope = HeightField::from_fn(|_, z| z);
-        let seat = seat_height(&slope, Quat::from_rotation_y(std::f32::consts::PI), 5.0);
-        // Rotated π, the footprint spans world z ∈ [5 - 36, 5].
-        assert!((seat - (5.0 - CROWD_DEPTH_M) - 0.05).abs() < 1e-4);
+        let (min, max) = footprint_y_range(&slope, Quat::from_rotation_y(std::f32::consts::PI), 5.0);
+        // Rotated π, the footprint spans world z ∈ [5 − 36, 5].
+        assert!((min - (5.0 - CROWD_DEPTH_M)).abs() < 1e-4);
+        assert!((max - 5.0).abs() < 1e-4);
     }
 }

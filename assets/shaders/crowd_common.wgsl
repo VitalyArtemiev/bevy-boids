@@ -106,3 +106,36 @@ fn row_density(depth_rows: f32) -> f32 {
 fn cell_center(cell: vec2<i32>, spacing: f32) -> vec2<f32> {
     return vec2<f32>((f32(cell.x) + 0.5) * spacing - LEN_M / 2.0, (f32(cell.y) + 0.5) * spacing);
 }
+
+// --- terrain ------------------------------------------------------------------
+// Both crowd materials bind the SAME layout here (3-6): a heightmap over
+// the battlefield plus the mapping from box-local space onto it. Soldiers,
+// the lid, and the fragment ray anchors all ride `terrain_h_rel`, so the
+// crowd deforms with uneven ground while every intersection test stays in
+// the box's local frame.
+//
+// terrain_a: (origin.x, origin.z, sin(yaw), cos(yaw)) — local xz → world xz
+// terrain_b: (map_min.x, map_min.z, 1/map_span, seat) — world xz → texel
+//            box, and the seat height h_rel is measured from
+// terrain_c: (h_min, h_max, trace_y_min, trace_y_max) — height decode and
+//            the local y range the trace clips to
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var height_map: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> terrain_a: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var<uniform> terrain_b: vec4<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var<uniform> terrain_c: vec4<f32>;
+
+// Terrain height under a box-local point, relative to the box's seat
+// (translation.y). Nearest-texel: the map is fine enough that linear
+// filtering is not worth the sampler binding.
+fn terrain_h_rel(local_xz: vec2<f32>) -> f32 {
+    let world_x = terrain_a.x + terrain_a.w * local_xz.x - terrain_a.z * local_xz.y;
+    let world_z = terrain_a.y + terrain_a.z * local_xz.x + terrain_a.w * local_xz.y;
+    let uv = vec2<f32>(world_x, world_z) - terrain_b.xy;
+    let texel = clamp(
+        vec2<i32>(uv * terrain_b.z * 512.0),
+        vec2<i32>(0),
+        vec2<i32>(511),
+    );
+    let h = terrain_c.x + textureLoad(height_map, texel, 0).r * (terrain_c.y - terrain_c.x);
+    return h - terrain_b.w;
+}
