@@ -195,7 +195,7 @@ impl BoidBundle {
             target,
             mesh: Mesh3d(variation.mesh.clone()),
             material: MeshMaterial3d(variation.material.clone()),
-            bob: Bob { offset: bob_offset },
+            bob: Bob { offset: bob_offset, ..default() },
             ..default()
         }
     }
@@ -216,7 +216,7 @@ impl BoidBundle {
             target,
             mesh: Mesh3d(mesh),
             material: MeshMaterial3d(material),
-            bob: Bob { offset: bob_offset },
+            bob: Bob { offset: bob_offset, ..default() },
             ..default()
         }
     }
@@ -247,28 +247,44 @@ impl Default for BoidTuning {
 
 #[derive(Component, Default)]
 pub struct Bob {
+    /// Per-boid phase de-sync so a crowd never bobs in lockstep.
     pub offset: f32,
+    /// Accumulated bob phase (`phase += freq·dt` each frame). Accumulating
+    /// is what keeps the visible frequency equal to `freq` while speed —
+    /// and therefore frequency — changes: computing `sin(freq · elapsed)`
+    /// instead turns every frequency change into a phase jump of
+    /// `Δfreq · elapsed`, i.e. acceleration-driven chatter that worsens
+    /// the longer the app runs.
+    pub phase: f32,
 }
 
 const BOB_AMPLITUDE: f32 = 0.1;
+/// Bob frequency per m/s of speed: a 5 m/s march bobs at ~0.75 Hz, a
+/// 20 m/s run at ~3 Hz.
 const BOB_FREQ_COEF: f32 = 0.15;
-const BOB_FREQ_MIN: f32 = 0.05;
+/// Idle sway floor, Hz — visible breathing at rest, not the sub-perceptual
+/// 0.05 Hz this used to be.
+const BOB_FREQ_MIN: f32 = 0.5;
 /// Capsule3d::default() is 1 m tall; its centre rides half a metre above
 /// the terrain surface tracked by GroundY.
 const BOID_HALF_HEIGHT: f32 = 0.5;
 
 pub fn bob(
-    mut q_boids: Query<(&mut Transform, &Velocity, &Bob, &GroundY), With<Boid>>,
+    mut q_boids: Query<(&mut Transform, &Velocity, &mut Bob, &GroundY), With<Boid>>,
     time: Res<Time>,
     tuning: Res<BoidTuning>,
 ) {
-    for (mut transform, vel, bob, ground) in &mut q_boids {
-        let freq = (vel.v.length() * tuning.bob_freq_coef)
-            .clamp(tuning.bob_freq_min_hz, tuning.bob_freq_min_hz * 4.);
-        let time_elapsed = time.elapsed_secs();
+    use std::f32::consts::TAU;
+    let dt = time.delta_secs();
+    for (mut transform, vel, mut bob, ground) in &mut q_boids {
+        // `freq` is Hz, phase is radians — the TAU is what the original
+        // `sin(freq · elapsed)` was missing, another ~6x shrink on top of
+        // the clamps.
+        let freq = (vel.v.length() * tuning.bob_freq_coef).max(tuning.bob_freq_min_hz);
+        bob.phase += TAU * freq * dt;
         transform.translation.y = ground.surface
             + BOID_HALF_HEIGHT
-            + tuning.bob_amplitude_m * f32::sin(freq * (bob.offset + time_elapsed))
+            + tuning.bob_amplitude_m * f32::sin(bob.phase + bob.offset)
     }
 }
 
@@ -304,5 +320,75 @@ mod tests {
         for variation in &catalog[1..] {
             assert_eq!(variation.mesh, catalog[0].mesh);
         }
+    }
+
+    /// Bob advances its accumulated phase by exactly `freq·dt` — the
+    /// property whose absence made bobbing read as acceleration-driven:
+    /// `sin(freq · elapsed)` jumps phase by `Δfreq · elapsed` whenever
+    /// speed changes, chatter that worsens the longer the app runs.
+    /// A stationary boid must still advance at the floor frequency.
+    #[test]
+    fn bob_advances_phase_by_frequency_times_dt() {
+        use bevy::app::App;
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        let tuning = BoidTuning::default();
+        let dt = 1.0 / 60.0;
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin)
+            .init_resource::<BoidTuning>()
+            .add_systems(bevy::app::Update, bob);
+        let e = app
+            .world_mut()
+            .spawn((
+                Boid::default(),
+                Transform::IDENTITY,
+                Velocity::default(),
+                Bob::default(),
+                GroundY::default(),
+            ))
+            .id();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f32(dt),
+        ));
+
+        let phase = |app: &App, e| app.world().get::<Bob>(e).unwrap().phase;
+
+        use std::f32::consts::TAU;
+        // Stationary: the floor frequency, visible idle sway.
+        app.update();
+        let p0 = phase(&app, e);
+        app.update();
+        let p1 = phase(&app, e);
+        assert!(
+            (p1 - p0 - TAU * tuning.bob_freq_min_hz * dt).abs() < 1e-5,
+            "stationary phase advance must be the floor frequency"
+        );
+
+        // Quarter period at the floor: the boid visibly rises off the seat.
+        for _ in 0..29 {
+            app.update();
+        }
+        let y = app.world().get::<Transform>(e).unwrap().translation.y;
+        assert!(
+            (y - (BOID_HALF_HEIGHT + tuning.bob_amplitude_m)).abs() < 1e-3,
+            "idle bob must reach full amplitude, y {y}"
+        );
+
+        // Speeding up mid-run: advance is exactly coef·speed·dt — no
+        // elapsed-time phase jump from the frequency change itself.
+        app.world_mut()
+            .get_mut::<Velocity>(e)
+            .unwrap()
+            .v = Vec3::X * 10.0;
+        app.update();
+        let p2 = phase(&app, e);
+        app.update();
+        let p3 = phase(&app, e);
+        assert!(
+            (p3 - p2 - TAU * tuning.bob_freq_coef * 10.0 * dt).abs() < 1e-5,
+            "moving phase advance must be coef × speed × dt"
+        );
     }
 }

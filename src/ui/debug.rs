@@ -197,7 +197,7 @@ fn debug_panel(
                 changed |= slider(
                     ui,
                     &mut boid.bob_freq_min_hz,
-                    0.0..=0.5,
+                    0.0..=2.0,
                     "bob frequency minimum (Hz)",
                 )
                 .changed();
