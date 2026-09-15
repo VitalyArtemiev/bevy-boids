@@ -465,17 +465,18 @@ fn spawn_formation_cross_scene(mut commands: Commands, variations: Res<BoidVaria
 }
 
 fn spawn_formation_braid_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
-    // One army, head-on: red marches east, green marches west, same lane.
-    // Everything anticipates (friendly) — the blocks must braid through
-    // each other or jam; that tension is the point of the scene.
+    // One army, head-on, starting CLOSE (20 m between origins): the blocks
+    // meet within a couple of seconds, before they have spooled up — the
+    // low-speed braid regime (short anticipation lookahead in metres,
+    // contact and slot-keeping relatively stronger).
     spawn_marching_block(
         &mut commands,
         &mut ids,
         &variations,
         0,
         0,
-        Vec3::new(-40.0, 0.5, 0.0),
-        Vec3::new(40.0, 0.5, 0.0),
+        Vec3::new(-10.0, 0.5, 0.0),
+        Vec3::new(10.0, 0.5, 0.0),
         4,
         3,
     );
@@ -485,12 +486,12 @@ fn spawn_formation_braid_scene(mut commands: Commands, variations: Res<BoidVaria
         &variations,
         0,
         1,
-        Vec3::new(40.0, 0.5, 0.0),
-        Vec3::new(-40.0, 0.5, 0.0),
+        Vec3::new(10.0, 0.5, 0.0),
+        Vec3::new(-10.0, 0.5, 0.0),
         4,
         3,
     );
-    scene_camera(&mut commands, Vec3::ZERO, 75.0);
+    scene_camera(&mut commands, Vec3::ZERO, 40.0);
 }
 
 fn spawn_formation_clash_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
