@@ -1,8 +1,10 @@
 //! Standalone test scenes: `--scene <name>` replaces the normal launch's
-//! RTS camera + boid grid with one hand-built micro-scene. Every scene
-//! owns its camera and props; while any scene is active, `setup` in
-//! main.rs skips the RTS camera, the grid boids and the obstacle scatter,
-//! and `DebugConfig.impostor_lod` stands the billboard auto-swap down so
+//! RTS camera + boid grid with one hand-built micro-scene, running
+//! straight into `GameState::Playing` (no main menu — the `--bench`
+//! bypass without the bench behaviours). Every scene owns its camera and
+//! props; while any scene is active, `setup` in main.rs skips the RTS
+//! camera, the grid boids and the obstacle scatter, and
+//! `DebugConfig.impostor_lod` stands the billboard auto-swap down so
 //! each boid stays on exactly the render path the scene gave it.
 //!
 //! Adding a scene (keep this list honest):
@@ -21,6 +23,7 @@ use crate::boid::{Boid, BoidBundle, BoidVariations};
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
 use crate::target::Target;
+use crate::ui::GameState;
 
 /// The available `--scene` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +61,14 @@ pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
+        if app.world().resource::<LaunchConfig>().scene.is_some() {
+            // A scene runs straight into Playing — no main menu (the same
+            // state bypass BenchPlugin uses, minus the bench's pinning,
+            // timed exit and FPS logging). Inserted before UiPlugin's
+            // `init_state`, which is idempotent and keeps this value, so
+            // the menu's OnEnter(MainMenu) pause never happens either.
+            app.insert_state(GameState::Playing);
+        }
         app.add_systems(
             Startup,
             spawn_billboard_scene.run_if(in_scene(TestScene::Billboard)),
@@ -140,5 +151,42 @@ fn billboard_scene_convert(
         *done = true;
         let yaw = facing_yaw(target, vel).unwrap_or(0.0);
         attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::state::app::StatesPlugin;
+
+    /// A scene launch lands in `Playing` straight away (no main menu), and
+    /// UiPlugin's later `init_state` — idempotent — must not clobber it.
+    #[test]
+    fn scene_launch_skips_the_main_menu() {
+        let mut scene_app = App::new();
+        scene_app
+            .add_plugins(StatesPlugin)
+            .insert_resource(LaunchConfig {
+                scene: Some(TestScene::Billboard),
+                ..Default::default()
+            })
+            .add_plugins(ScenePlugin)
+            .init_state::<GameState>();
+        assert_eq!(
+            *scene_app.world().resource::<State<GameState>>(),
+            GameState::Playing
+        );
+
+        // Without a scene the default menu state stands.
+        let mut plain_app = App::new();
+        plain_app
+            .add_plugins(StatesPlugin)
+            .insert_resource(LaunchConfig::default())
+            .add_plugins(ScenePlugin)
+            .init_state::<GameState>();
+        assert_eq!(
+            *plain_app.world().resource::<State<GameState>>(),
+            GameState::default()
+        );
     }
 }
