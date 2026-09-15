@@ -9,6 +9,7 @@
 pub mod debug;
 pub mod input;
 pub mod radial;
+pub mod scenes;
 
 use bevy::app::AppExit;
 use bevy::post_process::bloom::Bloom;
@@ -21,8 +22,9 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_rts_camera::RtsCameraControls;
 
 use crate::freecam::CameraMode;
-use crate::terrain::{DemoTerrain, ViewMode};
+use crate::scene::{ActiveScene, LoadWorld};
 use crate::sky::SkyTuning;
+use crate::terrain::{DemoTerrain, ViewMode};
 use std::ops::RangeInclusive;
 
 /// App-wide flow state. The simulation and gameplay input only run in
@@ -87,19 +89,19 @@ impl Plugin for UiPlugin {
             // scans the type registry once, at build time.
             .register_type::<OptionsSettings>()
             .register_type_data::<OptionsSettings, ReflectSettingsGroup>()
-            .add_plugins(SettingsPlugin::new(
-                "com.github.VitalyArtemiev.bevy-boids",
-            ))
+            .add_plugins(SettingsPlugin::new("com.github.VitalyArtemiev.bevy-boids"))
             .init_resource::<OptionsOpen>()
             .init_state::<GameState>()
+            // The scene picker (F4 / the main-menu Scenes button) rides
+            // the egui context UiPlugin sets up.
+            .add_plugins(scenes::ScenesUiPlugin)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
                     main_menu_ui.run_if(in_state(GameState::MainMenu)),
                     pause_menu_ui.run_if(in_state(GameState::Paused)),
-                    options_ui.run_if(
-                        in_state(GameState::MainMenu).or_else(in_state(GameState::Paused)),
-                    ),
+                    options_ui
+                        .run_if(in_state(GameState::MainMenu).or_else(in_state(GameState::Paused))),
                     debug_panel_ui
                         .run_if(in_state(GameState::Playing))
                         // Don't let F3 leak into egui while a drag value is
@@ -107,16 +109,16 @@ impl Plugin for UiPlugin {
                         .run_if(not(egui_wants_any_keyboard_input)),
                 ),
             )
-        .add_systems(
-            Update,
-            (
-                toggle_pause,
-                // Runs on startup (the loaded resource's insert counts
-                // as a change) and whenever Options edits something.
-                apply_options.run_if(resource_changed::<OptionsSettings>),
+            .add_systems(
+                Update,
+                (
+                    toggle_pause,
+                    // Runs on startup (the loaded resource's insert counts
+                    // as a change) and whenever Options edits something.
+                    apply_options.run_if(resource_changed::<OptionsSettings>),
+                )
+                    .chain(),
             )
-                .chain(),
-        )
             // Pausing `Time<Virtual>` is what actually stops the fixed
             // timestep from accumulating (gating systems alone would cause a
             // catch-up storm on resume). The camera plugin's systems can't
@@ -140,6 +142,9 @@ fn main_menu_ui(
     mut contexts: EguiContexts,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
+    mut scenes_open: ResMut<scenes::ScenesOpen>,
+    active: Res<ActiveScene>,
+    mut commands: Commands,
     mut app_exit: MessageWriter<AppExit>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -150,7 +155,17 @@ fn main_menu_ui(
             ui.heading("bevy-boids");
             ui.add_space(40.0);
             if ui.button("Start").clicked() {
+                // Start = the normal RTS world. After a scene was loaded
+                // (the picker below, or an earlier F4 switch) that world
+                // was discarded — request it back; otherwise the startup
+                // world is already it.
+                if active.0.is_some() {
+                    commands.insert_resource(LoadWorld(None));
+                }
                 next_state.set(GameState::Playing);
+            }
+            if ui.button("Scenes").clicked() {
+                scenes_open.0 = !scenes_open.0;
             }
             if ui.button("Options").clicked() {
                 options_open.0 = !options_open.0;
@@ -303,7 +318,11 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
 /// the drag releases (see `terrain::demo::rebuild_terrain`).
 fn debug_panel_ui(
     mut contexts: EguiContexts,
-    actions: Query<(&crate::ui::input::ActionTag, &crate::ui::input::TriggerState, &crate::ui::input::ActionEvents)>,
+    actions: Query<(
+        &crate::ui::input::ActionTag,
+        &crate::ui::input::TriggerState,
+        &crate::ui::input::ActionEvents,
+    )>,
     mut shown: Local<bool>,
     mut camera_mode: ResMut<CameraMode>,
     mut demo: ResMut<DemoTerrain>,
@@ -356,7 +375,11 @@ fn debug_panel_ui(
                 )
                 .changed()
             {
-                *camera_mode = if free { CameraMode::Free } else { CameraMode::Rts };
+                *camera_mode = if free {
+                    CameraMode::Free
+                } else {
+                    CameraMode::Rts
+                };
                 mode_changed = true;
             }
             ui.add_space(6.0);
@@ -377,7 +400,12 @@ fn debug_panel_ui(
                     ui,
                     &mut rounding,
                     0.0..=4.0,
-                    &["round ridges", "ridge falloff", "round creases", "crease falloff"],
+                    &[
+                        "round ridges",
+                        "ridge falloff",
+                        "round creases",
+                        "crease falloff",
+                    ],
                 );
                 e.rounding = Vec4::from_array(rounding);
                 let mut onset = e.onset.to_array();
@@ -400,7 +428,8 @@ fn debug_panel_ui(
             });
 
             dirty |= section(ui, "Terrain", |ui| {
-                let mut c = slider(ui, &mut demo.height_offset, -1.1..=0.25, "height offset").changed();
+                let mut c =
+                    slider(ui, &mut demo.height_offset, -1.1..=0.25, "height offset").changed();
                 c |= slider(ui, &mut demo.map_scale, 0.8..=3.6, "range scale").changed();
                 c |= slider(ui, &mut demo.water_level, -3.0..=1.0, "water level").changed();
                 c
@@ -460,17 +489,21 @@ fn component_sliders(
     changed
 }
 
-
-
 /// One slider per array component — the erosion filter's shader vectors
 
-/// Escape pauses/resumes; with the Options window open it closes that
-/// instead, and in the main menu it just closes the Options window.
+/// Escape pauses/resumes; with the Options window or scene picker open it
+/// closes that instead, and in the main menu it just closes the Options
+/// window.
 fn toggle_pause(
-    actions: Query<(&crate::ui::input::ActionTag, &crate::ui::input::TriggerState, &crate::ui::input::ActionEvents)>,
+    actions: Query<(
+        &crate::ui::input::ActionTag,
+        &crate::ui::input::TriggerState,
+        &crate::ui::input::ActionEvents,
+    )>,
     state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
+    mut scenes_open: ResMut<scenes::ScenesOpen>,
 ) {
     if !crate::ui::input::started(&actions, crate::ui::input::ActionId::Pause) {
         return;
@@ -479,6 +512,8 @@ fn toggle_pause(
         GameState::Playing => {
             if options_open.0 {
                 options_open.0 = false;
+            } else if scenes_open.0 {
+                scenes_open.0 = false;
             } else {
                 next_state.set(GameState::Paused);
             }

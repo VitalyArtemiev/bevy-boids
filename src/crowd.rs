@@ -34,9 +34,7 @@ use bevy::pbr::{Material, MaterialPlugin, MeshMaterial3d};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::mesh::{Indices, Mesh};
-use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, TextureDimension, TextureFormat,
-};
+use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 
 use crate::scene::{TestScene, in_scene};
@@ -219,16 +217,11 @@ impl Plugin for CrowdPlugin {
             .add_plugins(MaterialPlugin::<CrowdDustMaterial>::default())
             .add_systems(Startup, load_crowd_module)
             .add_systems(
-                Startup,
-                // The crowd scene (`--scene=crowd`) owns its own ground:
-                // rolling hills that replace the erosion terrain. The
-                // scene's camera comes from scene.rs.
-                spawn_crowd_ground.run_if(in_scene(TestScene::Crowd)),
-            )
-            .add_systems(
                 Update,
                 // Armies spawn once the shared shader module is loaded —
                 // creating the material earlier races the async load.
+                // (The scene's ground and camera are the world
+                // assembler's job, see `scene::assemble_scene`.)
                 spawn_crowd
                     .run_if(in_scene(TestScene::Crowd))
                     .run_if(crowd_module_loaded),
@@ -256,13 +249,9 @@ fn crowd_module_loaded(server: Res<AssetServer>, module: Res<CrowdCommonShader>)
 /// The crowd scene's stand-in terrain: a gently rolling grid mesh
 /// and a HeightField from the same [`crowd_test_height`], so the crowd's
 /// boxes have real slopes to ride (the scene replaces the erosion demo
-/// entirely).
-fn spawn_crowd_ground(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut field: ResMut<HeightField>,
-) {
+/// entirely). Called by the world assembler whenever the crowd scene
+/// loads — at startup and on runtime switches alike.
+pub(crate) fn spawn_crowd_ground(world: &mut World) {
     let quads = 128;
     let step = TEST_GROUND_M / quads as f32;
     let half = TEST_GROUND_M / 2.0;
@@ -276,10 +265,8 @@ fn spawn_crowd_ground(
             let z = -half + iz as f32 * step;
             positions.push([x, crowd_test_height(x, z), z]);
             // Central-difference normal of the height function.
-            let dx = (crowd_test_height(x + eps, z) - crowd_test_height(x - eps, z))
-                / (2.0 * eps);
-            let dz = (crowd_test_height(x, z + eps) - crowd_test_height(x, z - eps))
-                / (2.0 * eps);
+            let dx = (crowd_test_height(x + eps, z) - crowd_test_height(x - eps, z)) / (2.0 * eps);
+            let dz = (crowd_test_height(x, z + eps) - crowd_test_height(x, z - eps)) / (2.0 * eps);
             normals.push(Vec3::new(-dx, 1.0, -dz).normalize().to_array());
             let v = iz * (quads + 1) + ix;
             if ix < quads && iz < quads {
@@ -298,17 +285,27 @@ fn spawn_crowd_ground(
     mesh.insert_indices(Indices::U32(indices));
     // Grounding, camera focus and the crowd heightmap sample this exact
     // function, so everything agrees with the rendered mesh.
-    *field = HeightField::from_fn(crowd_test_height);
+    *world.resource_mut::<HeightField>() = HeightField::from_fn(crowd_test_height);
 
-    commands.spawn((
-        Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+    let material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
             base_color: Color::srgb(0.40, 0.42, 0.31),
             ..default()
-        })),
+        });
+    world.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
         Transform::IDENTITY,
+        CrowdGround,
     ));
 }
+
+/// Marks the crowd scene's rolling-hill ground so the world teardown can
+/// despawn it with the rest of the scene.
+#[derive(Component)]
+pub struct CrowdGround;
 
 /// Bakes the battlefield heights into an R8Unorm heightmap texture for
 /// the crowd shaders (they cannot call the CPU `HeightField`). The decode
@@ -319,10 +316,10 @@ fn bake_height_map(images: &mut Assets<Image>, field: &HeightField) -> (Handle<I
     let mut heights = Vec::with_capacity((HEIGHT_MAP_RES * HEIGHT_MAP_RES) as usize);
     for iz in 0..HEIGHT_MAP_RES {
         for ix in 0..HEIGHT_MAP_RES {
-            let x = -HEIGHT_MAP_SPAN_M / 2.0 + (ix as f32 + 0.5) / HEIGHT_MAP_RES as f32
-                * HEIGHT_MAP_SPAN_M;
-            let z = -HEIGHT_MAP_SPAN_M / 2.0 + (iz as f32 + 0.5) / HEIGHT_MAP_RES as f32
-                * HEIGHT_MAP_SPAN_M;
+            let x = -HEIGHT_MAP_SPAN_M / 2.0
+                + (ix as f32 + 0.5) / HEIGHT_MAP_RES as f32 * HEIGHT_MAP_SPAN_M;
+            let z = -HEIGHT_MAP_SPAN_M / 2.0
+                + (iz as f32 + 0.5) / HEIGHT_MAP_RES as f32 * HEIGHT_MAP_SPAN_M;
             let h = field.height(x, z);
             min = min.min(h);
             max = max.max(h);
@@ -349,8 +346,9 @@ fn bake_height_map(images: &mut Assets<Image>, field: &HeightField) -> (Handle<I
 }
 
 /// Spawns the two opposing armies and their dust volumes, seated on the
-/// terrain. Runs once (the `Local` guard) on the first frame the launch
-/// flag allows; entities stay put afterwards.
+/// terrain. Runs on every frame the scene allows while no army exists —
+/// presence is the one-shot guard, so a world reload (which despawns the
+/// armies) respawns them fresh.
 fn spawn_crowd(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -360,12 +358,11 @@ fn spawn_crowd(
     field: Res<HeightField>,
     sky: Res<SkyTuning>,
     tuning: Res<CrowdTuning>,
-    mut spawned: Local<bool>,
+    armies: Query<(), With<CrowdArmy>>,
 ) {
-    if *spawned {
+    if !armies.is_empty() {
         return;
     }
-    *spawned = true;
 
     let crowd_mesh = meshes.add(crowd_box(
         CROWD_LENGTH_M,
@@ -717,7 +714,8 @@ mod tests {
         // A slope rising with z: the range must cover the whole rotated
         // footprint, not just under the entity centre.
         let slope = HeightField::from_fn(|_, z| z);
-        let (min, max) = footprint_y_range(&slope, Quat::from_rotation_y(std::f32::consts::PI), 5.0);
+        let (min, max) =
+            footprint_y_range(&slope, Quat::from_rotation_y(std::f32::consts::PI), 5.0);
         // Rotated π, the footprint spans world z ∈ [5 − 36, 5].
         assert!((min - (5.0 - CROWD_DEPTH_M)).abs() < 1e-4);
         assert!((max - 5.0).abs() < 1e-4);

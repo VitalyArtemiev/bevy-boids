@@ -5,9 +5,9 @@
 
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
-use std::sync::Arc;
 use bevy::render::mesh::{Indices, Mesh};
 use bevy_rts_camera::Ground;
+use std::sync::Arc;
 
 mod camera;
 pub mod demo;
@@ -112,20 +112,22 @@ pub(crate) fn grid_mesh(y: f32) -> Mesh {
 }
 
 /// Spawn the rendered square. `Ground` marks it for the drag-pan grab
-/// raycast (lock_on_drag is off, so it is only a tag).
-pub fn spawn_ground(
-    mut commands: Commands,
-    terrain: Res<TerrainMesh>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        Mesh3d(terrain.handle.clone()),
-        // The grid's COLOR_0 attribute arms vertex coloring; the demo's
-        // albedo rides it.
-        MeshMaterial3d(materials.add(StandardMaterial {
+/// raycast (lock_on_drag is off, so it is only a tag) and for the world
+/// teardown. Called by the world assembler (`scene::assemble_world`) at
+/// startup and whenever the normal world reloads from a scene.
+pub(crate) fn spawn_erosion_ground(world: &mut World) {
+    let mesh = world.resource::<TerrainMesh>().handle.clone();
+    let material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            // The grid's COLOR_0 attribute arms vertex coloring; the demo's
+            // albedo rides it.
             base_color: Color::WHITE,
             ..default()
-        })),
+        });
+    world.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
         Transform::IDENTITY,
         Ground,
     ));
@@ -218,5 +220,4 @@ mod tests {
             assert!(normal.y > 0.0, "triangle {tri} faces {normal:?}, not up");
         }
     }
-
 }

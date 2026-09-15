@@ -326,12 +326,6 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
     Ok(config)
 }
 
-/// Run condition for `stream_terrain_tiles`: `--no-terrain` skips tile
-/// spawning even in a normal (non-bench) launch.
-pub fn launch_terrain_enabled(config: Res<LaunchConfig>) -> bool {
-    config.terrain
-}
-
 /// Added unconditionally by `main`; it is a no-op without `--bench`.
 pub struct BenchPlugin(pub bool);
 
@@ -587,7 +581,11 @@ mod tests {
     #[test]
     fn preprocess_flag_switches_to_the_baker() {
         assert!(!parse_launch_args(&[]).unwrap().preprocess);
-        assert!(parse_launch_args(&args(&["--preprocess"])).unwrap().preprocess);
+        assert!(
+            parse_launch_args(&args(&["--preprocess"]))
+                .unwrap()
+                .preprocess
+        );
     }
 
     #[test]
@@ -599,10 +597,15 @@ mod tests {
         assert_eq!(config.scene, Some(TestScene::Crowd));
 
         // The old standalone flag is gone.
-        assert!(parse_launch_args(&args(&["--crowd"])).unwrap().scene.is_none());
+        assert!(
+            parse_launch_args(&args(&["--crowd"]))
+                .unwrap()
+                .scene
+                .is_none()
+        );
 
-        let config = parse_launch_args(&args(&["--bench", "--scene=crowd", "--cam-angle=25"]))
-            .unwrap();
+        let config =
+            parse_launch_args(&args(&["--bench", "--scene=crowd", "--cam-angle=25"])).unwrap();
         assert_eq!(config.scene, Some(TestScene::Crowd));
         assert_eq!(config.cam_angle_deg, Some(25.0));
 
@@ -621,8 +624,7 @@ mod tests {
         assert!(config.force_billboards && !config.force_meshes);
 
         // Giving both keeps only the last one.
-        let config =
-            parse_launch_args(&args(&["--force-billboards", "--force-meshes"])).unwrap();
+        let config = parse_launch_args(&args(&["--force-billboards", "--force-meshes"])).unwrap();
         assert!(config.force_meshes && !config.force_billboards);
 
         assert!(parse_launch_args(&args(&["--flat"])).unwrap().flat);
@@ -630,8 +632,8 @@ mod tests {
 
     #[test]
     fn sun_and_scene_flags_parse_with_validation() {
-        let config = parse_launch_args(&args(&["--sun-azimuth", "125", "--sun-elevation", "35"]))
-            .unwrap();
+        let config =
+            parse_launch_args(&args(&["--sun-azimuth", "125", "--sun-elevation", "35"])).unwrap();
         assert_eq!(config.sun_azimuth_deg, Some(125.0));
         assert_eq!(config.sun_elevation_deg, Some(35.0));
 
@@ -650,7 +652,10 @@ mod tests {
             Some(TestScene::Billboard)
         );
         let err = parse_launch_args(&args(&["--scene", "arena"])).unwrap_err();
-        assert!(err.contains("unknown scene") && err.contains("billboard"), "{err}");
+        assert!(
+            err.contains("unknown scene") && err.contains("billboard"),
+            "{err}"
+        );
         assert!(parse_launch_args(&args(&["--scene"])).is_err());
     }
 

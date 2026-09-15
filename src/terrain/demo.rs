@@ -143,7 +143,13 @@ pub fn evaluate_terrain(demo: &DemoTerrain, uv: Vec2) -> TerrainEval {
 
     let water_unit = demo.water_level / VERTICAL_SCALE + UNIT_HEIGHT_ORIGIN;
     let occlusion = (erosion_delta + 0.5).clamp(0.0, 1.0);
-    let trees = trees_amount(unit_height, world_normal.y, occlusion, ridge_map, water_unit);
+    let trees = trees_amount(
+        unit_height,
+        world_normal.y,
+        occlusion,
+        ridge_map,
+        water_unit,
+    );
 
     TerrainEval {
         unit_height,
@@ -158,9 +164,7 @@ pub fn evaluate_terrain(demo: &DemoTerrain, uv: Vec2) -> TerrainEval {
 /// World height of the surface at a uv point — what grounding and the
 /// camera sample through the [`super::HeightField`].
 pub fn world_height(demo: &DemoTerrain, uv: Vec2) -> f32 {
-    (evaluate_terrain(demo, uv).unit_height - UNIT_HEIGHT_ORIGIN)
-        * VERTICAL_SCALE
-        * WORLD_SCALE
+    (evaluate_terrain(demo, uv).unit_height - UNIT_HEIGHT_ORIGIN) * VERTICAL_SCALE * WORLD_SCALE
 }
 
 fn normal_from_slope(slope: Vec2, stw: f32) -> Vec3 {
@@ -176,7 +180,13 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn trees_amount(height: f32, normal_y: f32, occlusion: f32, ridge_map: f32, water_unit: f32) -> f32 {
+fn trees_amount(
+    height: f32,
+    normal_y: f32,
+    occlusion: f32,
+    ridge_map: f32,
+    water_unit: f32,
+) -> f32 {
     let t = smoothstep_down(
         GRASS_HEIGHT + 0.01,
         GRASS_HEIGHT + 0.05,
@@ -215,7 +225,8 @@ fn albedo(demo: &DemoTerrain, eval: &TerrainEval, normal_y: f32) -> Vec3 {
         ((trees * 2.2 - 0.8).clamp(0.0, 1.0)) * 0.6,
     );
 
-    let drainage = (((1.0 - (ridgemap / DRAINAGE_WIDTH).clamp(0.0, 1.0)) * 1.5) as f32).clamp(0.0, 1.0);
+    let drainage =
+        (((1.0 - (ridgemap / DRAINAGE_WIDTH).clamp(0.0, 1.0)) * 1.5) as f32).clamp(0.0, 1.0);
     color.lerp(Vec3::ONE, drainage)
 }
 
@@ -257,8 +268,7 @@ pub fn rebuild_mesh(mesh: &mut Mesh, demo: &DemoTerrain) {
             let uv = Vec2::new(ix as f32, iz as f32) / TERRAIN_RESOLUTION as f32;
             let eval = evaluate_terrain(demo, uv);
             let i = iz * verts + ix;
-            heights[i] =
-                (eval.unit_height - UNIT_HEIGHT_ORIGIN) * VERTICAL_SCALE * WORLD_SCALE;
+            heights[i] = (eval.unit_height - UNIT_HEIGHT_ORIGIN) * VERTICAL_SCALE * WORLD_SCALE;
             let normal = normal_from_slope(eval.slope, stw);
             normals[i] = normal.to_array();
             let color = match demo.view_mode {
@@ -295,43 +305,47 @@ pub fn rebuild_mesh(mesh: &mut Mesh, demo: &DemoTerrain) {
     }
 }
 
-/// Demo wiring: the settings resource, the water plane, and the rebuild
-/// system. The rebuild fires when the panel marked the settings dirty AND
-/// the pointer is up (a drag fires `changed` every frame; a full CPU
-/// re-evaluation is ~160 ms, so drags coalesce into one rebuild on
-/// release) — plus once at startup.
+/// Demo wiring: the settings resource and the rebuild system. The
+/// rebuild fires when the panel marked the settings dirty AND the pointer
+/// is up (a drag fires `changed` every frame; a full CPU re-evaluation is
+/// ~160 ms, so drags coalesce into one rebuild on release) — plus once at
+/// startup. Gated to the normal world: test scenes install their own
+/// height fields, and a stale rebuild would stomp them. The water plane
+/// is spawned with the erosion ground by the world assembler instead.
 pub struct ErosionDemoPlugin;
 
 impl Plugin for ErosionDemoPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DemoTerrain>()
-            .add_systems(Startup, spawn_water)
-            .add_systems(Update, rebuild_terrain);
+            .add_systems(Update, rebuild_terrain.run_if(crate::scene::normal_world));
     }
 }
 
-fn spawn_water(
-    mut commands: Commands,
-    demo: Res<DemoTerrain>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        super::WaterPlane,
-        Mesh3d(meshes.add(
-            Plane3d::default()
-                .mesh()
-                .size(TERRAIN_EXTENT_M * 0.94, TERRAIN_EXTENT_M * 0.94),
-        )),
-        MeshMaterial3d(materials.add(StandardMaterial {
+/// The water plane riding `DemoTerrain::water_level`, spawned alongside
+/// the erosion ground by the world assembler (scene switches despawn and
+/// respawn it with everything else).
+pub(crate) fn spawn_water(world: &mut World) {
+    let level = world.resource::<DemoTerrain>().water_level;
+    let mesh = world.resource_mut::<Assets<Mesh>>().add(
+        Plane3d::default()
+            .mesh()
+            .size(TERRAIN_EXTENT_M * 0.94, TERRAIN_EXTENT_M * 0.94),
+    );
+    let material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
             base_color: Color::srgba(0.05, 0.24, 0.34, 0.72),
             alpha_mode: AlphaMode::Blend,
             unlit: true,
             perceptual_roughness: 0.18,
             reflectance: 0.68,
             ..default()
-        })),
-        Transform::from_xyz(0.0, demo.water_level * WORLD_SCALE, 0.0),
+        });
+    world.spawn((
+        super::WaterPlane,
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_xyz(0.0, level * WORLD_SCALE, 0.0),
     ));
 }
 
@@ -407,5 +421,4 @@ mod tests {
             }
         }
     }
-
 }

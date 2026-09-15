@@ -1,34 +1,50 @@
-//! Standalone test scenes: `--scene <name>` replaces the normal launch's
-//! RTS camera + boid grid with one hand-built micro-scene, running
-//! straight into `GameState::Playing` (no main menu — the `--bench`
-//! bypass without the bench behaviours). Every scene owns its camera and
-//! props; while any scene is active, `setup` in main.rs skips the RTS
-//! camera, the grid boids and the obstacle scatter, and
-//! `DebugConfig.impostor_lod` stands the billboard auto-swap down so
-//! each boid stays on exactly the render path the scene gave it.
+//! Standalone test scenes and the world assembler that swaps them at
+//! runtime.
+//!
+//! A "world" is the full playable set: boids and formations, obstacles,
+//! the camera and the ground. Exactly one is loaded at a time — the
+//! normal RTS sandbox ([`ActiveScene`](None)) or one test scene
+//! ([`ActiveScene`](Some(..)), the `--scene` launch values). Every load,
+//! at startup and at runtime alike, goes through [`assemble_world`]: the
+//! old world is despawned first, then the requested one spawns. The F4
+//! scene menu and the main-menu Scenes picker send [`LoadWorld`] requests
+//! while playing; `--scene <name>` seeds the initial request.
+//!
+//! While a scene is active it owns the camera rig, props and render
+//! paths: `DebugConfig.impostor_lod` stands the billboard auto-swap down
+//! so each boid stays on exactly the render path the scene gave it, and
+//! the scene gates ([`in_scene`]) follow [`ActiveScene`], so a runtime
+//! switch re-targets every scene-gated system exactly like a scene
+//! launch. (The camera ENTITY persists across worlds — see
+//! [`crate::AppCamera`] — only its rig changes.)
 //!
 //! Adding a scene (keep this list honest):
 //! 1. Add a [`TestScene`] variant plus its kebab-case [`TestScene::name`].
-//! 2. Write a `Startup` system (`spawn_<name>_scene`) that builds it.
-//! 3. Register it in [`ScenePlugin::build`] with
-//!    `.run_if(in_scene(TestScene::NewVariant))`.
-//! 4. If it needs main-setup accommodations beyond the universal ones
-//!    (the billboard scene also asks for the `--flat` ground), gate those
-//!    in `setup` on `launch.in_scene(TestScene::NewVariant)`.
+//! 2. Write a `spawn_<name>_scene(world: &mut World, ..)` builder.
+//! 3. Call it from [`assemble_scene`]'s match.
+//! 4. If it needs ground beyond the universal flat plane (the crowd owns
+//!    its rolling hills), branch on it in [`assemble_scene`].
 
 use bevy::prelude::*;
-use bevy_rts_camera::RtsCamera;
+use bevy_rts_camera::{Ground, RtsCamera};
 use std::collections::VecDeque;
 
-use crate::billboard::{BillboardAssets, attach_billboard, facing_yaw};
+use crate::billboard::{Billboard, BillboardAssets, attach_billboard, facing_yaw};
 use crate::boid::{Boid, BoidBundle, BoidIds, BoidVariations};
+use crate::crowd::{CrowdArmy, CrowdDust, CrowdGround};
 use crate::formations::{Formation, FormationKind, FormationOrder, MemberOf};
+use crate::freecam::CameraMode;
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
-use crate::pbd::Body;
-use crate::pbd::Faction;
+use crate::pbd::{Body, Faction};
+use crate::player::Player;
+use crate::resources::{Materials, Meshes};
 use crate::target::Target;
+use crate::terrain::{DemoTerrain, HeightField, Obstacle, ObstacleBundle, WaterPlane};
 use crate::ui::GameState;
+use crate::ui::debug::DebugConfig;
+use crate::ui::radial::RadialMenu;
+use rand::Rng;
 
 /// The available `--scene` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,10 +130,12 @@ impl TestScene {
 
     /// Parses a `--scene` value; `None` = unknown name.
     pub fn from_name(name: &str) -> Option<Self> {
-        TestScene::ALL.into_iter().find(|scene| scene.name() == name)
+        TestScene::ALL
+            .into_iter()
+            .find(|scene| scene.name() == name)
     }
 
-    /// Whether the scene wants the flat plane (`scene::spawn_flat_ground`)
+    /// Whether the scene wants the flat plane ([`spawn_flat_ground`])
     /// instead of any terrain — every movement scene does; only the crowd
     /// experiment wants its rolling hills.
     pub fn wants_flat_ground(&self) -> bool {
@@ -125,16 +143,58 @@ impl TestScene {
     }
 }
 
-/// Run condition factory: true while `--scene <this scene>` is active.
-pub fn in_scene(scene: TestScene) -> impl FnMut(Res<LaunchConfig>) -> bool + Clone {
-    move |launch: Res<LaunchConfig>| launch.scene == Some(scene)
+/// The world currently loaded: `None` = the normal RTS sandbox,
+/// `Some(scene)` = that test scene owns camera, props and ground. Seeded
+/// from `--scene` at startup; [`LoadWorld`] requests switch it at runtime.
+/// Every [`in_scene`] gate reads this, so runtime switches and scene
+/// launches drive the same systems.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveScene(pub Option<TestScene>);
+
+/// Run condition factory: true while `scene` is the loaded world.
+pub fn in_scene(scene: TestScene) -> impl FnMut(Res<ActiveScene>) -> bool + Clone {
+    move |active: Res<ActiveScene>| active.0 == Some(scene)
 }
+
+/// Run condition: the normal RTS world is loaded. Gates what only makes
+/// sense there — the erosion terrain rebuild (a scene installs its own
+/// height field, and a stale rebuild would stomp it).
+pub fn normal_world(active: Res<ActiveScene>) -> bool {
+    active.0.is_none()
+}
+
+/// A world (re)load request from UI: the F4 scene menu, the main-menu
+/// Scenes picker, or Start (back to the normal world after a scene).
+/// [`load_world`] consumes it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadWorld(pub Option<TestScene>);
 
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        if app.world().resource::<LaunchConfig>().scene.is_some() {
+        let scene = app.world().resource::<LaunchConfig>().scene;
+        // Runtime truth of which world is loaded, plus the initial load
+        // request: startup assembles through the same loader as every
+        // runtime switch. main.rs runs the Startup copy of `load_world`
+        // after `setup` (shared handles first); the Update copy here
+        // serves the menus.
+        app.insert_resource(ActiveScene(scene))
+            .insert_resource(LoadWorld(scene))
+            // The world assembler's resource surface (idempotent; main
+            // and the tests may provide their own).
+            .init_resource::<HeightField>()
+            .init_resource::<DebugConfig>()
+            .init_resource::<GlobalAmbientLight>()
+            .add_systems(
+                Update,
+                (
+                    load_world.run_if(resource_exists::<LoadWorld>),
+                    pin_scene_camera.run_if(resource_exists::<SceneCameraPose>),
+                    billboard_scene_convert.run_if(in_scene(TestScene::Billboard)),
+                ),
+            );
+        if scene.is_some() {
             // A scene runs straight into Playing — no main menu (the same
             // state bypass BenchPlugin uses, minus the bench's pinning,
             // timed exit and FPS logging). Inserted before UiPlugin's
@@ -142,51 +202,187 @@ impl Plugin for ScenePlugin {
             // the menu's OnEnter(MainMenu) pause never happens either.
             app.insert_state(GameState::Playing);
         }
-        app.add_systems(
-            Startup,
-            spawn_billboard_scene.run_if(in_scene(TestScene::Billboard)),
-        )
-        .add_systems(
-            Update,
-            // Trails the spawn: the twin entities only exist after the
-            // Startup commands apply.
-            billboard_scene_convert.run_if(in_scene(TestScene::Billboard)),
-        )
-        .add_systems(
-            Startup,
-            spawn_crowd_scene.run_if(in_scene(TestScene::Crowd)),
-        )
-        // Movement scenes: each pins the shared RTS camera onto its stage
-        // once, then the one-shot guard keeps it stable (the camera stays
-        // freely controllable afterwards).
-        .add_systems(
-            Update,
-            pin_scene_camera.run_if(resource_exists::<SceneCameraPose>),
-        )
-        .add_systems(
-            Startup,
-            (
-                spawn_arrival_scene.run_if(in_scene(TestScene::Arrival)),
-                spawn_perpendicular_scene.run_if(in_scene(TestScene::Perpendicular)),
-                spawn_head_on_scene.run_if(in_scene(TestScene::HeadOn)),
-                spawn_clash_scene.run_if(in_scene(TestScene::Clash)),
-                spawn_shove_scene.run_if(in_scene(TestScene::Shove)),
-                spawn_melee_scene.run_if(in_scene(TestScene::Melee)),
-                spawn_formation_cross_scene.run_if(in_scene(TestScene::FormationCross)),
-                spawn_formation_braid_scene.run_if(in_scene(TestScene::FormationBraid)),
-                spawn_formation_clash_scene.run_if(in_scene(TestScene::FormationClash)),
-            ),
-        );
     }
+}
+
+/// Consumes a [`LoadWorld`] request through [`assemble_world`] (a queued
+/// `&mut World` command, so the whole switch applies atomically at one
+/// sync point — no system ever sees a half-switched world).
+pub fn load_world(request: Res<LoadWorld>, mut commands: Commands) {
+    let target = request.0;
+    commands.queue(move |world: &mut World| assemble_world(world, target));
+    commands.remove_resource::<LoadWorld>();
+}
+
+/// Tears the loaded world down and builds `target` (`None` = the normal
+/// RTS sandbox). The single spawn path for startup and runtime loads
+/// alike; directly callable from tests.
+fn assemble_world(world: &mut World, target: Option<TestScene>) {
+    let launch = world.resource::<LaunchConfig>().clone();
+    teardown_world(world);
+
+    // Which world is loaded — every in_scene gate follows this.
+    world.insert_resource(ActiveScene(target));
+    // A scene pins its boids' render paths (the billboard twins must stay
+    // put); the distance swap only runs in the normal world, unless a
+    // bench flag forces a render path by hand.
+    let forced_render = launch.force_meshes || launch.force_billboards;
+    world.resource_mut::<DebugConfig>().impostor_lod = !forced_render && target.is_none();
+
+    match target {
+        Some(scene) => assemble_scene(world, scene),
+        None => assemble_normal_world(world, &launch),
+    }
+}
+
+/// Despawns every world-owned entity — boids (with their selection
+/// indicator children), formations, obstacles, the three ground kinds,
+/// the crowd props — and resets the per-world UI state. Shared resources
+/// (settings, asset handles, tuning) survive; height fields are installed
+/// by whichever world assembles next. The camera is NOT world-owned: the
+/// app's single camera (see [`crate::AppCamera`]) persists across worlds —
+/// bevy_egui's primary context rides it for the app's lifetime, and
+/// moving or despawning it breaks egui (menus, gates, the works).
+fn teardown_world(world: &mut World) {
+    let mut doomed = world.query_filtered::<Entity, Or<(
+        With<Boid>,
+        With<Formation>,
+        With<Obstacle>,
+        With<Ground>,
+        With<WaterPlane>,
+        With<FlatGround>,
+        With<CrowdGround>,
+        With<CrowdArmy>,
+        With<CrowdDust>,
+    )>>();
+    let doomed: Vec<Entity> = doomed.iter(world).collect();
+    for entity in doomed {
+        // Recursive: takes relationship children (selection indicators)
+        // along, firing their cleanup hooks.
+        let _ = world.despawn(entity);
+    }
+
+    // One-shots and menus that referenced the old world.
+    world.remove_resource::<SceneCameraPose>();
+    world.remove_resource::<RadialMenu>();
+    // Fresh camera contract: each world reconfigures the app camera
+    // (fresh RTS state, no freecam takeover). Re-inserting also re-arms
+    // `apply_camera_mode` harmlessly.
+    world.insert_resource(CameraMode::Rts);
+    // Drag/selection state referenced despawned entities.
+    world.insert_resource(Player::default());
+}
+
+/// Builds a test scene: its ground first (every scene but the crowd runs
+/// on the flat plane; the crowd builds its rolling hills and installs the
+/// matching height field), then its props and camera. Scenes always run
+/// the app camera BARE — no launch dressing (bloom/atmosphere) — matching
+/// what a direct `--scene` launch looks like.
+fn assemble_scene(world: &mut World, scene: TestScene) {
+    let variations = world.resource::<BoidVariations>().clone();
+    // Fresh id counter: scene ids pick faction colours by spawn order
+    // (`id = faction + 3·seq`), so a reload is bit-identical to the first
+    // load.
+    let mut ids = BoidIds::default();
+
+    crate::strip_camera_dressing(world);
+
+    if scene.wants_flat_ground() {
+        world.insert_resource(HeightField::default());
+        spawn_flat_ground(world);
+    } else {
+        crate::crowd::spawn_crowd_ground(world);
+    }
+
+    match scene {
+        TestScene::Billboard => spawn_billboard_scene(world, &variations),
+        TestScene::Crowd => spawn_crowd_scene(world),
+        TestScene::Arrival => spawn_arrival_scene(world, &variations, &mut ids),
+        TestScene::Perpendicular => spawn_perpendicular_scene(world, &variations, &mut ids),
+        TestScene::HeadOn => spawn_head_on_scene(world, &variations, &mut ids),
+        TestScene::Clash => spawn_clash_scene(world, &variations, &mut ids),
+        TestScene::Shove => spawn_shove_scene(world, &variations, &mut ids),
+        TestScene::Melee => spawn_melee_scene(world, &variations, &mut ids),
+        TestScene::FormationCross => spawn_formation_cross_scene(world, &variations, &mut ids),
+        TestScene::FormationBraid => spawn_formation_braid_scene(world, &variations, &mut ids),
+        TestScene::FormationClash => spawn_formation_clash_scene(world, &variations, &mut ids),
+    }
+    world.insert_resource(ids);
+}
+
+/// The normal RTS sandbox: launch-mode ground, the obstacle scatter, the
+/// `--boids` grid and the dressed RTS camera (moved here from main's
+/// `setup`, so Start after a scene rebuilds the same world).
+fn assemble_normal_world(world: &mut World, launch: &LaunchConfig) {
+    let variations = world.resource::<BoidVariations>().clone();
+    let mut ids = BoidIds::default();
+    let field = world.resource::<HeightField>().clone();
+
+    // Ground: the flat plane for `--flat` render-path benches, the
+    // erosion square otherwise (`--no-terrain` keeps the world
+    // groundless, as at startup). The erosion mesh and height field
+    // rebuild from `DemoTerrain` on the next update; obstacles re-seat
+    // onto the rebuilt surface per frame.
+    if launch.flat {
+        world.insert_resource(HeightField::default());
+        spawn_flat_ground(world);
+    } else if launch.terrain {
+        crate::terrain::spawn_erosion_ground(world);
+        crate::terrain::demo::spawn_water(world);
+        world.resource_mut::<DemoTerrain>().dirty = true;
+    }
+
+    // Obstacle scatter: nothing but the units should cost render time on
+    // the isolation grounds (`--flat` and every scene).
+    if !launch.flat {
+        let cube = world.resource::<Meshes>().cube.clone();
+        let black = world.resource::<Materials>().black.clone();
+        for _ in 1..100 {
+            let mut rng = rand::rng();
+            let x = rng.random_range(-100.0..100.0);
+            let z = rng.random_range(-100.0..100.0);
+            // Obstacles sit on the terrain surface (cube is 1 m, so +0.5
+            // to its centre).
+            let y = field.height(x, z) + 0.5;
+            world.spawn(ObstacleBundle::new(
+                cube.clone(),
+                black.clone(),
+                Vec3::from_array([1.0, 0.0, 0.0]),
+                Vec3::from_array([x, y, z]),
+            ));
+        }
+    }
+
+    // `--boids` works in normal launches too; the default is the full
+    // historical 99x99 grid.
+    let mut boids_spawned = 0;
+    'grid: for i in 1..100 {
+        for j in 1..100 {
+            if boids_spawned >= launch.boids {
+                break 'grid;
+            }
+            boids_spawned += 1;
+            world.spawn(BoidBundle::with_id(
+                ids.next(),
+                Target {
+                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
+                    ..default()
+                },
+                &variations,
+            ));
+        }
+    }
+
+    crate::reset_app_camera_rts(world);
+    crate::apply_camera_dressing(world, launch);
+    world.insert_resource(ids);
 }
 
 /// The crowd scene's camera: the game's own RTS camera (the experiment's
 /// design cone is defined for it, and bench `--cam-angle` pinning targets
-/// `RtsCamera`). The armies and their rolling-hill ground are spawned by
-/// `CrowdPlugin`'s systems, gated on the same scene — the materials and
-/// the shader-module load gate live there.
-fn spawn_crowd_scene(mut commands: Commands) {
-    crate::spawn_rts_camera(&mut commands);
+/// `RtsCamera`), reconfigured fresh on the persistent app camera.
+fn spawn_crowd_scene(world: &mut World) {
+    crate::reset_app_camera_rts(world);
 }
 
 // ---- Movement scenes -------------------------------------------------------
@@ -205,15 +401,15 @@ struct SceneCameraPose {
     zoom: f32,
 }
 
-/// One-shot camera pin: focuses the shared RTS camera on the scene's
-/// stage. Runs only while a scene inserted the pose resource, and the
-/// `Local` guard keeps it to the first frame the camera exists.
+/// One-shot camera pin per world load: focuses the shared RTS camera on
+/// the scene's stage, then drops the request. Runs while the pose resource
+/// exists; the camera may arrive a frame after the load.
 fn pin_scene_camera(
     mut cameras: Query<&mut RtsCamera>,
     pose: Res<SceneCameraPose>,
-    mut done: Local<bool>,
+    mut commands: Commands,
 ) {
-    if *done {
+    if cameras.is_empty() {
         return;
     }
     for mut camera in &mut cameras {
@@ -221,8 +417,8 @@ fn pin_scene_camera(
         camera.target_focus.translation = pose.focus;
         camera.zoom = pose.zoom;
         camera.target_zoom = pose.zoom;
-        *done = true;
     }
+    commands.remove_resource::<SceneCameraPose>();
 }
 
 /// One unit spec for [`spawn_scene_boid`].
@@ -255,13 +451,13 @@ fn scene_velocity(v: Vec3) -> Velocity {
 /// Spawns one boid whose visual variation matches its faction
 /// (`id = faction + 3·seq` keeps one colour per side).
 fn spawn_scene_boid(
-    commands: &mut Commands,
+    world: &mut World,
     ids: &mut BoidIds,
     variations: &BoidVariations,
     spec: BoidSpec,
 ) -> Entity {
     let id = spec.faction as u32 + 3 * ids.next();
-    commands
+    world
         .spawn(BoidBundle::with_id(
             id,
             Target {
@@ -282,7 +478,7 @@ fn spawn_scene_boid(
 /// crossing still want distinguishing colours). Members spawn in their
 /// facing-frame grid around `origin`; `assign_slots` refines the mapping.
 fn spawn_marching_block(
-    commands: &mut Commands,
+    world: &mut World,
     ids: &mut BoidIds,
     variations: &BoidVariations,
     faction: u8,
@@ -293,7 +489,7 @@ fn spawn_marching_block(
     rows: usize,
 ) {
     let facing = (move_to - origin).normalize_or_zero();
-    let formation = commands
+    let formation = world
         .spawn((
             Formation {
                 kind: FormationKind::Grid,
@@ -314,7 +510,7 @@ fn spawn_marching_block(
             let offset = side * (col as f32 - (columns - 1) as f32 / 2.0) * FormationKind::SPACING
                 - facing * row as f32 * FormationKind::SPACING;
             let id = colour as u32 + 3 * ids.next();
-            commands
+            world
                 .spawn(BoidBundle::with_id(id, Target::default(), variations))
                 .insert(Transform::from_translation(origin + offset + Vec3::Y * 0.5))
                 .insert(MemberOf(formation))
@@ -324,91 +520,84 @@ fn spawn_marching_block(
     }
 }
 
-/// Spawns the shared RTS camera pinned on the stage. `height_m` is the
+/// Points the app camera at the stage as a fresh RTS camera, pinned
+/// through the usual [`SceneCameraPose`] one-shot. `height_m` is the
 /// wanted camera height in metres (converted to `RtsCamera` zoom units,
 /// where 0.0 = 30 km and 1.0 = `height_min` = 2 m — `--zoom`-style linear
 /// interpolation, so 0.99 ≈ 302 m).
-fn scene_camera(commands: &mut Commands, focus: Vec3, height_m: f32) {
-    crate::spawn_rts_camera(commands);
+fn scene_camera(world: &mut World, focus: Vec3, height_m: f32) {
+    crate::reset_app_camera_rts(world);
     let zoom = ((30_000.0 - height_m) / (30_000.0 - 2.0)).clamp(0.0, 1.0);
-    commands.insert_resource(SceneCameraPose { focus, zoom });
+    world.insert_resource(SceneCameraPose { focus, zoom });
 }
 
-fn spawn_arrival_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_arrival_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     spawn_scene_boid(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         BoidSpec::at(Vec3::new(-20.0, 0.5, 0.0), Vec3::new(20.0, 0.5, 0.0), 0),
     );
-    scene_camera(&mut commands, Vec3::new(0.0, 0.0, 0.0), 35.0);
+    scene_camera(world, Vec3::new(0.0, 0.0, 0.0), 35.0);
 }
 
-fn spawn_perpendicular_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
-    let mut spec = BoidSpec::at(
-        Vec3::new(-30.0, 0.5, 0.0),
-        Vec3::new(-10.0, 0.5, 25.0),
-        0,
-    );
+fn spawn_perpendicular_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
+    let mut spec = BoidSpec::at(Vec3::new(-30.0, 0.5, 0.0), Vec3::new(-10.0, 0.5, 25.0), 0);
     spec.vel = Vec3::new(15.0, 0.0, 0.0);
-    spawn_scene_boid(&mut commands, &mut ids, &variations, spec);
-    scene_camera(&mut commands, Vec3::new(-15.0, 0.0, 10.0), 45.0);
+    spawn_scene_boid(world, ids, variations, spec);
+    scene_camera(world, Vec3::new(-15.0, 0.0, 10.0), 45.0);
 }
 
-fn spawn_head_on_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_head_on_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     spawn_scene_boid(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         BoidSpec::at(Vec3::new(-30.0, 0.5, 0.0), Vec3::new(30.0, 0.5, 0.0), 0),
     );
     // Same army (green), offset lane: anticipation must braid the pass.
     spawn_scene_boid(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         BoidSpec::at(Vec3::new(30.0, 0.5, 1.5), Vec3::new(-30.0, 0.5, 1.5), 0),
     );
-    scene_camera(&mut commands, Vec3::ZERO, 40.0);
+    scene_camera(world, Vec3::ZERO, 40.0);
 }
 
-fn spawn_clash_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_clash_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     spawn_scene_boid(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         BoidSpec::at(Vec3::new(-25.0, 0.5, 0.0), Vec3::new(25.0, 0.5, 0.0), 0),
     );
     spawn_scene_boid(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         BoidSpec::at(Vec3::new(25.0, 0.5, 0.0), Vec3::new(-25.0, 0.5, 0.0), 1),
     );
-    scene_camera(&mut commands, Vec3::ZERO, 35.0);
+    scene_camera(world, Vec3::ZERO, 35.0);
 }
 
-fn spawn_shove_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
-    let mut heavy = BoidSpec::at(
-        Vec3::new(-20.0, 0.5, 0.0),
-        Vec3::new(20.0, 0.5, 0.0),
-        0,
-    );
+fn spawn_shove_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
+    let mut heavy = BoidSpec::at(Vec3::new(-20.0, 0.5, 0.0), Vec3::new(20.0, 0.5, 0.0), 0);
     heavy.body = Body {
         radius_m: 0.5,
         mass_kg: 8.0,
     };
-    spawn_scene_boid(&mut commands, &mut ids, &variations, heavy);
+    spawn_scene_boid(world, ids, variations, heavy);
     spawn_scene_boid(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         BoidSpec::at(Vec3::new(20.0, 0.5, 0.0), Vec3::new(-20.0, 0.5, 0.0), 1),
     );
-    scene_camera(&mut commands, Vec3::ZERO, 35.0);
+    scene_camera(world, Vec3::ZERO, 35.0);
 }
 
-fn spawn_melee_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_melee_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     // Three 3-wide ranks per faction, converging through the centre from
     // evenly spaced bearings — every pair hostile, so the pile is pure
     // contact dynamics.
@@ -423,26 +612,21 @@ fn spawn_melee_scene(mut commands: Commands, variations: Res<BoidVariations>, mu
                     + Vec3::Y * 0.5;
                 // Through the centre and out the far side: a guaranteed
                 // three-way pile, not a polite ring.
-                spawn_scene_boid(
-                    &mut commands,
-                    &mut ids,
-                    &variations,
-                    BoidSpec::at(pos, -pos, faction),
-                );
+                spawn_scene_boid(world, ids, variations, BoidSpec::at(pos, -pos, faction));
             }
         }
     }
-    scene_camera(&mut commands, Vec3::ZERO, 60.0);
+    scene_camera(world, Vec3::ZERO, 60.0);
 }
 
-fn spawn_formation_cross_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_formation_cross_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     // One army, two blocks with distinguishing colours, courses crossing
     // at the centre — friendly throughout, so members of different blocks
     // anticipate while slot-keeping holds each block together.
     spawn_marching_block(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         0,
         0,
         Vec3::new(-45.0, 0.5, 0.0),
@@ -451,9 +635,9 @@ fn spawn_formation_cross_scene(mut commands: Commands, variations: Res<BoidVaria
         3,
     );
     spawn_marching_block(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         0,
         1,
         Vec3::new(0.0, 0.5, 45.0),
@@ -461,18 +645,18 @@ fn spawn_formation_cross_scene(mut commands: Commands, variations: Res<BoidVaria
         4,
         3,
     );
-    scene_camera(&mut commands, Vec3::ZERO, 75.0);
+    scene_camera(world, Vec3::ZERO, 75.0);
 }
 
-fn spawn_formation_braid_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_formation_braid_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     // One army, head-on, starting CLOSE (20 m between origins): the blocks
     // meet within a couple of seconds, before they have spooled up — the
     // low-speed braid regime (short anticipation lookahead in metres,
     // contact and slot-keeping relatively stronger).
     spawn_marching_block(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         0,
         0,
         Vec3::new(-10.0, 0.5, 0.0),
@@ -481,9 +665,9 @@ fn spawn_formation_braid_scene(mut commands: Commands, variations: Res<BoidVaria
         3,
     );
     spawn_marching_block(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         0,
         1,
         Vec3::new(10.0, 0.5, 0.0),
@@ -491,17 +675,17 @@ fn spawn_formation_braid_scene(mut commands: Commands, variations: Res<BoidVaria
         4,
         3,
     );
-    scene_camera(&mut commands, Vec3::ZERO, 40.0);
+    scene_camera(world, Vec3::ZERO, 40.0);
 }
 
-fn spawn_formation_clash_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+fn spawn_formation_clash_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
     // Hostile blocks on the same lane, marching straight through each
     // other: no anticipation between armies, contact only — the melee at
     // formation scale.
     spawn_marching_block(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         0,
         0,
         Vec3::new(-40.0, 0.5, 0.0),
@@ -510,9 +694,9 @@ fn spawn_formation_clash_scene(mut commands: Commands, variations: Res<BoidVaria
         3,
     );
     spawn_marching_block(
-        &mut commands,
-        &mut ids,
-        &variations,
+        world,
+        ids,
+        variations,
         2,
         2,
         Vec3::new(40.0, 0.5, 0.0),
@@ -520,28 +704,34 @@ fn spawn_formation_clash_scene(mut commands: Commands, variations: Res<BoidVaria
         4,
         3,
     );
-    scene_camera(&mut commands, Vec3::ZERO, 75.0);
+    scene_camera(world, Vec3::ZERO, 75.0);
 }
 
 /// The flat-plane stand-in ground for `--flat` render-path benches and
-/// the billboard scene: nothing but the units should cost GPU time.
-/// (Registered from main.rs alongside `DemoTerrain`, not scene-gated,
-/// because `--flat` is not a scene.)
-pub fn spawn_flat_ground(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+/// every scene but the crowd: nothing but the units should cost GPU time.
+fn spawn_flat_ground(world: &mut World) {
     const GROUND_M: f32 = 800.0;
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_M, GROUND_M))),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    let mesh = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(Plane3d::default().mesh().size(GROUND_M, GROUND_M));
+    let material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
             base_color: Color::srgb(0.40, 0.42, 0.31),
             ..default()
-        })),
+        });
+    world.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
         Transform::IDENTITY,
+        FlatGround,
     ));
 }
+
+/// Marks the flat stand-in ground so the world teardown can despawn it
+/// (the erosion ground carries the crate's `Ground` tag instead).
+#[derive(Component)]
+pub struct FlatGround;
 
 /// Builds the billboard scene's test pair: a full mesh capsule (screen
 /// LEFT, z = +1.5) beside its billboard twin (screen RIGHT, z = −1.5),
@@ -551,10 +741,10 @@ pub fn spawn_flat_ground(
 /// offsets separate the twins cleanly left/right on screen instead of
 /// overlapping them along the view axis. Placement overrides ride
 /// `insert` because the bundle's fields are boid.rs-private.
-fn spawn_billboard_scene(mut commands: Commands, variations: Res<BoidVariations>) {
-    commands
+fn spawn_billboard_scene(world: &mut World, variations: &BoidVariations) {
+    world
         .spawn((
-            BoidBundle::with_id(0, Target::default(), &variations),
+            BoidBundle::with_id(0, Target::default(), variations),
             BillboardSceneMesh,
         ))
         .insert(Transform::from_xyz(0.0, 0.5, 1.5))
@@ -562,9 +752,9 @@ fn spawn_billboard_scene(mut commands: Commands, variations: Res<BoidVariations>
             pos: Vec3::new(0.0, 0.5, 1.5),
             ..default()
         });
-    commands
+    world
         .spawn((
-            BoidBundle::with_id(0, Target::default(), &variations),
+            BoidBundle::with_id(0, Target::default(), variations),
             BillboardSceneSprite,
         ))
         .insert(Transform::from_xyz(0.0, 0.5, -1.5))
@@ -575,15 +765,15 @@ fn spawn_billboard_scene(mut commands: Commands, variations: Res<BoidVariations>
 
     let distance = 7.0;
     let polar = 25.0_f32.to_radians();
-    commands.spawn((
-        Camera3d::default(),
-        // Plain camera, not an RtsCamera: the input systems that expect
-        // exactly one RTS camera find none and stand down, and the bench's
-        // zoom pinning doesn't touch this pose. 25° from nadir (inside
-        // the bake cone), on the +X side, looking at the pair.
+    // Plain camera pose on the app camera, not an RTS rig: the input
+    // systems that expect an RTS camera find none and stand down, and the
+    // bench's zoom pinning doesn't touch this pose. 25° from nadir
+    // (inside the bake cone), on the +X side, looking at the pair.
+    crate::configure_app_camera_plain(
+        world,
         Transform::from_xyz(distance * polar.sin(), distance * polar.cos(), 0.0)
             .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
-    ));
+    );
 }
 
 /// Mesh twin (screen LEFT): stays on its full mesh — the lighting
@@ -592,24 +782,23 @@ fn spawn_billboard_scene(mut commands: Commands, variations: Res<BoidVariations>
 #[derive(Component)]
 pub struct BillboardSceneMesh;
 
-/// Billboard twin (screen RIGHT): converted to its billboard once, first
-/// frame it can.
+/// Billboard twin (screen RIGHT): converted to its billboard on the first
+/// frame it exists unconverted — the `Without<Billboard>` filter is the
+/// guard, so a world reload that respawns the twin reconverts it.
 #[derive(Component)]
 pub struct BillboardSceneSprite;
 
-/// One-shot conversion (the `Local` guard): swaps the marked twin to its
-/// billboard through the same `attach_billboard` path as the LOD swap.
+/// Converts every unconverted sprite twin through the same
+/// `attach_billboard` path as the LOD swap.
 fn billboard_scene_convert(
-    sprites: Query<(Entity, &Boid, &Target, &Velocity), With<BillboardSceneSprite>>,
+    sprites: Query<
+        (Entity, &Boid, &Target, &Velocity),
+        (With<BillboardSceneSprite>, Without<Billboard>),
+    >,
     assets: Res<BillboardAssets>,
-    mut done: Local<bool>,
     mut commands: Commands,
 ) {
-    if *done {
-        return;
-    }
     for (entity, boid, target, vel) in &sprites {
-        *done = true;
         let yaw = facing_yaw(target, vel).unwrap_or(0.0);
         attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
     }
@@ -671,6 +860,234 @@ mod tests {
         assert_eq!(
             *plain_app.world().resource::<State<GameState>>(),
             GameState::default()
+        );
+    }
+
+    /// Headless app with the assembler's resource surface (no rendering):
+    /// bare asset stores for the variation catalog and the grounds, the
+    /// shared handles, the terrain settings. `ScenePlugin` seeds the
+    /// initial `LoadWorld`, so one `update()` builds the launch world
+    /// exactly like the game.
+    fn world_app(launch: LaunchConfig) -> App {
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin)
+            .insert_resource(launch)
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<BoidVariations>()
+            .init_resource::<Meshes>()
+            .init_resource::<Materials>()
+            .init_resource::<BoidIds>()
+            .init_resource::<Player>()
+            .init_resource::<CameraMode>()
+            .init_resource::<DemoTerrain>()
+            .init_resource::<crate::terrain::TerrainMesh>()
+            .add_plugins(ScenePlugin);
+        app
+    }
+
+    fn count<T: Component>(world: &mut World) -> usize {
+        world.query::<&T>().iter(world).count()
+    }
+
+    /// Loading a world discards the previous one, whatever it was: a
+    /// scene replaces the normal sandbox and vice versa, with the right
+    /// camera, ground and bookkeeping following each switch.
+    #[test]
+    fn world_switches_discard_the_previous_world() {
+        let launch = LaunchConfig {
+            boids: 4,
+            ..Default::default()
+        };
+        let mut app = world_app(launch);
+        app.update(); // consumes the seeded LoadWorld(None)
+        let world = app.world_mut();
+        assert_eq!(count::<Boid>(world), 4, "the startup grid did not spawn");
+        assert_eq!(count::<Obstacle>(world), 99);
+        assert_eq!(
+            world.resource::<ActiveScene>().0,
+            None,
+            "the startup world must be the normal sandbox"
+        );
+        assert_eq!(count::<RtsCamera>(world), 1);
+
+        // Into a scene: the sandbox's boids, obstacles, camera and
+        // erosion ground are all gone.
+        let world = app.world_mut();
+        assemble_world(world, Some(TestScene::FormationClash));
+        assert_eq!(count::<Boid>(world), 24, "two 4x3 blocks");
+        assert_eq!(count::<Formation>(world), 2);
+        assert_eq!(count::<Obstacle>(world), 0, "sandbox obstacles survived");
+        assert_eq!(count::<FlatGround>(world), 1);
+        assert_eq!(count::<RtsCamera>(world), 1);
+        assert!(!world.resource::<DebugConfig>().impostor_lod);
+
+        // Back to the sandbox: the scene's props are gone, the grid,
+        // scatter and RTS camera are back.
+        let world = app.world_mut();
+        assemble_world(world, None);
+        assert_eq!(count::<Boid>(world), 4);
+        assert_eq!(count::<Formation>(world), 0, "scene formations survived");
+        assert_eq!(count::<Obstacle>(world), 99);
+        assert_eq!(count::<FlatGround>(world), 0, "scene ground survived");
+        assert!(world.resource::<DebugConfig>().impostor_lod);
+    }
+
+    /// Reloading the same scene resets its state: the id counter starts
+    /// over (faction colours are spawn-order-derived, so a reload is
+    /// bit-identical) and per-world resources snap back.
+    #[test]
+    fn reloading_a_scene_resets_spawn_state() {
+        let mut app = world_app(LaunchConfig::default());
+        let ids_of = |world: &mut World| -> Vec<u32> {
+            world
+                .query::<&Boid>()
+                .iter(world)
+                .map(|boid| boid.id)
+                .collect()
+        };
+        let world = app.world_mut();
+        assemble_world(world, Some(TestScene::Melee));
+        let first = ids_of(world);
+        assert_eq!(first.len(), 27);
+
+        let world = app.world_mut();
+        assemble_world(world, Some(TestScene::Melee));
+        assert_eq!(ids_of(world), first, "reload must reproduce the same ids");
+        assert_eq!(
+            world.resource::<BoidIds>().0,
+            27,
+            "counter must restart with the reload (one seq per unit)"
+        );
+    }
+
+    /// A runtime `LoadWorld` request flows through the registered Update
+    /// system: one update() consumes it and the resource is gone (no
+    /// double-load on the next frame).
+    #[test]
+    fn load_world_requests_are_consumed_once() {
+        let launch = LaunchConfig {
+            scene: Some(TestScene::Arrival),
+            ..Default::default()
+        };
+        let mut app = world_app(launch);
+        app.update();
+        assert!(app.world().get_resource::<LoadWorld>().is_none());
+        assert_eq!(count::<Boid>(app.world_mut()), 1);
+        assert_eq!(
+            app.world().resource::<ActiveScene>().0,
+            Some(TestScene::Arrival)
+        );
+
+        app.world_mut()
+            .insert_resource(LoadWorld(Some(TestScene::Clash)));
+        app.update();
+        assert_eq!(count::<Boid>(app.world_mut()), 2, "clash has two units");
+        assert!(app.world().get_resource::<LoadWorld>().is_none());
+    }
+
+    /// The egui primary context must survive any number of world switches.
+    /// bevy_egui attaches it to the first camera it sees and never attaches
+    /// another (its `egui_context_exists` latch is app-lifetime), and it
+    /// must ride a camera for the render pass to extract it — so the app
+    /// keeps ONE persistent camera that world switches reconfigure but
+    /// never despawn or replace. (The earlier despawn-and-reseat approach
+    /// churned egui's internal state — a phantom button click and an
+    /// emath "time shouldn't move backwards" panic by the fifth load.)
+    #[test]
+    fn world_switches_keep_one_persistent_camera_for_egui() {
+        use bevy_egui::PrimaryEguiContext;
+        let mut app = world_app(LaunchConfig::default());
+        app.update(); // the startup world
+
+        // The context as bevy_egui attaches it (PreUpdate, first camera).
+        let camera = {
+            let world = app.world_mut();
+            let camera = world
+                .query_filtered::<Entity, With<crate::AppCamera>>()
+                .iter(world)
+                .next()
+                .expect("the app camera");
+            world
+                .entity_mut(camera)
+                .insert(bevy_egui::PrimaryEguiContext)
+                .id()
+        };
+
+        // Switch worlds repeatedly: the camera entity — and the egui
+        // context on it — must never be replaced, while the rig follows
+        // each world (plain for the billboard scene, RTS otherwise).
+        for target in [
+            Some(TestScene::Billboard),
+            Some(TestScene::Clash),
+            None,
+            Some(TestScene::Arrival),
+            None,
+            Some(TestScene::Billboard),
+        ] {
+            let world = app.world_mut();
+            assemble_world(world, target);
+            assert_eq!(
+                count::<crate::AppCamera>(world),
+                1,
+                "the app camera must be singular"
+            );
+            let mut carriers = world.query_filtered::<Entity, With<PrimaryEguiContext>>();
+            assert_eq!(
+                carriers.iter(world).count(),
+                1,
+                "the egui context must stay exactly once"
+            );
+            assert_eq!(
+                carriers.iter(world).next().unwrap(),
+                camera,
+                "the egui context must stay on the persistent app camera"
+            );
+            assert_eq!(
+                world.get::<RtsCamera>(camera).is_some(),
+                target != Some(TestScene::Billboard),
+                "the rig must follow the world"
+            );
+        }
+    }
+
+    /// Scenes run the app camera bare: loading any scene from the sandbox
+    /// (which dresses the camera per the launch flags — bloom is on by
+    /// default) must strip that dressing, exactly like a direct `--scene`
+    /// launch whose camera never dressed; returning to the sandbox
+    /// re-applies it. The billboard scene is the regression case — its
+    /// plain-camera config doesn't touch dressing itself.
+    #[test]
+    fn scenes_strip_the_launch_camera_dressing() {
+        use bevy::post_process::bloom::Bloom;
+        let mut app = world_app(LaunchConfig::default());
+        app.update(); // normal world: dressed (bloom on by default)
+        assert_eq!(
+            count::<Bloom>(app.world_mut()),
+            1,
+            "the sandbox camera must carry the launch dressing"
+        );
+
+        assemble_world(app.world_mut(), Some(TestScene::Billboard));
+        assert_eq!(
+            count::<Bloom>(app.world_mut()),
+            0,
+            "the billboard scene must run the camera bare"
+        );
+
+        assemble_world(app.world_mut(), Some(TestScene::Clash));
+        assert_eq!(
+            count::<Bloom>(app.world_mut()),
+            0,
+            "movement scenes must run the camera bare"
+        );
+
+        assemble_world(app.world_mut(), None);
+        assert_eq!(
+            count::<Bloom>(app.world_mut()),
+            1,
+            "returning to the sandbox must re-apply the launch dressing"
         );
     }
 }

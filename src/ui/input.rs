@@ -33,13 +33,14 @@ macro_rules! bool_action {
 }
 
 bool_action!(
-    Select,          // LMB drag-select
-    SelectAdditive,  // Shift held while selecting
-    Frontage,        // RMB drag frontage designation
-    AdjustWidth,     // Ctrl held while designating (fit columns to width)
-    Pause,           // Esc
-    ToggleDebug,     // F1
-    ToggleTerrain,   // F3
+    Select,         // LMB drag-select
+    SelectAdditive, // Shift held while selecting
+    Frontage,       // RMB drag frontage designation
+    AdjustWidth,    // Ctrl held while designating (fit columns to width)
+    Pause,          // Esc
+    ToggleDebug,    // F1
+    ToggleTerrain,  // F3
+    ToggleScenes,   // F4
 );
 
 // Quick-group slots: plain digit recalls the group, Ctrl+digit assigns.
@@ -93,12 +94,13 @@ pub enum ActionId {
     Pause,
     ToggleDebug,
     ToggleTerrain,
+    ToggleScenes,
     RecallGroup(u8),
     AssignGroup(u8),
 }
 
 impl ActionId {
-    pub const ALL: [ActionId; 19] = [
+    pub const ALL: [ActionId; 20] = [
         ActionId::Select,
         ActionId::SelectAdditive,
         ActionId::Frontage,
@@ -106,6 +108,7 @@ impl ActionId {
         ActionId::Pause,
         ActionId::ToggleDebug,
         ActionId::ToggleTerrain,
+        ActionId::ToggleScenes,
         ActionId::RecallGroup(1),
         ActionId::RecallGroup(2),
         ActionId::RecallGroup(3),
@@ -129,6 +132,7 @@ impl ActionId {
             ActionId::Pause => "Pause".into(),
             ActionId::ToggleDebug => "Toggle debug panel".into(),
             ActionId::ToggleTerrain => "Toggle terrain panel".into(),
+            ActionId::ToggleScenes => "Toggle scene menu".into(),
             ActionId::RecallGroup(n) => format!("Recall group {n}"),
             ActionId::AssignGroup(n) => format!("Assign group {n}"),
         }
@@ -145,6 +149,7 @@ impl ActionId {
             ActionId::Pause => KeyCode::Escape.into(),
             ActionId::ToggleDebug => KeyCode::F1.into(),
             ActionId::ToggleTerrain => KeyCode::F3.into(),
+            ActionId::ToggleScenes => KeyCode::F4.into(),
             ActionId::RecallGroup(n) => Binding::Keyboard {
                 key: digit(*n),
                 mod_keys: ModKeys::empty(),
@@ -271,10 +276,7 @@ fn spawn_input_context(mut commands: Commands, settings: Res<BindingsSettings>) 
         .map(|o| (o.action, o.input))
         .collect();
     let override_for = move |id: ActionId| -> Option<RebindableInput> {
-        overrides
-            .iter()
-            .find(|(a, _)| *a == id)
-            .map(|(_, i)| *i)
+        overrides.iter().find(|(a, _)| *a == id).map(|(_, i)| *i)
     };
 
     commands.spawn((
@@ -288,6 +290,7 @@ fn spawn_input_context(mut commands: Commands, settings: Res<BindingsSettings>) 
                 (ActionTag(ActionId::Pause), Action::<Pause>::new(), bindings![Binding::from(KeyCode::Escape)]),
                 (ActionTag(ActionId::ToggleDebug), Action::<ToggleDebug>::new(), bindings![Binding::from(KeyCode::F1)]),
                 (ActionTag(ActionId::ToggleTerrain), Action::<ToggleTerrain>::new(), bindings![Binding::from(KeyCode::F3)]),
+                (ActionTag(ActionId::ToggleScenes), Action::<ToggleScenes>::new(), bindings![Binding::from(KeyCode::F4)]),
                 (ActionTag(ActionId::RecallGroup(1)), Action::<RecallGroup1>::new(), bindings![Binding::Keyboard { key: KeyCode::Digit1, mod_keys: ModKeys::empty() }]),
                 (ActionTag(ActionId::RecallGroup(2)), Action::<RecallGroup2>::new(), bindings![Binding::Keyboard { key: KeyCode::Digit2, mod_keys: ModKeys::empty() }]),
                 (ActionTag(ActionId::RecallGroup(3)), Action::<RecallGroup3>::new(), bindings![Binding::Keyboard { key: KeyCode::Digit3, mod_keys: ModKeys::empty() }]),
@@ -501,9 +504,7 @@ fn bindings_ui(
                         };
                         ui.strong(text);
                         if *capturing == Some(id) {
-                            let rebind = ui
-                                .button("press a key…")
-                                .on_hover_text("Click to cancel");
+                            let rebind = ui.button("press a key…").on_hover_text("Click to cancel");
                             if rebind.clicked() {
                                 *capturing = None;
                             }
