@@ -130,19 +130,52 @@ near:   Billboard etc. REMOVED; Mesh3d + Material restored from
   cone, rings [8,16,24], 7-wide); fold yaw from the tag; display the
   sprite upright — no uv rotation (world up projects up-image in every
   baked cell and up-screen at runtime, so yaw lives entirely in cell
-  choice); apply the pose band offset
+  choice); the image u axis maps along screen-right (a mirrored display
+  is invisible on symmetric albedo but flips the baked normal field
+  against the runtime view basis — the sun then lights the sprite from
+  the wrong side horizontally; this and the normal half's 180° content
+  rotation are a paired invariant, each alone re-opens the opposite
+  axis's bug); apply the pose band offset
   (uv y += pose · pose_stride) before the normal mirror.
 - Fragment: `albedo = sample(uv)`, `n = 2·sample(1 - uv) - 1` (sRGB decode
-  free via sRGB sampling),
-  `albedo·(ambient + sun_color·max(dot(n, sun_dir_view), 0))`, alpha =
-  coverage.
+  free via sRGB sampling); lighting reads the engine's `lights` view
+  binding directly — `albedo·(ambient_color + Σ light_color·NdotL/π)`
+  with the light colour premultiplied by illuminance and the direction
+  rotated into view space. This replaced an earlier material-uniform
+  design (sun/ambient constants + a `sync_billboard_sun` bridge), which
+  was both a startup snapshot the F1 sliders couldn't reach and a baked
+  ambient floor that would have glowed at night; one lighting authority
+  now serves meshes and billboards. Two magnitude steps are mandatory
+  alongside the binding read, both mirroring `pbr_functions.wgsl`'s
+  fragment tail: (1) scale the summed light by `view.exposure` — the
+  uniform is photometric (sun ≈ 10⁴ lux) and every PBR fragment applies
+  the camera's exposure (`Exposure::BLENDER`, EV100 9.7 ≈ ×1.4e-3)
+  before writing; skipping it rides the tonemap shoulder ~700× too
+  high, which reads as "colourful at grazing sun angles, a white blob
+  wherever NdotL nears 1" (the 302 m bench view — the second shipped
+  bug), and (2) run the standard chain's in-shader `tone_mapping(color,
+  view.color_grading)` under `TONEMAP_IN_SHADER` — or the raw value
+  saturates the sRGB target and the whole sprite clips to white (first
+  attempt shipped exactly that bug). Zero directional lights leaves
+  ambient only — the night case. Alpha = coverage; after the exposure
+  fix the 302 m bench shows billboard tint parity with the mesh-mode
+  baseline (0.85% vs 0.76% tinted pixels, 0% near-white in both; the
+  residue vs close-up meshes: PBR's specular rim and Burley vs plain
+  Lambert). One material-side lighting input exists on top: the scalar
+  `BillboardTuning.brightness` (F1 slider, 1.0 = parity) — a manual
+  match knob for that residue, seeded into the shared materials at
+  creation and pushed live by `sync_billboard_brightness`.
 
 ## 3. Pose axis in the atlas + bake (`src/preprocess/atlas.rs`, `mod.rs`)
 
 - `atlas.rs`: `POSE_COUNT` and per-pose cells —
   `albedo_cell(view, pose) = (x, pose·HALF_ROWS + y)`, `normal_cell` stays
   its whole-texture 180° rotation, so `nuv = 1 - uv` keeps working
-  globally for any pose count. Grid: `7 × (2·HALF_ROWS·POSE_COUNT)` —
+  globally for any pose count — the rotation covers the cell placement
+  AND the image content (`blit_cell_rot180` composes the normal capture
+  rotated; an upright blit pairs every albedo pixel with the opposite
+  sprite point's normal and lights the billboard from the anti-sun
+  side). Grid: `7 × (2·HALF_ROWS·POSE_COUNT)` —
   the shipped idle pose (49 views) packs exactly (448×896, zero waste);
   tests pin exact fit, the mirror per pose, and the band-stacking
   arithmetic for future pose counts.

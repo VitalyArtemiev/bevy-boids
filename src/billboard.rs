@@ -20,7 +20,12 @@
 //! displayed upright — world up projects up-image in every baked cell and
 //! up-screen at runtime, so yaw lives entirely in which cell gets picked.
 //! The fragment stage lights the unlit albedo with the mirrored view-space
-//! normal (`nuv = 1 - uv`).
+//! normal (`nuv = 1 - uv`), reading ambient and the directional sun
+//! straight from the engine's `lights` view binding — the same uniform
+//! PBR meshes use — so F1 sun edits, illuminance and any future day/night
+//! state apply to both render paths from one source (no sync system, and
+//! billboards go dark with the capsules at night instead of glowing at a
+//! baked ambient floor).
 //!
 //! Flat-scene bench, 5k boids, camera ~302 m at 25° from nadir, shadows
 //! on, dev profile (`--flat --force-* --no-vsync`, 12 s runs, measured
@@ -49,7 +54,6 @@ use crate::debug_ui::DebugConfig;
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
 use crate::preprocess::atlas;
-use crate::sky::{SkyTuning, sun_transform};
 use crate::target::Target;
 use std::f32::consts::TAU;
 
@@ -64,9 +68,12 @@ const SWAP_DISTANCE_M: f32 = 50.0;
 /// every frame as the camera breathes.
 const HYSTERESIS_M: f32 = 5.0;
 
-/// Fraction of full sunlight kept on unlit normals — rough match for the
-/// sky ambient so billboard shading doesn't read flat black in shadow.
-const AMBIENT: f32 = 0.4;
+/// Final multiplier on the billboard's light sum. 1.0 is PBR parity by
+/// construction (same `lights` binding, same `view.exposure`); the F1
+/// slider exists to eyeball-match the lab twins — the baked-normal
+/// approximation shades a touch differently from real normals, and a
+/// scalar beats re-deriving the difference analytically.
+const BRIGHTNESS: f32 = 1.0;
 
 /// Billboard pose occupying the tag's pose bits (see [`pack_tag`]). The
 /// idle frame; a future animation system writes walk/attack poses.
@@ -83,6 +90,9 @@ pub struct BillboardTuning {
     pub swap_distance_m: f32,
     /// Width of the hysteresis band inside the swap distance, metres.
     pub hysteresis_m: f32,
+    /// Multiplier on the billboard's final light sum (1.0 = PBR parity).
+    /// Pushed into the shared materials live by [`sync_billboard_brightness`].
+    pub brightness: f32,
 }
 
 impl Default for BillboardTuning {
@@ -90,6 +100,7 @@ impl Default for BillboardTuning {
         Self {
             swap_distance_m: SWAP_DISTANCE_M,
             hysteresis_m: HYSTERESIS_M,
+            brightness: BRIGHTNESS,
         }
     }
 }
@@ -107,10 +118,6 @@ impl FromWorld for BillboardAssets {
     fn from_world(world: &mut World) -> Self {
         // Collect the per-variation specs under immutable borrows first —
         // the asset stores are then borrowed mutably one at a time.
-        let sky = world.resource::<SkyTuning>();
-        let sun = sun_transform(sky.sun_elevation_deg, sky.sun_azimuth_deg)
-            .translation
-            .normalize();
         let specs: Vec<_> = world
             .resource::<BoidVariations>()
             .0
@@ -121,13 +128,17 @@ impl FromWorld for BillboardAssets {
                     // billboard is exactly as large on screen as the mesh
                     // it replaces — no pop.
                     2.0 * variation.radius * atlas::FIT_MARGIN,
-                    variation.center.extend(0.0),
+                    variation.center,
                 )
             })
             .collect();
 
         let server = world.resource::<AssetServer>().clone();
         let catalog = world.resource::<BoidVariations>().0.clone();
+        // The tuning is initialised before this resource in the plugin, so
+        // freshly created materials already carry the slider value; the
+        // sync system only has to cover later edits.
+        let brightness = world.resource::<BillboardTuning>().brightness;
         let quad = world
             .resource_mut::<Assets<Mesh>>()
             .add(Plane3d::default().mesh().size(1.0, 1.0));
@@ -138,10 +149,9 @@ impl FromWorld for BillboardAssets {
             .map(|(variation, (span, center))| {
                 materials.add(BillboardMaterial {
                     atlas: server.load(format!("impostors/{}.png", variation.name)),
-                    // x: quad side in metres; yzw: direction TO the sun.
-                    span_sun: Vec4::new(span, sun.x, sun.y, sun.z),
-                    light: Vec4::new(0.95, 0.93, 0.85, AMBIENT),
-                    center,
+                    // xyz: bake centre; w: quad side in metres.
+                    center_span: center.extend(span),
+                    brightness,
                 })
             })
             .collect();
@@ -155,23 +165,27 @@ impl FromWorld for BillboardAssets {
 }
 
 /// One camera-facing quad sampling a variation's impostor atlas. Uniform
-/// layout mirrors `assets/shaders/impostor_billboard.wgsl`.
+/// layout mirrors `assets/shaders/impostor_billboard.wgsl`. Lighting comes
+/// from the engine's `lights` view binding (ambient + directional sun,
+/// premultiplied by illuminance), so billboards and PBR meshes share one
+/// lighting authority — F1 sun edits and any future day/night state apply
+/// to both from one source. The one material-side lighting input is the
+/// scalar [`BillboardTuning::brightness`] match knob (see
+/// [`sync_billboard_brightness`]).
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct BillboardMaterial {
-    /// x: quad side in world metres; yzw: direction TO the sun (world).
-    #[uniform(0)]
-    pub span_sun: Vec4,
-    /// rgb: sun colour; w: ambient fraction.
-    #[uniform(1)]
-    pub light: Vec4,
     /// xyz: the variation's bake centre in model-local space (usually
-    /// zero; matters once models lean off their origin).
-    #[uniform(2)]
-    pub center: Vec4,
+    /// zero; matters once models lean off their origin); w: quad side in
+    /// world metres (the bake frustum width).
+    #[uniform(0)]
+    pub center_span: Vec4,
+    /// Multiplier on the light sum; 1.0 = PBR parity.
+    #[uniform(1)]
+    pub brightness: f32,
     /// The baked atlas: per-pose albedo bands in the top half, mirrored
     /// view-space normals in the bottom half.
-    #[texture(3, dimension = "2d")]
-    #[sampler(4)]
+    #[texture(2, dimension = "2d")]
+    #[sampler(3)]
     pub atlas: Handle<Image>,
 }
 
@@ -269,10 +283,13 @@ impl Plugin for BillboardPlugin {
                 )
                     .chain(),
             )
-            // The materials' sun direction is a startup snapshot; push sky
-            // edits into the live instances or the F1 sun sliders leave
-            // billboards stale while meshes relight.
-            .add_systems(Update, sync_billboard_sun.run_if(resource_changed::<SkyTuning>))
+            // The brightness slider's push into the shared materials. Runs
+            // on any BillboardTuning edit (the swap sliders share the
+            // resource — re-pushing a scalar is free).
+            .add_systems(
+                Update,
+                sync_billboard_brightness.run_if(resource_changed::<BillboardTuning>),
+            )
             .add_systems(Startup, spawn_billboard_lab.run_if(launch_billboard_lab));
     }
 }
@@ -293,16 +310,19 @@ fn spawn_billboard_lab(mut commands: Commands, variations: Res<BoidVariations>) 
     // Both twins stand still (target = own position) at the same yaw (0),
     // so the two render paths show the same soldier under the same sun —
     // move the sun (F1 sliders, or `--sun-azimuth`/`--sun-elevation`) and
-    // compare. Placement overrides ride `insert` because the bundle's
-    // fields are boid.rs-private.
+    // compare. The pair is split along Z, not X: this camera looks down
+    // the X axis, so Z offsets separate the twins cleanly left/right on
+    // screen instead of overlapping them along the view axis — pixel
+    // analysis (and eyeballs) get two disjoint blobs. Placement overrides
+    // ride `insert` because the bundle's fields are boid.rs-private.
     commands
         .spawn((
             BoidBundle::with_id(0, Target::default(), &variations),
             BillboardLabMesh,
         ))
-        .insert(Transform::from_xyz(1.5, 0.5, 0.0))
+        .insert(Transform::from_xyz(0.0, 0.5, -1.5))
         .insert(Target {
-            pos: Vec3::new(1.5, 0.5, 0.0),
+            pos: Vec3::new(0.0, 0.5, -1.5),
             ..default()
         });
     commands
@@ -310,9 +330,9 @@ fn spawn_billboard_lab(mut commands: Commands, variations: Res<BoidVariations>) 
             BoidBundle::with_id(0, Target::default(), &variations),
             BillboardLabSprite,
         ))
-        .insert(Transform::from_xyz(-1.5, 0.5, 0.0))
+        .insert(Transform::from_xyz(0.0, 0.5, 1.5))
         .insert(Target {
-            pos: Vec3::new(-1.5, 0.5, 0.0),
+            pos: Vec3::new(0.0, 0.5, 1.5),
             ..default()
         });
 
@@ -329,12 +349,13 @@ fn spawn_billboard_lab(mut commands: Commands, variations: Res<BoidVariations>) 
     ));
 }
 
-/// Mesh twin (x = +1.5): stays on its full mesh — the lighting reference.
+/// Mesh twin (z = −1.5, screen right): stays on its full mesh — the
+/// lighting reference.
 #[derive(Component)]
 pub struct BillboardLabMesh;
 
-/// Billboard twin (x = −1.5): converted to its billboard once, first frame
-/// it can.
+/// Billboard twin (z = +1.5, screen left): converted to its billboard
+/// once, first frame it can.
 #[derive(Component)]
 pub struct BillboardLabSprite;
 
@@ -356,22 +377,19 @@ fn billboard_lab_convert(
     }
 }
 
-/// Pushes [`SkyTuning`] sun edits into the live billboard materials —
-/// `span_sun` starts as a startup snapshot, so without this the sliders
-/// relight meshes only. Mirrors crowd's `sync_crowd_tuning`.
-fn sync_billboard_sun(
-    sky: Res<SkyTuning>,
+/// Pushes [`BillboardTuning::brightness`] edits into the shared billboard
+/// materials — the materials start at the tuning's value (see
+/// [`BillboardAssets::from_world`]), so this only has to cover live
+/// slider edits. All far boids and the lab twin share one material per
+/// variation, so one pass reaches everything on screen.
+fn sync_billboard_brightness(
+    tuning: Res<BillboardTuning>,
     mut materials: ResMut<Assets<BillboardMaterial>>,
     live: Query<&MeshMaterial3d<BillboardMaterial>>,
 ) {
-    let sun = sun_transform(sky.sun_elevation_deg, sky.sun_azimuth_deg)
-        .translation
-        .normalize();
     for handle in &live {
         if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.span_sun.y = sun.x;
-            material.span_sun.z = sun.y;
-            material.span_sun.w = sun.z;
+            material.brightness = tuning.brightness;
         }
     }
 }
@@ -677,41 +695,34 @@ mod tests {
         );
     }
 
-    /// The materials' sun direction starts as a startup snapshot; this is
-    /// the F1-slider path — a `SkyTuning` edit must reach live materials
-    /// (the lab sweep exercises the startup path, not this one).
+    /// Brightness is a live material input: a tuning edit must reach the
+    /// shared materials the same frame (the slider's whole point — the
+    /// materials are seeded from the tuning at creation, this covers edits).
     #[test]
-    fn sun_edits_reach_live_billboard_materials() {
+    fn brightness_edits_reach_live_billboard_materials() {
         let mut app = App::new();
-        app.init_resource::<SkyTuning>().add_systems(
+        app.init_resource::<BillboardTuning>().add_systems(
             Update,
-            sync_billboard_sun.run_if(resource_changed::<SkyTuning>),
+            sync_billboard_brightness.run_if(resource_changed::<BillboardTuning>),
         );
         let mut materials = Assets::<BillboardMaterial>::default();
         let handle = materials.add(BillboardMaterial {
+            center_span: Vec4::default(),
+            brightness: 1.0,
             atlas: Handle::default(),
-            // Stale sun direction (-X); the span side (x) must survive.
-            span_sun: Vec4::new(1.0, -1.0, 0.0, 0.0),
-            light: Vec4::default(),
-            center: Vec4::default(),
         });
         app.world_mut().insert_resource(materials);
         app.world_mut()
             .spawn(MeshMaterial3d::<BillboardMaterial>(handle.clone()));
         app.update();
 
-        // Rotate the sun and confirm the push.
-        app.world_mut().resource_mut::<SkyTuning>().sun_azimuth_deg = 90.0;
+        app.world_mut().resource_mut::<BillboardTuning>().brightness = 0.5;
         app.update();
-        let sun = sun_transform(35.0, 90.0).translation.normalize();
         let material = app
             .world()
             .resource::<Assets<BillboardMaterial>>()
             .get(&handle)
             .unwrap();
-        assert_eq!(material.span_sun.x, 1.0, "quad span untouched");
-        assert!((material.span_sun.y - sun.x).abs() < 1e-5);
-        assert!((material.span_sun.z - sun.y).abs() < 1e-5);
-        assert!((material.span_sun.w - sun.z).abs() < 1e-5);
+        assert_eq!(material.brightness, 0.5, "slider edit pushed live");
     }
 }

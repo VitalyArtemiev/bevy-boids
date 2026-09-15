@@ -639,7 +639,9 @@ impl PreprocessState {
 
 /// Stitches the per-view captures into one atlas-sized RGBA8 image: each
 /// pose's albedo cells fill a band of the top half, normal cells mirror
-/// them through the texture centre (see the module docs).
+/// them through the texture centre with their content rotated 180° — the
+/// whole-texture rotation a shader reads back with `nuv = 1 - uv` (see the
+/// module docs and [`atlas::blit_cell_rot180`]).
 fn compose_atlas(
     samples: &[ViewSample],
     albedo: &[Option<Image>],
@@ -684,7 +686,9 @@ fn compose_atlas(
                     (atlas::CELL_SIZE_PX, atlas::CELL_SIZE_PX)
                 );
                 let src = normal.data.as_deref().expect("captures carry CPU data");
-                atlas::blit_cell(
+                // The 180° content rotation is what makes `nuv = 1 - uv`
+                // the runtime pairing — see blit_cell_rot180's docs.
+                atlas::blit_cell_rot180(
                     data,
                     atlas::ATLAS_SIZE_PX.x,
                     atlas::normal_cell(view, pose),

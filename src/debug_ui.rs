@@ -291,6 +291,13 @@ fn debug_panel(
                         "hysteresis band (m)",
                     )
                     .changed();
+                    changed |= slider(
+                        ui,
+                        &mut billboard.brightness,
+                        0.0..=3.0,
+                        "brightness (×, 1 = mesh parity)",
+                    )
+                    .changed();
                     changed |= reset(ui, billboard);
                     changed
                 },

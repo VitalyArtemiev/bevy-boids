@@ -204,6 +204,35 @@ pub fn blit_cell(dst: &mut [u8], dst_width_px: u32, cell: UVec2, cell_size: u32,
     }
 }
 
+/// [`blit_cell`], but rotating the source image 180° on the way in. The
+/// normal half's mirror convention is the *whole-texture* 180° rotation:
+/// the cell placement ([`normal_cell`]) AND the image content rotate, so a
+/// runtime shader recovers the normal for any albedo uv with the single
+/// mirror `nuv = 1.0 - uv`. Blitting upright pairs every albedo pixel with
+/// the opposite sprite point's normal — the billboard then lights from the
+/// anti-sun side (sun at zenith glows the sprite's bottom half).
+pub fn blit_cell_rot180(
+    dst: &mut [u8],
+    dst_width_px: u32,
+    cell: UVec2,
+    cell_size: u32,
+    src: &[u8],
+) {
+    let cell_size = cell_size as usize;
+    let row_bytes = cell_size * 4;
+    let dst_x = cell.x as usize * cell_size;
+    let dst_y = cell.y as usize * cell_size;
+    for y in 0..cell_size {
+        let src_row = (cell_size - 1 - y) * row_bytes;
+        let dst_row = ((dst_y + y) * dst_width_px as usize + dst_x) * 4;
+        for x in 0..cell_size {
+            let src_px = src_row + (cell_size - 1 - x) * 4;
+            let dst_px = dst_row + x * 4;
+            dst[dst_px..dst_px + 4].copy_from_slice(&src[src_px..src_px + 4]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +397,22 @@ mod tests {
             assert_eq!(&dst[row..row + 2 * 4], &[1u8; 8]);
             assert_eq!(&dst[row + 2 * 4..row + 4 * 4], &[2u8; 8]);
         }
+    }
+
+    #[test]
+    fn blit_rot180_reverses_both_axes() {
+        // A 2×2 cell with four distinct pixels; the rot180 blit must place
+        // each at the diagonally opposite corner — the content rotation
+        // `nuv = 1 - uv` reads back (upright blits light the billboard from
+        // the anti-sun side).
+        let mut dst = [0u8; 2 * 2 * 4];
+        let px = |r: u8, g: u8, b: u8| [r, g, b, 255];
+        let src = [px(10, 0, 0), px(20, 0, 0), px(30, 0, 0), px(40, 0, 0)].concat();
+        blit_cell_rot180(&mut dst, 2, UVec2::new(0, 0), 2, &src);
+        // src row-major [10 20 / 30 40] → rotated [40 30 / 20 10].
+        assert_eq!(&dst[0..4], px(40, 0, 0));
+        assert_eq!(&dst[4..8], px(30, 0, 0));
+        assert_eq!(&dst[8..12], px(20, 0, 0));
+        assert_eq!(&dst[12..16], px(10, 0, 0));
     }
 }

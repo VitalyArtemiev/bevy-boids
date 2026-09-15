@@ -19,7 +19,8 @@
     forward_io::Vertex,
     view_transformations::position_world_to_clip,
 }
-#import bevy_pbr::mesh_view_bindings::view
+#import bevy_pbr::mesh_view_bindings::{view, lights}
+#import bevy_core_pipeline::tonemapping::tone_mapping
 
 // --- atlas layout: mirror of src/preprocess/atlas.rs (keep in sync) -----
 const ATLAS_W: u32 = 7u;                 // width in cells
@@ -36,16 +37,14 @@ const RING_START: array<u32, RING_COUNT> = array<u32, RING_COUNT>(1u, 9u, 25u);
 const TAU: f32 = 6.283185307179586;
 const PI: f32 = 3.141592653589793;
 
-// x: quad side in world metres (the bake frustum width), yzw: direction
-// TO the sun in world space.
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> span_sun: vec4<f32>;
-// rgb: sun colour, w: ambient fraction.
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> light: vec4<f32>;
 // xyz: the variation's bake centre in model-local space (usually zero;
-// shifts the quad to where the mesh's bulk sits relative to the origin).
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> bake_center: vec4<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var atlas_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var atlas_sampler: sampler;
+// shifts the quad to where the mesh's bulk sits relative to the origin),
+// w: quad side in world metres (the bake frustum width).
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> center_span: vec4<f32>;
+// Manual match knob from BillboardTuning.brightness; 1.0 = PBR parity.
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> brightness: f32;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var atlas_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var atlas_sampler: sampler;
 
 struct BillboardOut {
     @builtin(position) position: vec4<f32>,
@@ -86,24 +85,27 @@ fn vertex(v: Vertex) -> BillboardOut {
     // No spin: the baked capsule is upright in every cell (world up
     // projects up-image in the bake for any azimuth) and world up projects
     // up-screen here, so the sprite is displayed as-is — the folded yaw
-    // above already selected the correct view. The 180-degree negation
-    // maps the image's top edge (atlas v_min) onto the screen-top corner:
-    // atlas v grows down the image while +corner.y places vertices
-    // screen-up.
+    // above already selected the correct view. X maps straight through
+    // (image u grows along screen-right, matching the bake camera's right
+    // axis — negating it would display the baked view mirrored, invisible
+    // on symmetric albedo but a horizontal flip of the baked normals
+    // against the runtime view basis, lighting the sprite from the wrong
+    // side). Y negates: atlas v grows down the image while +corner.y
+    // places vertices screen-up.
     let corner = v.position.xz; // quad mesh: +/-0.5 corners
-    let spun = -corner;
+    let spun = vec2<f32>(corner.x, -corner.y);
 
     // Yaw-rotated bake centre, so leaning models sit in their quad where
     // the mesh bulk sat in the bake frustum.
     let cy = cos(yaw);
     let sy = sin(yaw);
     let center_offset = vec3<f32>(
-        bake_center.x * cy - bake_center.z * sy,
-        bake_center.y,
-        bake_center.x * sy + bake_center.z * cy,
+        center_span.x * cy - center_span.z * sy,
+        center_span.y,
+        center_span.x * sy + center_span.z * cy,
     );
 
-    let world = position + center_offset + (right * spun.x + up * spun.y) * span_sun.x;
+    let world = position + center_offset + (right * spun.x + up * spun.y) * center_span.w;
 
     var out: BillboardOut;
     out.position = position_world_to_clip(world);
@@ -118,21 +120,59 @@ fn vertex(v: Vertex) -> BillboardOut {
 @fragment
 fn fragment(in: BillboardOut) -> @location(0) vec4<f32> {
     let albedo = textureSample(atlas_texture, atlas_sampler, in.uv);
-    // Mirrored view-space normal; the sRGB texture decode returns it to
-    // linear, then n = 2v - 1 (the bake stores n * 0.5 + 0.5).
-    let normal =
-        textureSample(atlas_texture, atlas_sampler, vec2<f32>(1.0) - in.uv).xyz * 2.0 - 1.0;
-    let sun_view = normalize((view.view_from_world * vec4<f32>(span_sun.yzw, 0.0)).xyz);
-    let lambert = max(dot(normal, sun_view), 0.0);
-    let lit = albedo.rgb * (light.rgb * lambert + vec3<f32>(light.w));
-    // The cutout itself: `AlphaMode::Mask` only routes the pipeline into
-    // the opaque binning phase (where instancing lives) — the discard is
-    // the custom shader's job (the standard PBR fragment does it from the
+    // The cutout: `AlphaMode::Mask` only routes the pipeline into the
+    // opaque binning phase (where instancing lives) — the discard is the
+    // custom shader's job (the standard PBR fragment does it from the
     // material's alpha_cutoff). Without it the atlas's transparent
     // background (0,0,0,0) writes black behind every sprite. Threshold
     // mirrors BillboardMaterial::alpha_mode's Mask(0.5).
     if (albedo.a < 0.5) {
         discard;
     }
-    return vec4<f32>(lit, albedo.a);
+    // Mirrored view-space normal; the sRGB texture decode returns it to
+    // linear, then n = 2v - 1 (the bake stores n * 0.5 + 0.5).
+    let normal =
+        textureSample(atlas_texture, atlas_sampler, vec2<f32>(1.0) - in.uv).xyz * 2.0 - 1.0;
+
+    // Lighting comes straight from the engine's view bind group — the
+    // same `lights` uniform the PBR meshes read — so ambient strength,
+    // sun colour (premultiplied by illuminance), sun direction, light
+    // count and any future day/night state apply to billboards and
+    // meshes from one source, with no sync system in between. Zero
+    // directional lights (night) leaves the ambient term only.
+    var diffuse_light = lights.ambient_color.rgb;
+    for (var i: u32 = 0u; i < lights.n_directional_lights; i = i + 1u) {
+        let l = &lights.directional_lights[i];
+        // Direction TO the light, in the runtime view basis — matching
+        // the baked normal up to the documented yaw-fold approximation
+        // (see the atlas docs' orientation-folding note).
+        let l_view = normalize((view.view_from_world * vec4<f32>((*l).direction_to_light, 0.0)).xyz);
+        // PBR's diffuse for our matte capsules is Burley with roughness
+        // 0.25, whose Schlick terms sit within a few percent of 1 — the
+        // Lambert limit. Specular (a dielectric F0 of ~0.04 sheen) is
+        // below the billboard's perceptual floor and skipped.
+        diffuse_light += (*l).color.rgb * max(dot(normal, l_view), 0.0) / PI;
+    }
+
+    // The `lights` uniform is photometric HDR (sun colour carries ~10⁴
+    // lux) and every PBR fragment scales its summed light by
+    // `view.exposure` before writing (pbr_functions.wgsl: `view.exposure *
+    // (transmitted_light + direct_light + indirect_light)`). The default
+    // camera exposure (`Exposure::BLENDER`, EV100 9.7 ≈ ×1.4e-3) is what
+    // brings daylight down to display scale; without it the sprite rides
+    // the tonemap shoulder ~700× too high — colour survives at grazing
+    // sun angles but crushes to a white blob wherever NdotL nears 1
+    // (the 302 m bench view). `brightness` is the manual match knob on
+    // top (1.0 = parity). Distance fog and deband dither from the
+    // standard chain are skipped — neither is used by this game's views.
+    diffuse_light *= view.exposure * brightness;
+
+    // The same in-shader post-lighting step the PBR fragment performs on
+    // non-HDR cameras: without tonemapping the raw value saturates the
+    // sRGB target and the whole sprite clips to white.
+    var color = vec4<f32>(albedo.rgb * diffuse_light, albedo.a);
+#ifdef TONEMAP_IN_SHADER
+    color = tone_mapping(color, view.color_grading);
+#endif
+    return color;
 }
