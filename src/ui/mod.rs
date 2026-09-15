@@ -234,8 +234,14 @@ fn options_ui(
             // just because widgets hold `&mut` for a frame.
             let settings: &mut OptionsSettings = settings.bypass_change_detection();
             ui.heading("Graphics");
-            changed |= ui.checkbox(&mut settings.shadows, "Shadow maps").changed();
-            changed |= ui.checkbox(&mut settings.bloom, "Bloom").changed();
+            changed |= ui
+                .checkbox(&mut settings.shadows, "Shadow maps")
+                .on_hover_text("Directional-light shadow maps — the priciest graphics toggle.")
+                .changed();
+            changed |= ui
+                .checkbox(&mut settings.bloom, "Bloom")
+                .on_hover_text("Camera bloom post-process.")
+                .changed();
             ui.add_space(6.0);
             ui.heading("Camera");
             changed |= ui
@@ -243,18 +249,28 @@ fn options_ui(
                     egui::Slider::new(&mut settings.camera_pan_speed, 1.0..=100.0)
                         .text("pan speed"),
                 )
+                .on_hover_text("Camera pan speed, m/s at the reference height.")
                 .changed();
             changed |= ui
                 .add(
                     egui::Slider::new(&mut settings.camera_zoom_sensitivity, 0.25..=4.0)
                         .text("zoom speed"),
                 )
+                .on_hover_text("Multiplier on the height-scaled wheel step (the crate's own zoom stays disabled).")
                 .changed();
             ui.add_space(6.0);
-            if ui.button("Key bindings…").clicked() {
+            if ui
+                .button("Key bindings…")
+                .on_hover_text("Open the key rebind window.")
+                .clicked()
+            {
                 bindings_open.0 = !bindings_open.0;
             }
-            if ui.button("Reset to defaults").clicked() {
+            if ui
+                .button("Reset to defaults")
+                .on_hover_text("Restore default options.")
+                .clicked()
+            {
                 *settings = OptionsSettings::default();
                 changed = true;
             }
@@ -344,8 +360,15 @@ fn debug_panel_ui(
             let demo = demo.bypass_change_detection();
 
             ui.horizontal(|ui| {
-                dirty |= ui.checkbox(&mut demo.erosion_enabled, "erosion").changed();
-                if ui.button("reset").clicked() {
+                dirty |= ui
+                    .checkbox(&mut demo.erosion_enabled, "erosion")
+                    .on_hover_text("Carve gullies and ridges into the fBm base; off shows the raw terrain.")
+                    .changed();
+                if ui
+                    .button("reset")
+                    .on_hover_text("Reset all terrain settings and rebuild.")
+                    .clicked()
+                {
                     *demo = DemoTerrain::default();
                     dirty = true;
                 }
@@ -362,6 +385,7 @@ fn debug_panel_ui(
                 ] {
                     dirty |= ui
                         .selectable_value(&mut demo.view_mode, mode, view_label(mode))
+                        .on_hover_text(view_tip(mode))
                         .changed();
                 }
             });
@@ -373,6 +397,7 @@ fn debug_panel_ui(
                     &mut free,
                     "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
                 )
+                .on_hover_text("Swap the RTS rig for a free-fly camera; focus and zoom survive the round trip.")
                 .changed()
             {
                 *camera_mode = if free {
@@ -386,15 +411,78 @@ fn debug_panel_ui(
 
             dirty |= section(ui, "Filter", |ui| {
                 let e = &mut demo.erosion;
-                let mut c = slider(ui, &mut e.scale, 0.04..=0.32, "gully size").changed();
-                c |= slider(ui, &mut e.strength, 0.0..=0.42, "strength").changed();
-                c |= slider(ui, &mut e.gully_weight, 0.0..=1.0, "gully depth").changed();
-                c |= slider(ui, &mut e.detail, 0.2..=4.0, "high-slope spread").changed();
-                c |= slider(ui, &mut e.cell_scale, 0.25..=4.0, "cell density").changed();
-                c |= slider(ui, &mut e.normalization, 0.0..=1.0, "wave normalization").changed();
-                c |= slider(ui, &mut e.octaves, 1..=8, "octaves").changed();
-                c |= slider(ui, &mut e.lacunarity, 1.5..=3.0, "lacunarity").changed();
-                c |= slider(ui, &mut e.gain, 0.1..=0.9, "gain").changed();
+                let mut c = slider(
+                    ui,
+                    &mut e.scale,
+                    0.04..=0.32,
+                    "gully size",
+                    "Base gully wavelength — larger carves bigger, deeper gullies.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.strength,
+                    0.0..=0.42,
+                    "strength",
+                    "Overall erosion strength.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.gully_weight,
+                    0.0..=1.0,
+                    "gully depth",
+                    "How much gullies carve and steer the next octave's branching.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.detail,
+                    0.2..=4.0,
+                    "high-slope spread",
+                    "How much each octave re-cuts the erosion mask on steep ground.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.cell_scale,
+                    0.25..=4.0,
+                    "cell density",
+                    "Wave density inside each noise cell — more is busier fine detail.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.normalization,
+                    0.0..=1.0,
+                    "wave normalization",
+                    "Gully-wave magnitude floor — higher lets waves taper at their ends.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.octaves,
+                    1..=8,
+                    "octaves",
+                    "Branching octaves; each octave's slope seeds the next, finer one.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.lacunarity,
+                    1.5..=3.0,
+                    "lacunarity",
+                    "Frequency ratio between gully octaves.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut e.gain,
+                    0.1..=0.9,
+                    "gain",
+                    "Strength falloff between gully octaves.",
+                )
+                .changed();
                 let mut rounding = e.rounding.to_array();
                 c |= component_sliders(
                     ui,
@@ -406,6 +494,12 @@ fn debug_panel_ui(
                         "round creases",
                         "crease falloff",
                     ],
+                    &[
+                        "Rounding amount on high ground — softens ridge crests.",
+                        "Rounding amount on low ground — softens crease floors.",
+                        "Overall multiplier on the rounding blend.",
+                        "Per-octave multiplier on the rounding blend.",
+                    ],
                 );
                 e.rounding = Vec4::from_array(rounding);
                 let mut onset = e.onset.to_array();
@@ -414,6 +508,12 @@ fn debug_panel_ui(
                     &mut onset,
                     0.0..=4.0,
                     &["onset slope 1", "onset slope 2", "ridge mask", "ridge fade"],
+                    &[
+                        "Terrain slope where the initial erosion mask starts.",
+                        "Gully-wall slope where the next octave starts branching.",
+                        "Slope where the ridge map activates.",
+                        "Wave slope that keeps the ridge map faded in.",
+                    ],
                 );
                 e.onset = Vec4::from_array(onset);
                 let mut assumed_slope = e.assumed_slope.to_array();
@@ -422,16 +522,40 @@ fn debug_panel_ui(
                     &mut assumed_slope,
                     0.0..=2.0,
                     &["pretend slope", "pretend blend"],
+                    &[
+                        "Slope steepness substituted for the real one in the flow direction.",
+                        "Blend from the real slope toward the pretend slope.",
+                    ],
                 );
                 e.assumed_slope = Vec2::from_array(assumed_slope);
                 c
             });
 
             dirty |= section(ui, "Terrain", |ui| {
-                let mut c =
-                    slider(ui, &mut demo.height_offset, -1.1..=0.25, "height offset").changed();
-                c |= slider(ui, &mut demo.map_scale, 0.8..=3.6, "range scale").changed();
-                c |= slider(ui, &mut demo.water_level, -3.0..=1.0, "water level").changed();
+                let mut c = slider(
+                    ui,
+                    &mut demo.height_offset,
+                    -1.1..=0.25,
+                    "height offset",
+                    "Vertical bias scaled by erosion magnitude — deepens carved ground.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut demo.map_scale,
+                    0.8..=3.6,
+                    "range scale",
+                    "Zoom of the sampled noise window; higher packs more range, and steeper slopes, into the square.",
+                )
+                .changed();
+                c |= slider(
+                    ui,
+                    &mut demo.water_level,
+                    -3.0..=1.0,
+                    "water level",
+                    "Water plane height in demo units (×45.5 to metres).",
+                )
+                .changed();
                 c
             });
         });
@@ -454,6 +578,17 @@ fn view_label(mode: ViewMode) -> &'static str {
     }
 }
 
+/// Hover tooltip for a view-mode button (see `debug_color` in
+/// `terrain::demo` for what each view paints).
+fn view_tip(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::Terrain => "The game view: the full albedo cascade.",
+        ViewMode::ErosionDelta => "Debug view of the carved height delta.",
+        ViewMode::RidgeMap => "Debug view of the ridge map (drainage mask).",
+        ViewMode::DebugFade => "Debug view of the filter's fade-target ramp.",
+    }
+}
+
 /// A collapsing section whose body reports whether it changed anything.
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
     egui::CollapsingHeader::new(title)
@@ -468,8 +603,10 @@ fn slider<T: egui::emath::Numeric>(
     value: &mut T,
     range: RangeInclusive<T>,
     label: &str,
+    tip: &str,
 ) -> egui::Response {
     ui.add(egui::Slider::new(value, range).text(label))
+        .on_hover_text(tip)
 }
 
 /// One slider per array component — the erosion filter's shader vectors
@@ -479,17 +616,17 @@ fn component_sliders(
     values: &mut [f32],
     range: RangeInclusive<f32>,
     labels: &[&str],
+    tips: &[&str],
 ) -> bool {
     let mut changed = false;
-    for (value, label) in values.iter_mut().zip(labels) {
+    for ((value, label), tip) in values.iter_mut().zip(labels).zip(tips) {
         changed |= ui
             .add(egui::Slider::new(value, range.clone()).text(*label))
+            .on_hover_text(*tip)
             .changed();
     }
     changed
 }
-
-/// One slider per array component — the erosion filter's shader vectors
 
 /// Escape pauses/resumes; with the Options window or scene picker open it
 /// closes that instead, and in the main menu it just closes the Options

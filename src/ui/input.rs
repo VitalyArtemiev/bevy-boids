@@ -508,14 +508,24 @@ fn bindings_ui(
                             if rebind.clicked() {
                                 *capturing = None;
                             }
-                        } else if ui.button("Rebind").clicked() {
+                        } else if ui
+                            .button("Rebind")
+                            .on_hover_text(
+                                "Capture the next key or mouse press; a clash swaps bindings with the other action.",
+                            )
+                            .clicked()
+                        {
                             *capturing = Some(id);
                         }
                         ui.end_row();
                     }
                 });
             ui.add_space(6.0);
-            if ui.button("Reset all to defaults").clicked() {
+            if ui
+                .button("Reset all to defaults")
+                .on_hover_text("Restore every binding to its default.")
+                .clicked()
+            {
                 reset_all = true;
             }
         });

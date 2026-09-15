@@ -135,6 +135,46 @@ impl TestScene {
             .find(|scene| scene.name() == name)
     }
 
+    /// One-line hover tooltip for the scene picker — the condensed version
+    /// of this variant's docs.
+    pub fn tooltip(&self) -> &'static str {
+        match *self {
+            TestScene::Billboard => {
+                "A mesh capsule beside its billboard twin under one sun — compare the render paths."
+            }
+            TestScene::Crowd => {
+                "The crowd-shell experiment: two armies drawn by the procedural crowd shader on test hills."
+            }
+            TestScene::Arrival => {
+                "One unit from standstill onto a distant point — plain arrival dynamics."
+            }
+            TestScene::Perpendicular => {
+                "One unit at speed, target off to the side — must brake and turn, not orbit."
+            }
+            TestScene::HeadOn => {
+                "Two friendly units on offset lanes — anticipation sidesteps them past without contact."
+            }
+            TestScene::Clash => {
+                "The same meeting, hostile — no anticipation; bodies slam and grind."
+            }
+            TestScene::Shove => {
+                "Hostile head-on with mass asymmetry — the 8× heavier unit bowls the light one."
+            }
+            TestScene::Melee => {
+                "Three factions converging on one point — the free-for-all pile; penetration stays bounded."
+            }
+            TestScene::FormationCross => {
+                "Two friendly formations crossing at 90° — members braid the blocks through each other."
+            }
+            TestScene::FormationBraid => {
+                "Two friendly formations head-on on one lane — the persistent-conflict braid stress test."
+            }
+            TestScene::FormationClash => {
+                "Two hostile formations marching through each other — clash at formation scale."
+            }
+        }
+    }
+
     /// Whether the scene wants the flat plane ([`spawn_flat_ground`])
     /// instead of any terrain — every movement scene does; only the crowd
     /// experiment wants its rolling hills.

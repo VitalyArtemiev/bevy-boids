@@ -81,7 +81,7 @@ fn scenes_menu_ui(
                 } else {
                     scene.name().to_owned()
                 };
-                if ui.button(label).clicked() {
+                if ui.button(label).on_hover_text(scene.tooltip()).clicked() {
                     clicked = true;
                     commands.insert_resource(LoadWorld(Some(scene)));
                     if *state.get() == GameState::MainMenu {
@@ -90,7 +90,11 @@ fn scenes_menu_ui(
                 }
             }
             ui.separator();
-            if ui.button("Reset current scene").clicked() {
+            if ui
+                .button("Reset current scene")
+                .on_hover_text("Reload the current world from scratch — the sandbox included.")
+                .clicked()
+            {
                 clicked = true;
                 commands.insert_resource(LoadWorld(active.0));
             }
