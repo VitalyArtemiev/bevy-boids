@@ -1,16 +1,13 @@
 mod billboard;
 mod boid;
 mod crowd;
-mod debug_ui;
 mod formations;
 mod freecam;
 mod horse;
-mod input;
 mod kinematics;
 mod launch;
 mod player;
 mod preprocess;
-mod radial;
 mod resources;
 mod scene;
 mod sky;
@@ -22,8 +19,8 @@ mod util;
 use crate::boid::*;
 use crate::billboard::{BillboardPlugin, force_render, swap_boid_lod, update_billboard_yaw};
 use crate::crowd::CrowdPlugin;
-use crate::debug_ui::{DebugConfig, DebugUiPlugin};
-use crate::input::InputPlugin;
+use crate::ui::debug::{DebugConfig, DebugUiPlugin};
+use crate::ui::input::InputPlugin;
 use crate::formations::{
     FormationTuning, LODGuard, assign_slots, dispatch_formation_goals, init_formation_speed,
     plan_formation_goals, propagate_formation_targets, transition_formation_orders,
@@ -35,7 +32,7 @@ use crate::player::{
     FormationSelectionGizmo, Player, SelectionGizmo, draw_cursor, frontage_position_system,
     height_scaled_zoom, mouse_click_system, quick_group_system, selection_indicator_face,
 };
-use crate::radial::{RadialPlugin, radial_closed};
+use crate::ui::radial::{RadialPlugin, radial_closed};
 use crate::resources::{Materials, Meshes};
 use crate::scene::{ScenePlugin, TestScene};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
@@ -79,15 +76,15 @@ fn main() {
 
     // Read out the scalar flags the plugin chain needs before `launch`
     // moves into the resource.
-    let (bench, shadows, crowd_scene, flat_scene, forced_render, no_vsync, scene_active, billboard_scene) = (
+    let (bench, shadows, flat_scene, forced_render, no_vsync, scene_active, billboard_scene, crowd_scene) = (
         launch.bench,
         launch.shadows,
-        launch.crowd,
         launch.flat,
         launch.force_meshes || launch.force_billboards,
         launch.no_vsync,
         launch.scene.is_some(),
         launch.in_scene(TestScene::Billboard),
+        launch.in_scene(TestScene::Crowd),
     );
     let mut sky = SkyTuning {
         shadows,
@@ -140,7 +137,7 @@ fn main() {
         .add_plugins(default_plugins)
         .add_plugins(RtsCameraPlugin)
         .add_plugins(SkyPlugin)
-        // Formation crowd-shell experiment (spawns only with --crowd).
+        // Formation crowd-shell experiment (`--scene=crowd`).
         .add_plugins(CrowdPlugin)
         // Per-boid impostor LOD: mesh <-> baked-atlas billboard by camera
         // distance (builds the shared BoidVariations catalog).
@@ -178,15 +175,19 @@ fn main() {
         )
         .add_systems(Startup, setup);
 
-    if crowd_scene || flat_scene || billboard_scene {
-        // Isolated flat scene (the crowd experiment's, `--flat` for
-        // render-path benches, or the billboard scene): a plain plane instead
-        // of the erosion terrain, no water/obstacles, so nothing but the
-        // units cost GPU time. The terrain settings resource still exists
-        // so the F3 panel's `Res` is valid; without the plugin it just has
-        // nothing to rebuild.
-        app.add_systems(Startup, crowd::spawn_crowd_ground)
+    if flat_scene || billboard_scene {
+        // Flat ground for `--flat` render-path benches and the billboard
+        // comparison scene: a plain plane, no water/obstacles, so nothing
+        // but the units cost GPU time. The terrain settings resource
+        // still exists so the F3 panel's `Res` is valid; without the
+        // plugin it just has nothing to rebuild.
+        app.add_systems(Startup, scene::spawn_flat_ground)
             .init_resource::<DemoTerrain>();
+    } else if crowd_scene {
+        // The crowd scene's rolling-hill ground and armies are
+        // CrowdPlugin's own, gated on the scene; the terrain settings
+        // resource still exists for the F3 panel (nothing to rebuild).
+        app.init_resource::<DemoTerrain>();
     } else {
         // The 1 km² ground mesh (needs Assets<Mesh> from the plugins)
         // and the erosion-demo settings/water/rebuild wiring.
@@ -268,82 +269,12 @@ fn main() {
 /// closer reads as an abrupt void edge over the hazy far terrain.
 const CAMERA_FAR_PLANE_M: f32 = 500_000.0;
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut mesh_list: ResMut<Meshes>,
-    mut mat_list: ResMut<Materials>,
-    variations: Res<BoidVariations>,
-    mut ids: ResMut<BoidIds>,
-    field: Res<HeightField>,
-    launch: Res<LaunchConfig>,
-    mut ambient_light: ResMut<GlobalAmbientLight>,
-    mut gizmo_store: ResMut<GizmoConfigStore>,
-) {
-    // While a `--scene` micro-scene is active it owns the camera, boids
-    // and obstacles — the grid spawn below stands down (see scene.rs).
-    let scene_active = launch.scene.is_some();
-    // Debug gizmos (cursor, selection box, frontage line) must read through
-    // the terrain: pull them to the near plane so hills can't bury them.
-    let (gizmo_config, _) = gizmo_store.config_mut::<DefaultGizmoConfigGroup>();
-    gizmo_config.depth_bias = -1.0;
-
-    mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
-    mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
-
-    mesh_list.cube = meshes.add(Cuboid::default());
-
-    // `--boids` works in normal launches too; the default is the full
-    // historical 99x99 grid. A test scene spawns its own props instead.
-    let boid_budget = if scene_active { 0 } else { launch.boids };
-    let mut boids_spawned = 0;
-    'grid: for i in 1..100 {
-        for j in 1..100 {
-            if boids_spawned >= boid_budget {
-                break 'grid;
-            }
-            boids_spawned += 1;
-            commands.spawn(BoidBundle::with_id(
-                ids.next(),
-                Target {
-                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
-                    ..default()
-                },
-                &variations,
-            ));
-        }
-    }
-
-    // Isolated flat scene: no obstacle scatter — nothing but the units
-    // should cost render time (matches the crowd experiment's scene).
-    if !launch.crowd && !launch.flat && !scene_active {
-        for _ in 1..100 {
-            let mut rng = rand::rng();
-            let x = rng.random_range(-100.0..100.0);
-            let z = rng.random_range(-100.0..100.0);
-            // Obstacles sit on the terrain surface (cube is 1 m, so +0.5 to
-            // its centre).
-            let y = field.height(x, z) + 0.5;
-
-            commands.spawn(ObstacleBundle::new(
-                mesh_list.cube.clone(),
-                mat_list.black.clone(),
-                Vec3::from_array([1.0, 0.0, 0.0]),
-                Vec3::from_array([x, y, z]),
-            ));
-        }
-    }
-
-    // A test scene brings its own plain camera; skipping the RTS one
-    // keeps the scene single-camera (several input systems `single()` it)
-    // and the scene pose immune to bench zoom pinning.
-    let camera = if scene_active {
-        None
-    } else {
-        Some(
-            commands
-                .spawn((
+/// The game's RTS camera, as the normal launch sets it up. Shared with
+/// the crowd test scene (`--scene=crowd`), which is viewed through the
+/// same camera instead of a scene-specific one.
+pub(crate) fn spawn_rts_camera(commands: &mut Commands) -> Entity {
+    commands
+        .spawn((
             Camera3d::default(),
             // Smoothed terrain-clearance lift state (see camera_terrain_clearance).
             CameraClearance::default(),
@@ -394,9 +325,88 @@ fn setup(
                 zoom_sensitivity: 0.0,
                 enabled: true,
             },
-                ))
-                .id(),
-        )
+        ))
+        .id()
+}
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut mesh_list: ResMut<Meshes>,
+    mut mat_list: ResMut<Materials>,
+    variations: Res<BoidVariations>,
+    mut ids: ResMut<BoidIds>,
+    field: Res<HeightField>,
+    launch: Res<LaunchConfig>,
+    mut ambient_light: ResMut<GlobalAmbientLight>,
+    mut gizmo_store: ResMut<GizmoConfigStore>,
+) {
+    // While a `--scene` micro-scene is active it owns the camera, boids
+    // and obstacles — the grid spawn below stands down (see scene.rs).
+    let scene_active = launch.scene.is_some();
+    // Debug gizmos (cursor, selection box, frontage line) must read through
+    // the terrain: pull them to the near plane so hills can't bury them.
+    let (gizmo_config, _) = gizmo_store.config_mut::<DefaultGizmoConfigGroup>();
+    gizmo_config.depth_bias = -1.0;
+
+    mat_list.black = materials.add(StandardMaterial::from_color(Color::BLACK));
+    mat_list.white = materials.add(StandardMaterial::from_color(Color::WHITE));
+
+    mesh_list.cube = meshes.add(Cuboid::default());
+
+    // `--boids` works in normal launches too; the default is the full
+    // historical 99x99 grid. A test scene spawns its own props instead.
+    let boid_budget = if scene_active { 0 } else { launch.boids };
+    let mut boids_spawned = 0;
+    'grid: for i in 1..100 {
+        for j in 1..100 {
+            if boids_spawned >= boid_budget {
+                break 'grid;
+            }
+            boids_spawned += 1;
+            commands.spawn(BoidBundle::with_id(
+                ids.next(),
+                Target {
+                    pos: Vec3::from_array([(i - 50) as f32, 0.0, (j - 50) as f32]),
+                    ..default()
+                },
+                &variations,
+            ));
+        }
+    }
+
+    // Isolated flat/crowd scene: no obstacle scatter — nothing but the
+    // units should cost render time. Any `--scene` also implies this.
+    if !launch.flat && !scene_active {
+        for _ in 1..100 {
+            let mut rng = rand::rng();
+            let x = rng.random_range(-100.0..100.0);
+            let z = rng.random_range(-100.0..100.0);
+            // Obstacles sit on the terrain surface (cube is 1 m, so +0.5 to
+            // its centre).
+            let y = field.height(x, z) + 0.5;
+
+            commands.spawn(ObstacleBundle::new(
+                mesh_list.cube.clone(),
+                mat_list.black.clone(),
+                Vec3::from_array([1.0, 0.0, 0.0]),
+                Vec3::from_array([x, y, z]),
+            ));
+        }
+    }
+
+    // A test scene brings its own plain camera; skipping the RTS one
+    // keeps the scene single-camera (several input systems `single()` it)
+    // and the scene pose immune to bench zoom pinning.
+    // A test scene brings its own camera; skipping the RTS one
+    // keeps the scene single-camera (several input systems `single()` it)
+    // and the scene pose immune to bench zoom pinning. (The crowd scene
+    // spawns the shared RTS camera itself, see scene.rs.)
+    let camera = if scene_active {
+        None
+    } else {
+        Some(spawn_rts_camera(&mut commands))
     };
 
     // Atmosphere is opt-in for now: Bevy 0.19 refilters its environment-map

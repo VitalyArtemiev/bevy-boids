@@ -24,9 +24,9 @@
 //! cells are discarded — only the crowd and its dark shadowed interior
 //! draw. A translucent dust volume rides each box (`crowd_dust`).
 //!
-//! Two armies face off across a gap near the origin so the bench camera
-//! (`--crowd --shot ...`, optionally `--cam-angle <deg from nadir>`)
-//! captures the experiment head-on.
+//! Two armies face off across a gap near the origin as the `--scene=crowd`
+//! test scene (see src/scene.rs), so the bench camera (`--cam-angle`,
+//! `--shot`) captures the experiment head-on.
 
 use bevy::asset::Asset;
 use bevy::light::NotShadowCaster;
@@ -39,7 +39,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
-use crate::launch::launch_crowd_enabled;
+use crate::scene::{TestScene, in_scene};
 use crate::sky::{SkyTuning, sun_transform};
 use crate::terrain::HeightField;
 
@@ -79,7 +79,7 @@ const TRACE_Y_PAD_M: f32 = 0.7;
 const HEIGHT_MAP_SPAN_M: f32 = 240.0;
 const HEIGHT_MAP_RES: u32 = 512;
 
-/// Rolling test hills for the isolated `--crowd` scene: gentle enough to
+/// Rolling test hills for the `--scene=crowd` test scene: gentle enough to
 /// march armies across (worst grade ~3%), steep enough to exercise
 /// terrain following. The ground mesh, the HeightField and the crowd
 /// heightmap all come from this one function, so grounding, camera and
@@ -219,12 +219,18 @@ impl Plugin for CrowdPlugin {
             .add_plugins(MaterialPlugin::<CrowdDustMaterial>::default())
             .add_systems(Startup, load_crowd_module)
             .add_systems(
+                Startup,
+                // The crowd scene (`--scene=crowd`) owns its own ground:
+                // rolling hills that replace the erosion terrain. The
+                // scene's camera comes from scene.rs.
+                spawn_crowd_ground.run_if(in_scene(TestScene::Crowd)),
+            )
+            .add_systems(
                 Update,
-                // `--crowd` runs as an isolated scene (see main.rs): the
-                // default flat HeightField, no erosion demo — so there is
-                // no `rebuild_terrain` to order against.
+                // Armies spawn once the shared shader module is loaded —
+                // creating the material earlier races the async load.
                 spawn_crowd
-                    .run_if(launch_crowd_enabled)
+                    .run_if(in_scene(TestScene::Crowd))
                     .run_if(crowd_module_loaded),
             )
             .add_systems(
@@ -247,11 +253,11 @@ fn crowd_module_loaded(server: Res<AssetServer>, module: Res<CrowdCommonShader>)
     server.is_loaded_with_dependencies(&module.0)
 }
 
-/// The isolated test scene's stand-in terrain: a gently rolling grid mesh
+/// The crowd scene's stand-in terrain: a gently rolling grid mesh
 /// and a HeightField from the same [`crowd_test_height`], so the crowd's
-/// boxes have real slopes to ride (main.rs skips the erosion demo
-/// entirely while `--crowd` is set).
-pub fn spawn_crowd_ground(
+/// boxes have real slopes to ride (the scene replaces the erosion demo
+/// entirely).
+fn spawn_crowd_ground(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -397,7 +403,8 @@ fn spawn_crowd(
         let seat = min_h + 0.05;
         // Lighting runs in local space, so the sun rotates with the box.
         let sun_local = rotation.inverse() * sun_world;
-        let (terrain_a, terrain_b, terrain_c) = terrain_uniforms(yaw, z, seat, min_h, max_h);
+        let (terrain_a, terrain_b, terrain_c) =
+            terrain_uniforms(yaw, z, seat, h_min, h_max, min_h, max_h);
 
         commands.spawn((
             Mesh3d(crowd_mesh.clone()),
@@ -440,13 +447,17 @@ fn spawn_crowd(
 
 /// The terrain uniforms shared by both crowd materials: (origin.x,
 /// origin.z, sin(yaw), cos(yaw)), the heightmap window plus this army's
-/// seat, and the height decode range plus the trace's local y range.
+/// seat, and `terrain_c` = the heightmap's BAKE decode range (the map
+/// spans `h_min..h_max` over the whole battlefield) followed by the
+/// trace's local y range (this box's footprint rise plus box height).
 fn terrain_uniforms(
     yaw: f32,
     z_offset: f32,
     seat: f32,
-    min_h: f32,
-    max_h: f32,
+    h_min: f32,
+    h_max: f32,
+    footprint_min_h: f32,
+    footprint_max_h: f32,
 ) -> (Vec4, Vec4, Vec4) {
     (
         Vec4::new(0.0, z_offset, yaw.sin(), yaw.cos()),
@@ -457,10 +468,10 @@ fn terrain_uniforms(
             seat,
         ),
         Vec4::new(
-            min_h,
-            max_h,
-            (min_h - seat) - TRACE_Y_PAD_M,
-            (max_h - min_h) + CROWD_HEIGHT_M + TRACE_Y_PAD_M,
+            h_min,
+            h_max,
+            (footprint_min_h - seat) - TRACE_Y_PAD_M,
+            (footprint_max_h - footprint_min_h) + CROWD_HEIGHT_M + TRACE_Y_PAD_M,
         ),
     )
 }

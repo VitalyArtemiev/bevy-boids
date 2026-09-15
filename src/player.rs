@@ -3,7 +3,7 @@ use crate::formations::{
     Formation, FormationKind, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
     QuickCommandGroup,
 };
-use crate::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, fired, started};
+use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, fired, started};
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
 use crate::terrain::HeightField;
@@ -206,7 +206,7 @@ pub fn draw_cursor(
     field: Res<HeightField>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
-    debug: Res<crate::debug_ui::DebugConfig>,
+    debug: Res<crate::ui::debug::DebugConfig>,
 ) {
     if !debug.show_cursor_circle {
         return;
@@ -441,7 +441,7 @@ pub fn frontage_position_system(
             player.front_left = None;
             // Click without drag: not a frontage — the radial menu owns
             // that gesture (see `radial::radial_input`).
-            if cursor.distance(player.front_press) < crate::radial::CLICK_TOLERANCE_PX {
+            if cursor.distance(player.front_press) < crate::ui::radial::CLICK_TOLERANCE_PX {
                 return;
             }
             let adjust_width = fired(&actions, ActionId::AdjustWidth);

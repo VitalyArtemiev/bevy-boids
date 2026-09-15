@@ -51,7 +51,7 @@ use bevy::render::render_resource::{AsBindGroup, RenderPipelineDescriptor};
 use bevy::shader::ShaderRef;
 
 use crate::boid::{Boid, BoidVariations, variation_for};
-use crate::debug_ui::DebugConfig;
+use crate::ui::debug::DebugConfig;
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
 use crate::preprocess::atlas;

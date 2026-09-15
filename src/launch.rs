@@ -59,10 +59,8 @@ pub struct LaunchConfig {
     pub environment_map: bool,
     /// Whether cameras get the bloom post-process.
     pub bloom: bool,
-    /// Whether the formation crowd-shell experiment spawns (src/crowd.rs).
-    pub crowd: bool,
     /// Flat-plane scene: skip the erosion demo and obstacles, spawn the
-    /// plain ground mesh (the crowd experiment's stand-in terrain) — used
+    /// plain ground mesh (the render-path bench stand-in terrain) — used
     /// by render-path benches so nothing but the boids costs GPU time.
     pub flat: bool,
     /// Bench scenario: hold every boid on its full mesh, auto-swap off.
@@ -116,7 +114,6 @@ impl Default for LaunchConfig {
             atmosphere: false,
             environment_map: false,
             bloom: true,
-            crowd: false,
             flat: false,
             force_meshes: false,
             force_billboards: false,
@@ -160,7 +157,7 @@ fn value(
 /// `--focus <x,z>`, `--cam-angle <deg>`,
 /// `--boids <n>`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
 /// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`,
-/// `--bloom|--no-bloom`, `--crowd`, `--flat`, `--force-meshes`,
+/// `--bloom|--no-bloom`, `--flat`, `--force-meshes`,
 /// `--force-billboards`, `--no-vsync`, `--scene <name>` (see
 /// [`crate::scene::TestScene`]), and `--preprocess`. Later flags win.
 /// Unrelated arguments are ignored so other tooling can pass through.
@@ -257,10 +254,6 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
                 config.bloom = !flag.starts_with("--no-");
                 i += 1;
             }
-            "--crowd" => {
-                config.crowd = true;
-                i += 1;
-            }
             "--flat" => {
                 config.flat = true;
                 i += 1;
@@ -337,13 +330,6 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
 /// spawning even in a normal (non-bench) launch.
 pub fn launch_terrain_enabled(config: Res<LaunchConfig>) -> bool {
     config.terrain
-}
-
-/// Run condition for `spawn_crowd`: the crowd-shell experiment is opt-in
-/// via `--crowd` (works with or without benching, like the other
-/// scenario flags).
-pub fn launch_crowd_enabled(config: Res<LaunchConfig>) -> bool {
-    config.crowd
 }
 
 /// Added unconditionally by `main`; it is a no-op without `--bench`.
@@ -605,12 +591,19 @@ mod tests {
     }
 
     #[test]
-    fn crowd_flags_parse() {
-        let config = parse_launch_args(&args(&["--crowd"])).unwrap();
-        assert!(config.crowd);
-        assert_eq!(config.cam_angle_deg, None);
+    fn crowd_scene_parses_and_cam_angle_validates() {
+        // The crowd experiment is a `--scene` value now; both flag forms.
+        let config = parse_launch_args(&args(&["--scene=crowd"])).unwrap();
+        assert_eq!(config.scene, Some(TestScene::Crowd));
+        let config = parse_launch_args(&args(&["--scene", "crowd"])).unwrap();
+        assert_eq!(config.scene, Some(TestScene::Crowd));
 
-        let config = parse_launch_args(&args(&["--bench", "--cam-angle=25"])).unwrap();
+        // The old standalone flag is gone.
+        assert!(parse_launch_args(&args(&["--crowd"])).unwrap().scene.is_none());
+
+        let config = parse_launch_args(&args(&["--bench", "--scene=crowd", "--cam-angle=25"]))
+            .unwrap();
+        assert_eq!(config.scene, Some(TestScene::Crowd));
         assert_eq!(config.cam_angle_deg, Some(25.0));
 
         assert!(parse_launch_args(&args(&["--cam-angle", "90"])).is_err());

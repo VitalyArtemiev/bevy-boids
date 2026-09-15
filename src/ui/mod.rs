@@ -6,6 +6,10 @@
 //! the `egui_wants_*` run conditions applied where the input systems are
 //! registered in `main.rs`.
 
+pub mod debug;
+pub mod input;
+pub mod radial;
+
 use bevy::app::AppExit;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -199,7 +203,7 @@ fn pause_menu_ui(
 fn options_ui(
     mut contexts: EguiContexts,
     mut options_open: ResMut<OptionsOpen>,
-    mut bindings_open: ResMut<crate::input::BindingsOpen>,
+    mut bindings_open: ResMut<crate::ui::input::BindingsOpen>,
     mut settings: ResMut<OptionsSettings>,
     mut commands: Commands,
 ) -> Result {
@@ -299,12 +303,12 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
 /// the drag releases (see `terrain::demo::rebuild_terrain`).
 fn debug_panel_ui(
     mut contexts: EguiContexts,
-    actions: Query<(&crate::input::ActionTag, &crate::input::TriggerState, &crate::input::ActionEvents)>,
+    actions: Query<(&crate::ui::input::ActionTag, &crate::ui::input::TriggerState, &crate::ui::input::ActionEvents)>,
     mut shown: Local<bool>,
     mut camera_mode: ResMut<CameraMode>,
     mut demo: ResMut<DemoTerrain>,
 ) -> Result {
-    if crate::input::started(&actions, crate::input::ActionId::ToggleTerrain) {
+    if crate::ui::input::started(&actions, crate::ui::input::ActionId::ToggleTerrain) {
         *shown = !*shown;
     }
     if !*shown {
@@ -463,12 +467,12 @@ fn component_sliders(
 /// Escape pauses/resumes; with the Options window open it closes that
 /// instead, and in the main menu it just closes the Options window.
 fn toggle_pause(
-    actions: Query<(&crate::input::ActionTag, &crate::input::TriggerState, &crate::input::ActionEvents)>,
+    actions: Query<(&crate::ui::input::ActionTag, &crate::ui::input::TriggerState, &crate::ui::input::ActionEvents)>,
     state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
 ) {
-    if !crate::input::started(&actions, crate::input::ActionId::Pause) {
+    if !crate::ui::input::started(&actions, crate::ui::input::ActionId::Pause) {
         return;
     }
     match state.get() {

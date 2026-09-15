@@ -9,7 +9,7 @@ use crate::boid::BoidTuning;
 use crate::billboard::BillboardTuning;
 use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
-use crate::input::{ActionEvents, ActionId, ActionTag, TriggerState};
+use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState};
 use crate::kinematics::KinematicsTuning;
 use crate::sky::SkyTuning;
 use crate::ui::GameState;
@@ -70,7 +70,7 @@ fn toggle_debug_panel(
     actions: Query<(&ActionTag, &TriggerState, &ActionEvents)>,
     mut config: ResMut<DebugConfig>,
 ) {
-    if crate::input::started(&actions, ActionId::ToggleDebug) {
+    if crate::ui::input::started(&actions, ActionId::ToggleDebug) {
         config.open = !config.open;
     }
 }

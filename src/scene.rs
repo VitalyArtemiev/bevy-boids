@@ -33,16 +33,23 @@ pub enum TestScene {
     /// the sun (`--sun-azimuth`/`--sun-elevation`, or the F1 sliders)
     /// and compare the two render paths.
     Billboard,
+    /// The formation crowd-shell experiment (src/crowd.rs): two opposing
+    /// armies rendered by the procedural crowd shader on rolling test
+    /// hills, viewed through the game's RTS camera. Pair with
+    /// `--cam-angle`/`--shot` for reproducible captures inside the
+    /// experiment's 30° design cone.
+    Crowd,
 }
 
 impl TestScene {
     /// Every scene, for listing and tests.
-    pub const ALL: [TestScene; 1] = [TestScene::Billboard];
+    pub const ALL: [TestScene; 2] = [TestScene::Billboard, TestScene::Crowd];
 
     /// The `--scene` value that selects this scene.
     pub fn name(&self) -> &'static str {
         match *self {
             TestScene::Billboard => "billboard",
+            TestScene::Crowd => "crowd",
         }
     }
 
@@ -78,8 +85,41 @@ impl Plugin for ScenePlugin {
             // Trails the spawn: the twin entities only exist after the
             // Startup commands apply.
             billboard_scene_convert.run_if(in_scene(TestScene::Billboard)),
+        )
+        .add_systems(
+            Startup,
+            spawn_crowd_scene.run_if(in_scene(TestScene::Crowd)),
         );
     }
+}
+
+/// The crowd scene's camera: the game's own RTS camera (the experiment's
+/// design cone is defined for it, and bench `--cam-angle` pinning targets
+/// `RtsCamera`). The armies and their rolling-hill ground are spawned by
+/// `CrowdPlugin`'s systems, gated on the same scene — the materials and
+/// the shader-module load gate live there.
+fn spawn_crowd_scene(mut commands: Commands) {
+    crate::spawn_rts_camera(&mut commands);
+}
+
+/// The flat-plane stand-in ground for `--flat` render-path benches and
+/// the billboard scene: nothing but the units should cost GPU time.
+/// (Registered from main.rs alongside `DemoTerrain`, not scene-gated,
+/// because `--flat` is not a scene.)
+pub fn spawn_flat_ground(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    const GROUND_M: f32 = 800.0;
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_M, GROUND_M))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.40, 0.42, 0.31),
+            ..default()
+        })),
+        Transform::IDENTITY,
+    ));
 }
 
 /// Builds the billboard scene's test pair: a full mesh capsule (screen

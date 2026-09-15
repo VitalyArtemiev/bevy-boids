@@ -11,7 +11,7 @@
 //! `frontage_position_system`, which skips releases that didn't drag).
 
 use crate::formations::{Formation, FormationKind, FormationOrder, Members};
-use crate::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, started};
+use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, started};
 use crate::player::{Selected, get_intersection};
 use crate::terrain::HeightField;
 use crate::ui::GameState;

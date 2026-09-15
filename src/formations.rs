@@ -802,7 +802,7 @@ pub fn dispatch_formation_goals(
     mut commands: Commands,
     mut gizmos: Gizmos,
     tuning: Res<FormationTuning>,
-    debug: Res<crate::debug_ui::DebugConfig>,
+    debug: Res<crate::ui::debug::DebugConfig>,
 ) {
     for (entity, mut transform, mut formation, goal, members, velocity) in &mut q_formations {
         if velocity.is_none() {
@@ -913,7 +913,7 @@ mod tests {
             // move_step samples the (flat by default) height field for
             // slope physics.
             .init_resource::<HeightField>()
-            .init_resource::<crate::debug_ui::DebugConfig>()
+            .init_resource::<crate::ui::debug::DebugConfig>()
             .init_resource::<GizmoConfigStore>()
             .init_gizmo_group::<DefaultGizmoConfigGroup>()
             .init_resource::<Assets<GizmoAsset>>()
