@@ -252,11 +252,14 @@ impl Plugin for ScenePlugin {
 /// sync points, never before an exclusive system, so a completed-but-
 /// unapplied buffer can still hold entity commands that outlive the
 /// teardown (the F4-menu load raced `swap_boid_lod`'s queued LOD
-/// conversions into "Entity despawned" panics this way). Two guards
+/// conversions into "Entity despawned" panics this way). Three guards
 /// cover it: main.rs orders its Update systems `.before(load_world)`
 /// (an ordering edge from a deferred system inserts an auto sync point,
-/// applying its buffer first), and the billboard conversions check
-/// entity validity at application time.
+/// applying its buffer first), the billboard conversions check
+/// entity validity at application time, and so does `Selected`'s
+/// on_remove hook — the teardown's own recursive despawns fire it
+/// mid-despawn, and its queued indicator cleanup would otherwise apply
+/// against the just-despawned entity after this system returns.
 pub fn load_world(world: &mut World) {
     let Some(LoadWorld(target)) = world.remove_resource::<LoadWorld>() else {
         return;
@@ -982,6 +985,56 @@ mod tests {
         assert_eq!(count::<Obstacle>(world), 99);
         assert_eq!(count::<FlatGround>(world), 0, "scene ground survived");
         assert!(world.resource::<DebugConfig>().impostor_lod);
+    }
+
+    /// A live selection must survive a world switch: `Selected`'s
+    /// on_remove hook queues a deferred `despawn_related::<Children>`
+    /// while `teardown_world` is mid-despawn of that very entity, so the
+    /// command applies against an already-despawned entity on the next
+    /// update — the billboard→crowd switch panicked exactly there ("Entity
+    /// despawned", attributed to `load_world`). The hook skips a gone
+    /// entity instead.
+    #[test]
+    fn world_switches_survive_a_live_selection() {
+        use crate::player::{Selected, SelectionGizmo, SelectionIndicator};
+        let mut app = world_app(LaunchConfig {
+            boids: 4,
+            ..Default::default()
+        });
+        // Indicator children spawn through the shared gizmo asset.
+        app.init_resource::<Assets<GizmoAsset>>()
+            .init_resource::<SelectionGizmo>();
+        app.update(); // the startup world
+
+        // Select two boids; one update lets the insert hook's indicator
+        // children spawn (they are deferred, like the removal cleanup).
+        let selected: Vec<Entity> = {
+            let world = app.world_mut();
+            let mut boids = world.query_filtered::<Entity, With<Boid>>();
+            let selected: Vec<Entity> = boids.iter(world).take(2).collect();
+            for boid in &selected {
+                world.entity_mut(*boid).insert(Selected);
+            }
+            selected
+        };
+        app.update();
+        assert_eq!(count::<SelectionIndicator>(app.world_mut()), 2);
+
+        // Switch worlds: teardown despawns the selected boids, firing the
+        // hook mid-despawn; its deferred command applies on this update.
+        assemble_world(app.world_mut(), Some(TestScene::Crowd));
+        app.update();
+        assert_eq!(count::<Selected>(app.world_mut()), 0);
+        assert_eq!(
+            count::<SelectionIndicator>(app.world_mut()),
+            0,
+            "indicator children must not outlive their entities"
+        );
+        assert_eq!(
+            count::<CrowdGround>(app.world_mut()),
+            1,
+            "the switch must still complete into the crowd scene"
+        );
     }
 
     /// Reloading the same scene resets its state: the id counter starts

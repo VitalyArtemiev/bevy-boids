@@ -136,10 +136,17 @@ fn on_selected_insert(mut world: DeferredWorld, ctx: HookContext) {
 }
 
 fn on_selected_remove(mut world: DeferredWorld, ctx: HookContext) {
-    world
-        .commands()
-        .entity(ctx.entity)
-        .despawn_related::<Children>();
+    // Application-time validity check, see billboard::attach_billboard: the
+    // world teardown despawns recursively and immediately, and this hook
+    // fires mid-despawn — by the time the deferred command applies, the
+    // entity and its indicator children are already gone, and
+    // `despawn_related` on a dead entity panics. A gone entity needs no
+    // cleanup — skip it.
+    world.commands().queue(move |world: &mut World| {
+        if let Ok(mut entity) = world.get_entity_mut(ctx.entity) {
+            entity.despawn_related::<Children>();
+        }
+    });
 }
 
 impl Component for Selected {
