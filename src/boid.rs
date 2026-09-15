@@ -251,9 +251,9 @@ impl Default for BoidTuning {
 }
 
 const BOB_AMPLITUDE: f32 = 0.1;
-const BOB_FREQ_IDLE: f32 = 0.5;
-const BOB_FREQ_WALK: f32 = 1.2;
-const BOB_FREQ_RUN: f32 = 3.0;
+const BOB_FREQ_IDLE: f32 = 0.2;
+const BOB_FREQ_WALK: f32 = 2.5;
+const BOB_FREQ_RUN: f32 = 5.0;
 /// Speed ranges the cadence weights sweep across, m/s: idle fades out by
 /// `IDLE_FADE_END`, run takes over from `RUN_FADE_START`.
 const IDLE_FADE_END: f32 = 3.0;
