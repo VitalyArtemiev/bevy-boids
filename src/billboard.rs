@@ -23,9 +23,10 @@
 //! normal (`nuv = 1 - uv`), reading ambient and the directional sun
 //! straight from the engine's `lights` view binding — the same uniform
 //! PBR meshes use — so F1 sun edits, illuminance and any future day/night
-//! state apply to both render paths from one source (no sync system, and
-//! billboards go dark with the capsules at night instead of glowing at a
-//! baked ambient floor).
+//! state apply to both render paths from one source, and billboards go
+//! dark with the capsules at night instead of glowing at a baked ambient
+//! floor. Lighting itself needs no sync system; the one material-side
+//! input is the scalar [`BillboardTuning::brightness`] match knob.
 //!
 //! Flat-scene bench, 5k boids, camera ~302 m at 25° from nadir, shadows
 //! on, dev profile (`--flat --force-* --no-vsync`, 12 s runs, measured
@@ -49,7 +50,7 @@ use bevy::render::mesh::MeshVertexBufferLayoutRef;
 use bevy::render::render_resource::{AsBindGroup, RenderPipelineDescriptor};
 use bevy::shader::ShaderRef;
 
-use crate::boid::{Boid, BoidBundle, BoidVariations, variation_for};
+use crate::boid::{Boid, BoidVariations, variation_for};
 use crate::debug_ui::DebugConfig;
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
@@ -70,9 +71,9 @@ const HYSTERESIS_M: f32 = 5.0;
 
 /// Final multiplier on the billboard's light sum. 1.0 is PBR parity by
 /// construction (same `lights` binding, same `view.exposure`); the F1
-/// slider exists to eyeball-match the lab twins — the baked-normal
-/// approximation shades a touch differently from real normals, and a
-/// scalar beats re-deriving the difference analytically.
+/// slider exists to eyeball-match the `--scene billboard` twins — the
+/// baked-normal approximation shades a touch differently from real
+/// normals, and a scalar beats re-deriving the difference analytically.
 const BRIGHTNESS: f32 = 1.0;
 
 /// Billboard pose occupying the tag's pose bits (see [`pack_tag`]). The
@@ -253,7 +254,8 @@ pub fn tag_yaw(tag: u32) -> f32 {
 /// `preprocess::atlas` measures view azimuths in): the formation executor's
 /// facing when set (`Target.dir`), else the direction of travel. None when
 /// the boid is stationary and facingless — the last packed yaw stands.
-fn facing_yaw(target: &Target, vel: &Velocity) -> Option<f32> {
+/// Shared with the `--scene billboard` twin conversion.
+pub(crate) fn facing_yaw(target: &Target, vel: &Velocity) -> Option<f32> {
     let dir = if target.dir.length_squared() > 1e-6 {
         target.dir
     } else {
@@ -273,115 +275,25 @@ impl Plugin for BillboardPlugin {
             .init_resource::<BoidVariations>()
             .add_plugins(MaterialPlugin::<BillboardMaterial>::default())
             .init_resource::<BillboardAssets>()
-            .add_systems(
-                Update,
-                (
-                    swap_boid_lod,
-                    update_billboard_yaw,
-                    // --billboard-lab's one-shot conversion trails the swap.
-                    billboard_lab_convert,
-                )
-                    .chain(),
-            )
+            .add_systems(Update, (swap_boid_lod, update_billboard_yaw).chain())
             // The brightness slider's push into the shared materials. Runs
             // on any BillboardTuning edit (the swap sliders share the
             // resource — re-pushing a scalar is free).
             .add_systems(
                 Update,
                 sync_billboard_brightness.run_if(resource_changed::<BillboardTuning>),
-            )
-            .add_systems(Startup, spawn_billboard_lab.run_if(launch_billboard_lab));
-    }
-}
-
-/// Run condition for the lab scene: `--billboard-lab` (implies the `--flat`
-/// ground and suppresses the normal camera/boid spawn — see main.rs).
-pub fn launch_billboard_lab(launch: Res<LaunchConfig>) -> bool {
-    launch.billboard_lab
-}
-
-/// The test pair: a billboard boid beside its mesh twin, up close. Both
-/// stand still (target = own position) at the same yaw (0), so the two
-/// render paths show the same soldier under the same sun — move the sun
-/// with the F1 sliders (or `--sun-azimuth`/`--sun-elevation`) and compare.
-/// The camera parks at 25° from nadir (inside the bake cone), ~7 m out:
-/// the sprite fills a healthy slice of the screen.
-fn spawn_billboard_lab(mut commands: Commands, variations: Res<BoidVariations>) {
-    // Both twins stand still (target = own position) at the same yaw (0),
-    // so the two render paths show the same soldier under the same sun —
-    // move the sun (F1 sliders, or `--sun-azimuth`/`--sun-elevation`) and
-    // compare. The pair is split along Z, not X: this camera looks down
-    // the X axis, so Z offsets separate the twins cleanly left/right on
-    // screen instead of overlapping them along the view axis — pixel
-    // analysis (and eyeballs) get two disjoint blobs. Placement overrides
-    // ride `insert` because the bundle's fields are boid.rs-private.
-    commands
-        .spawn((
-            BoidBundle::with_id(0, Target::default(), &variations),
-            BillboardLabMesh,
-        ))
-        .insert(Transform::from_xyz(0.0, 0.5, -1.5))
-        .insert(Target {
-            pos: Vec3::new(0.0, 0.5, -1.5),
-            ..default()
-        });
-    commands
-        .spawn((
-            BoidBundle::with_id(0, Target::default(), &variations),
-            BillboardLabSprite,
-        ))
-        .insert(Transform::from_xyz(0.0, 0.5, 1.5))
-        .insert(Target {
-            pos: Vec3::new(0.0, 0.5, 1.5),
-            ..default()
-        });
-
-    let distance = 7.0;
-    let polar = 25.0_f32.to_radians();
-    commands.spawn((
-        Camera3d::default(),
-        // Plain camera, not an RtsCamera: the input systems that expect
-        // exactly one RTS camera find none and stand down, and the bench's
-        // zoom pinning doesn't touch this pose. 25° from nadir (inside the
-        // bake cone), on the +X side, looking at the pair.
-        Transform::from_xyz(distance * polar.sin(), distance * polar.cos(), 0.0)
-            .looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
-    ));
-}
-
-/// Mesh twin (z = −1.5, screen right): stays on its full mesh — the
-/// lighting reference.
-#[derive(Component)]
-pub struct BillboardLabMesh;
-
-/// Billboard twin (z = +1.5, screen left): converted to its billboard
-/// once, first frame it can.
-#[derive(Component)]
-pub struct BillboardLabSprite;
-
-/// One-shot lab conversion (the `Local` guard): swaps the marked twin to
-/// its billboard through the same `attach_billboard` path as the LOD swap.
-fn billboard_lab_convert(
-    sprites: Query<(Entity, &Boid, &Target, &Velocity), With<BillboardLabSprite>>,
-    assets: Res<BillboardAssets>,
-    mut done: Local<bool>,
-    mut commands: Commands,
-) {
-    if *done {
-        return;
-    }
-    for (entity, boid, target, vel) in &sprites {
-        *done = true;
-        let yaw = facing_yaw(target, vel).unwrap_or(0.0);
-        attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
+            );
+        // The `--scene billboard` comparison pair lives in scene.rs, on
+        // top of this plugin's pub(crate) pieces (attach_billboard,
+        // facing_yaw, BillboardAssets).
     }
 }
 
 /// Pushes [`BillboardTuning::brightness`] edits into the shared billboard
 /// materials — the materials start at the tuning's value (see
 /// [`BillboardAssets::from_world`]), so this only has to cover live
-/// slider edits. All far boids and the lab twin share one material per
-/// variation, so one pass reaches everything on screen.
+/// slider edits. All far boids and the `--scene billboard` twin share one
+/// material per variation, so one pass reaches everything on screen.
 fn sync_billboard_brightness(
     tuning: Res<BillboardTuning>,
     mut materials: ResMut<Assets<BillboardMaterial>>,
@@ -430,7 +342,7 @@ pub fn swap_boid_lod(
                     .unwrap_or(0.0);
                 attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
             }
-            // Billmarked and near: restore the exact mesh/material handles
+            // Billboarded and near: restore the exact mesh/material handles
             // the spawn attached (identity is the id — see variation_for).
             Some(_) if distance_sq < restore_at => {
                 let variation = &variations.0[variation_for(boid.id)];
@@ -449,9 +361,10 @@ pub fn swap_boid_lod(
 }
 
 /// Detaches the mesh and attaches the billboard render components for
-/// `boid_id`'s variation — the one conversion both the distance swap and
-/// the manual `--force-billboards` bench override go through.
-fn attach_billboard(
+/// `boid_id`'s variation — the one conversion the distance swap, the
+/// manual `--force-billboards` bench override and the `--scene billboard`
+/// twin all go through.
+pub(crate) fn attach_billboard(
     commands: &mut Commands,
     entity: Entity,
     boid_id: u32,

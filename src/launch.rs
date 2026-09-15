@@ -14,6 +14,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_rts_camera::{RtsCamera, RtsCameraControls, RtsCameraSystemSet};
 
+use crate::scene::TestScene;
 use crate::ui::GameState;
 
 /// Bench zoom expressed in `RtsCamera` units, where 0.0 = `height_max`
@@ -81,10 +82,12 @@ pub struct LaunchConfig {
     pub sun_azimuth_deg: Option<f32>,
     /// Initial sun elevation above the horizon, degrees.
     pub sun_elevation_deg: Option<f32>,
-    /// The billboard lab: one forced-billboard boid beside its mesh twin
-    /// up close on the flat plane (implies the `--flat` scene), for
-    /// comparing the two render paths under a moved sun.
-    pub billboard_lab: bool,
+    /// Standalone test scene to launch instead of the normal RTS setup —
+    /// `--scene <name>` (see src/scene.rs for the available scenes and
+    /// how to add more). Scenes bring their own camera and props; main
+    /// setup skips the RTS camera, the grid boids and the obstacles while
+    /// one is active.
+    pub scene: Option<TestScene>,
     /// Bench-only: pin the camera at this angle from nadir, degrees
     /// (0 = looking straight down). The crowd experiment's design cone is
     /// the upper 30°; this flag makes `--shot` captures reproducible
@@ -120,10 +123,17 @@ impl Default for LaunchConfig {
             no_vsync: false,
             sun_azimuth_deg: None,
             sun_elevation_deg: None,
-            billboard_lab: false,
+            scene: None,
             cam_angle_deg: None,
             preprocess: false,
         }
+    }
+}
+
+impl LaunchConfig {
+    /// Whether the given test scene is active (`--scene`).
+    pub fn in_scene(&self, scene: TestScene) -> bool {
+        self.scene == Some(scene)
     }
 }
 
@@ -151,7 +161,8 @@ fn value(
 /// `--boids <n>`, `--shadows|--no-shadows`, `--terrain|--no-terrain`,
 /// `--atmosphere|--no-atmosphere`, `--env-map|--no-env-map`,
 /// `--bloom|--no-bloom`, `--crowd`, `--flat`, `--force-meshes`,
-/// `--force-billboards`, `--no-vsync`, and `--preprocess`. Later flags win.
+/// `--force-billboards`, `--no-vsync`, `--scene <name>` (see
+/// [`crate::scene::TestScene`]), and `--preprocess`. Later flags win.
 /// Unrelated arguments are ignored so other tooling can pass through.
 pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
     let mut config = LaunchConfig::default();
@@ -286,9 +297,19 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchConfig, String> {
                 }
                 config.sun_elevation_deg = Some(parsed);
             }
-            "--billboard-lab" => {
-                config.billboard_lab = true;
-                i += 1;
+            "--scene" => {
+                let name = value(args, &mut i, flag, inline_value)?;
+                let Some(scene) = TestScene::from_name(&name) else {
+                    let available = TestScene::ALL
+                        .iter()
+                        .map(TestScene::name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "{flag}: unknown scene {name:?} (available: {available})"
+                    ));
+                };
+                config.scene = Some(scene);
             }
             "--cam-angle" => {
                 let parsed: f32 = value(args, &mut i, flag, inline_value)?
@@ -380,7 +401,7 @@ fn pin_bench_camera(
     }
     *pinned = true;
     info!(
-        "bench: zoom {:.2}, duration {:.0}s, {} boids, shadows {}, terrain {}, atmosphere {}, env map {}, bloom {}",
+        "bench: zoom {:.2}, duration {:.0}s, {} boids, shadows {}, terrain {}, atmosphere {}, env map {}, bloom {}, scene {}",
         config.zoom,
         config.duration.as_secs_f32(),
         config.boids,
@@ -388,7 +409,8 @@ fn pin_bench_camera(
         config.terrain,
         config.atmosphere,
         config.environment_map,
-        config.bloom
+        config.bloom,
+        config.scene.map(|scene| scene.name()).unwrap_or("-")
     );
 }
 
@@ -497,6 +519,7 @@ fn exit_bench_when_elapsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::TestScene;
     use bevy::state::app::StatesPlugin;
 
     fn args(list: &[&str]) -> Vec<String> {
@@ -613,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn sun_and_lab_flags_parse_with_validation() {
+    fn sun_and_scene_flags_parse_with_validation() {
         let config = parse_launch_args(&args(&["--sun-azimuth", "125", "--sun-elevation", "35"]))
             .unwrap();
         assert_eq!(config.sun_azimuth_deg, Some(125.0));
@@ -622,7 +645,20 @@ mod tests {
         assert!(parse_launch_args(&args(&["--sun-azimuth", "400"])).is_err());
         assert!(parse_launch_args(&args(&["--sun-elevation", "90"])).is_err());
         assert!(parse_launch_args(&args(&["--sun-azimuth", "abc"])).is_err());
-        assert!(parse_launch_args(&args(&["--billboard-lab"])).unwrap().billboard_lab);
+
+        let scene = parse_launch_args(&args(&["--scene", "billboard"])).unwrap();
+        assert_eq!(scene.scene, Some(TestScene::Billboard));
+        assert!(scene.in_scene(TestScene::Billboard));
+        // Inline form too, and unknown names list what's available.
+        assert_eq!(
+            parse_launch_args(&args(&["--scene=billboard"]))
+                .unwrap()
+                .scene,
+            Some(TestScene::Billboard)
+        );
+        let err = parse_launch_args(&args(&["--scene", "arena"])).unwrap_err();
+        assert!(err.contains("unknown scene") && err.contains("billboard"), "{err}");
+        assert!(parse_launch_args(&args(&["--scene"])).is_err());
     }
 
     #[test]

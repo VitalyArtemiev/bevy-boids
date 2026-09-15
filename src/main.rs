@@ -12,6 +12,7 @@ mod player;
 mod preprocess;
 mod radial;
 mod resources;
+mod scene;
 mod sky;
 mod target;
 mod terrain;
@@ -36,6 +37,7 @@ use crate::player::{
 };
 use crate::radial::{RadialPlugin, radial_closed};
 use crate::resources::{Materials, Meshes};
+use crate::scene::{ScenePlugin, TestScene};
 use crate::sky::{ENVIRONMENT_MAP_SIZE_PX, SkyPlugin, SkyTuning};
 use crate::target::{Target, follow_target};
 use crate::terrain::{
@@ -77,14 +79,15 @@ fn main() {
 
     // Read out the scalar flags the plugin chain needs before `launch`
     // moves into the resource.
-    let (bench, shadows, crowd_scene, flat_scene, forced_render, no_vsync, lab) = (
+    let (bench, shadows, crowd_scene, flat_scene, forced_render, no_vsync, scene_active, billboard_scene) = (
         launch.bench,
         launch.shadows,
         launch.crowd,
         launch.flat,
         launch.force_meshes || launch.force_billboards,
         launch.no_vsync,
-        launch.billboard_lab,
+        launch.scene.is_some(),
+        launch.in_scene(TestScene::Billboard),
     );
     let mut sky = SkyTuning {
         shadows,
@@ -142,6 +145,8 @@ fn main() {
         // Per-boid impostor LOD: mesh <-> baked-atlas billboard by camera
         // distance (builds the shared BoidVariations catalog).
         .add_plugins(BillboardPlugin)
+        // Standalone test scenes (`--scene <name>`); no-op without one.
+        .add_plugins(ScenePlugin)
         // Before UiPlugin: UiPlugin's SettingsPlugin scans the registry at
         // build time, so BindingsSettings must be registered first.
         .add_plugins(InputPlugin)
@@ -150,11 +155,13 @@ fn main() {
         // No-op without --bench; skips the main menu when enabled.
         .add_plugins(BenchPlugin(bench))
         .add_plugins(DebugUiPlugin)
-        // --force-meshes/--force-billboards bench overrides: stand the
-        // distance swap down while a render path is forced manually
-        // (`billboard::force_render` does the one-shot conversion).
+        // --force-meshes/--force-billboards bench overrides and the
+        // standalone scenes: stand the distance swap down while a render
+        // path is fixed by hand (`billboard::force_render` and the scene
+        // twins do their own one-shot conversions) — a scene's boids stay
+        // on exactly the render path the scene gave them.
         .insert_resource(DebugConfig {
-            impostor_lod: !forced_render,
+            impostor_lod: !forced_render && !scene_active,
             ..default()
         })
         // Runtime-tunable values exposed by the debug panel (F1).
@@ -171,9 +178,9 @@ fn main() {
         )
         .add_systems(Startup, setup);
 
-    if crowd_scene || flat_scene || lab {
+    if crowd_scene || flat_scene || billboard_scene {
         // Isolated flat scene (the crowd experiment's, `--flat` for
-        // render-path benches, or `--billboard-lab`): a plain plane instead
+        // render-path benches, or the billboard scene): a plain plane instead
         // of the erosion terrain, no water/obstacles, so nothing but the
         // units cost GPU time. The terrain settings resource still exists
         // so the F3 panel's `Res` is valid; without the plugin it just has
@@ -274,6 +281,9 @@ fn setup(
     mut ambient_light: ResMut<GlobalAmbientLight>,
     mut gizmo_store: ResMut<GizmoConfigStore>,
 ) {
+    // While a `--scene` micro-scene is active it owns the camera, boids
+    // and obstacles — the grid spawn below stands down (see scene.rs).
+    let scene_active = launch.scene.is_some();
     // Debug gizmos (cursor, selection box, frontage line) must read through
     // the terrain: pull them to the near plane so hills can't bury them.
     let (gizmo_config, _) = gizmo_store.config_mut::<DefaultGizmoConfigGroup>();
@@ -285,8 +295,8 @@ fn setup(
     mesh_list.cube = meshes.add(Cuboid::default());
 
     // `--boids` works in normal launches too; the default is the full
-    // historical 99x99 grid. The lab spawns its own two-boid pair instead.
-    let boid_budget = if launch.billboard_lab { 0 } else { launch.boids };
+    // historical 99x99 grid. A test scene spawns its own props instead.
+    let boid_budget = if scene_active { 0 } else { launch.boids };
     let mut boids_spawned = 0;
     'grid: for i in 1..100 {
         for j in 1..100 {
@@ -307,7 +317,7 @@ fn setup(
 
     // Isolated flat scene: no obstacle scatter — nothing but the units
     // should cost render time (matches the crowd experiment's scene).
-    if !launch.crowd && !launch.flat && !launch.billboard_lab {
+    if !launch.crowd && !launch.flat && !scene_active {
         for _ in 1..100 {
             let mut rng = rand::rng();
             let x = rng.random_range(-100.0..100.0);
@@ -325,10 +335,10 @@ fn setup(
         }
     }
 
-    // The billboard lab brings its own plain camera; skipping the RTS one
+    // A test scene brings its own plain camera; skipping the RTS one
     // keeps the scene single-camera (several input systems `single()` it)
-    // and the lab pose immune to bench zoom pinning.
-    let camera = if launch.billboard_lab {
+    // and the scene pose immune to bench zoom pinning.
+    let camera = if scene_active {
         None
     } else {
         Some(
