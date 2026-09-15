@@ -53,8 +53,11 @@ pub struct Body {
 
 impl Default for Body {
     fn default() -> Self {
+        // Contact radius sits 10% under the visual capsule (0.5): moving
+        // blocks sliding through each other shear past instead of snagging
+        // on the rear ranks, at the cost of slight visual overlap in a push.
         Body {
-            radius_m: 0.5,
+            radius_m: 0.45,
             mass_kg: 1.0,
         }
     }
