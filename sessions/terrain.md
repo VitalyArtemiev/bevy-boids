@@ -198,9 +198,9 @@ cause each, and the fix was to port the crate's reference demo
    `fract(x·y·(x+y))`, which at coordinates that large returns a
    *constant* gradient over thousands of lattice cells (verified
    numerically: 1 distinct value across a 64×64 lattice vs ~3300 at the
-   origin). Constant gradients left only lattice-boundary discontinuities
-   as structure — grid-aligned ridges over a featureless world. The
-   rewrite keeps offsets within ±16 p-units
+   origin). Constant gradients left only lattice-boundary
+   discontinuities as structure — grid-aligned ridges over a
+   featureless world. The rewrite keeps offsets within ±16 p-units
    (`seed_offsets_stay_inside_the_hash_precision_envelope` pins it).
 2. **Uniformity — starving the onset gate.** The old custom base (fBm
    frequency 0.357 in p-space + fastnoise mountains) delivered ~10×
