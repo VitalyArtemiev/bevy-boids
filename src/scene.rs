@@ -205,13 +205,23 @@ impl Plugin for ScenePlugin {
     }
 }
 
-/// Consumes a [`LoadWorld`] request through [`assemble_world`] (a queued
-/// `&mut World` command, so the whole switch applies atomically at one
-/// sync point — no system ever sees a half-switched world).
-pub fn load_world(request: Res<LoadWorld>, mut commands: Commands) {
-    let target = request.0;
-    commands.queue(move |world: &mut World| assemble_world(world, target));
-    commands.remove_resource::<LoadWorld>();
+/// Consumes a [`LoadWorld`] request through [`assemble_world`], with
+/// exclusive world access: the switch is atomic and nothing runs
+/// alongside it. NOTE: exclusivity alone does NOT make it safe — the
+/// multithreaded executor applies other systems' command buffers only at
+/// sync points, never before an exclusive system, so a completed-but-
+/// unapplied buffer can still hold entity commands that outlive the
+/// teardown (the F4-menu load raced `swap_boid_lod`'s queued LOD
+/// conversions into "Entity despawned" panics this way). Two guards
+/// cover it: main.rs orders its Update systems `.before(load_world)`
+/// (an ordering edge from a deferred system inserts an auto sync point,
+/// applying its buffer first), and the billboard conversions check
+/// entity validity at application time.
+pub fn load_world(world: &mut World) {
+    let Some(LoadWorld(target)) = world.remove_resource::<LoadWorld>() else {
+        return;
+    };
+    assemble_world(world, target);
 }
 
 /// Tears the loaded world down and builds `target` (`None` = the normal

@@ -346,13 +346,15 @@ pub fn swap_boid_lod(
             // the spawn attached (identity is the id — see variation_for).
             Some(_) if distance_sq < restore_at => {
                 let variation = &variations.0[variation_for(boid.id)];
-                commands
-                    .entity(entity)
-                    .remove::<(Billboard, MeshTag, Mesh3d, MeshMaterial3d<BillboardMaterial>)>()
-                    .insert((
-                        Mesh3d(variation.mesh.clone()),
-                        MeshMaterial3d(variation.material.clone()),
-                    ));
+                let mesh = variation.mesh.clone();
+                let material = variation.material.clone();
+                // Application-time validity check, see attach_billboard.
+                commands.queue(move |world: &mut World| {
+                    if let Ok(mut boid) = world.get_entity_mut(entity) {
+                        boid.remove::<(Billboard, MeshTag, Mesh3d, MeshMaterial3d<BillboardMaterial>)>()
+                            .insert((Mesh3d(mesh), MeshMaterial3d(material)));
+                    }
+                });
             }
             // Inside the hysteresis band: hold the current state.
             _ => {}
@@ -364,6 +366,11 @@ pub fn swap_boid_lod(
 /// `boid_id`'s variation — the one conversion the distance swap, the
 /// manual `--force-billboards` bench override and the `--scene billboard`
 /// twin all go through.
+///
+/// Entity validity is checked at buffer-APPLICATION time, not queue time:
+/// a pending world switch (the F4 menu load) can despawn the boid between
+/// the queue and the sync point, and entity commands on a despawned
+/// entity panic. A gone boid needs no conversion — skip it.
 pub(crate) fn attach_billboard(
     commands: &mut Commands,
     entity: Entity,
@@ -371,15 +378,19 @@ pub(crate) fn attach_billboard(
     yaw: f32,
     assets: &BillboardAssets,
 ) {
-    commands
-        .entity(entity)
-        .remove::<(Mesh3d, MeshMaterial3d<StandardMaterial>)>()
-        .insert((
-            Mesh3d(assets.quad.clone()),
-            MeshMaterial3d(assets.materials[variation_for(boid_id)].clone()),
-            MeshTag(pack_tag(yaw, IDLE_POSE)),
-            Billboard,
-        ));
+    let quad = assets.quad.clone();
+    let material = assets.materials[variation_for(boid_id)].clone();
+    commands.queue(move |world: &mut World| {
+        if let Ok(mut boid) = world.get_entity_mut(entity) {
+            boid.remove::<(Mesh3d, MeshMaterial3d<StandardMaterial>)>()
+                .insert((
+                    Mesh3d(quad),
+                    MeshMaterial3d(material),
+                    MeshTag(pack_tag(yaw, IDLE_POSE)),
+                    Billboard,
+                ));
+        }
+    });
 }
 
 /// One-shot `--force-billboards` bench override: converts every boid once

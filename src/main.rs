@@ -212,7 +212,15 @@ fn main() {
                 not(egui_wants_any_pointer_input).and_then(not(egui_wants_any_keyboard_input)),
             ),
         )
-            .run_if(in_state(GameState::Playing)),
+            .run_if(in_state(GameState::Playing))
+            // Every system here that queues entity commands (the billboard
+            // LOD swap above all) must have its buffer applied BEFORE a
+            // pending world switch tears the entities down — an ordering
+            // edge from a deferred system gets an auto sync point, which
+            // the exclusive `load_world` does NOT provide by itself (the
+            // executor flushes buffers only at sync points, not before
+            // exclusive systems).
+            .before(load_world),
     )
     // The whole executor pipeline runs on the fixed timestep, chained:
     // speed init -> LOD state -> order transitions -> slot re-mapping ->
