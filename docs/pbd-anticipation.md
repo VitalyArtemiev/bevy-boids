@@ -1,10 +1,33 @@
-# Future work: PBD collision solver (Stage 2) and long-range anticipation (Stage 3)
+# PBD collision solver — implemented (Stages 2+3), design record
 
-Status: **planned, not implemented**. Stage 1 of this effort — the anti-orbit
+Status: **implemented** (all three stages). Stage 1 — the anti-orbit
 planner (`kinematics::arrival_plan`, desired-velocity `follow_target`) and
-slope-aware `move_step` — has landed. This document is the design record for
-the remaining two stages so the next session can pick it up without
-re-deriving the decisions.
+slope-aware `move_step`. Stage 2 — the frictional-contact solver in
+`src/pbd.rs` (`pbd_contact`), replacing `soft_collisions` and
+`hard_collisions`. Stage 3 — the long-range anticipation constraint and
+the §4.5 sidestep, same solver. The melee/scene validation described below
+lands as `--scene` test scenes (`melee`, `formation-cross`,
+`formation-clash`, …) and the `pbd` test module.
+
+Deviations from the paper as written (deliberate, see the review trail):
+
+- **Hybrid, not pure PBD**: the steering contract from Stage 1 is intact —
+  planners write `vel.a`/`vel.target_v`, `move_step` integrates; the
+  solver runs *after* integration and its corrections reach velocity as
+  `Δv = Δx/Δt`. The paper's velocity blend `vb=(1−α)v+α·vp` is the same
+  first-order relaxation as our accel-clamped desired-velocity steering.
+- **One-sided per-agent Jacobi** over a flat SoA scratch (each boid
+  resolves against its neighbours' last-iteration positions,
+  double-buffered), not the paper's GPU hash grids. Candidates come from
+  the shared kd-tree `k_nearest` with a staleness margin — no per-step
+  spatial hash so far; revisit if anticipation candidate sets starve.
+- **Anticipation applied to current positions** (direction from the
+  predicted future pair), with the §4.5 braking-shed implemented as "remove
+  the anti-parallel-to-own-velocity component, keep `braking_keep` of it"
+  (tunable; 0 = pure sidestep). Symmetric dead-head-on pairs get no
+  sidestep — contact handles them, exactly the paper's degeneracy.
+- **Obstacle seating is post-solve** (single projection pass), not an
+  in-iteration constraint.
 
 Technique source: *Position-Based Multi-Agent Dynamics for Real-Time Crowd
 Simulation*, Weiss, Litteneker, Jiang, Terzopoulos — MiG 2017,
@@ -13,7 +36,7 @@ particles: a planner produces a preferred velocity, positions are predicted,
 then projected onto constraint manifolds (frictional contact, anticipatory
 long-range collision) instead of accumulating repulsion forces.
 
-## What already landed (Stage 1) and how the stages relate
+## How the stages relate
 
 - `follow_target` is the paper's "velocity planner" (its §4.1): it writes
   `vel.a` toward an arrival-damped, misalignment-slowed preferred velocity
@@ -23,8 +46,8 @@ long-range collision) instead of accumulating repulsion forces.
 - `move_step` remains the integrator, now with slope physics (downhill
   gravity, uphill thrust loss, downhill cap relaxation, bounded-deceleration
   cap shedding).
-- Stage 2 replaces force-based collision response (`soft_collisions`,
-  `hard_collisions`) with positional constraints. Stage 3 adds anticipatory
+- Stage 2 replaced force-based collision response (`soft_collisions`,
+  `hard_collisions`) with positional constraints. Stage 3 added anticipatory
   constraints on top. The steering/integration contract from Stage 1 is
   untouched by both.
 
@@ -39,7 +62,7 @@ melee stress test, not assumed from the paper. Hostility must be a
 **symmetric** relation (both sides skip), otherwise one army politely steps
 aside while the other plows through it.
 
-## Stage 2 — frictional contact solver (paper §4.2, §4.7)
+## Stage 2 — frictional contact solver (paper §4.2, §4.7) — as built
 
 Replaces `soft_collisions` + `hard_collisions`; new module `src/pbd.rs`,
 system `pbd_contact` in Update, ordered after `move_step` and before
@@ -91,7 +114,7 @@ Validation gates:
 - Bench decision: kd-tree `AutomaticUpdate` refresh 1 s → 0.25 s (position
   staleness at 20 m/s is up to 20 m today).
 
-## Stage 3 — long-range anticipation (paper §4.4–4.5), gated
+## Stage 3 — long-range anticipation (paper §4.4–4.5) — as built
 
 Only worth adding once playtesting shows last-instant jams in cross-formation
 traffic; formation slotting already deconflicts destinations within a

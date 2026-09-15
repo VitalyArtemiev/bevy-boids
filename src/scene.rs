@@ -17,11 +17,16 @@
 //!    in `setup` on `launch.in_scene(TestScene::NewVariant)`.
 
 use bevy::prelude::*;
+use bevy_rts_camera::RtsCamera;
+use std::collections::VecDeque;
 
 use crate::billboard::{BillboardAssets, attach_billboard, facing_yaw};
-use crate::boid::{Boid, BoidBundle, BoidVariations};
+use crate::boid::{Boid, BoidBundle, BoidIds, BoidVariations};
+use crate::formations::{Formation, FormationKind, FormationOrder, MemberOf};
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
+use crate::pbd::Body;
+use crate::pbd::Faction;
 use crate::target::Target;
 use crate::ui::GameState;
 
@@ -39,23 +44,75 @@ pub enum TestScene {
     /// `--cam-angle`/`--shot` for reproducible captures inside the
     /// experiment's 30° design cone.
     Crowd,
+    /// One unit from standstill to a distant point — plain arrival
+    /// dynamics (acceleration, momentum, deceleration onto the target).
+    Arrival,
+    /// One unit already at speed, target off to the side — the orbit
+    /// case `follow_target`'s misalignment damping exists to break: the
+    /// unit must brake and turn, not circle.
+    Perpendicular,
+    /// Two friendly units on opposing offset lanes — the long-range
+    /// anticipation constraint must sidestep them past each other
+    /// without contact and without either slowing to a crawl.
+    HeadOn,
+    /// The same meeting, hostile: no anticipation, bodies slam into
+    /// contact and grind (the "march into the enemy" case).
+    Clash,
+    /// Hostile head-on with mass asymmetry: the 8x heavier unit bowls
+    /// the light one back (inverse-mass contact weighting).
+    Shove,
+    /// Three factions converging on one point — the free-for-all melee
+    /// pile; watch penetration stay bounded and the pile grind.
+    Melee,
+    /// Two friendly formations on crossing courses — member-level
+    /// anticipation must braid the blocks through each other.
+    FormationCross,
+    /// Two hostile formations marching straight through each other —
+    /// contact-only, the clash at formation scale.
+    FormationClash,
 }
 
 impl TestScene {
     /// Every scene, for listing and tests.
-    pub const ALL: [TestScene; 2] = [TestScene::Billboard, TestScene::Crowd];
+    pub const ALL: [TestScene; 10] = [
+        TestScene::Billboard,
+        TestScene::Crowd,
+        TestScene::Arrival,
+        TestScene::Perpendicular,
+        TestScene::HeadOn,
+        TestScene::Clash,
+        TestScene::Shove,
+        TestScene::Melee,
+        TestScene::FormationCross,
+        TestScene::FormationClash,
+    ];
 
     /// The `--scene` value that selects this scene.
     pub fn name(&self) -> &'static str {
         match *self {
             TestScene::Billboard => "billboard",
             TestScene::Crowd => "crowd",
+            TestScene::Arrival => "arrival",
+            TestScene::Perpendicular => "perpendicular",
+            TestScene::HeadOn => "head-on",
+            TestScene::Clash => "clash",
+            TestScene::Shove => "shove",
+            TestScene::Melee => "melee",
+            TestScene::FormationCross => "formation-cross",
+            TestScene::FormationClash => "formation-clash",
         }
     }
 
     /// Parses a `--scene` value; `None` = unknown name.
     pub fn from_name(name: &str) -> Option<Self> {
         TestScene::ALL.into_iter().find(|scene| scene.name() == name)
+    }
+
+    /// Whether the scene wants the flat plane (`scene::spawn_flat_ground`)
+    /// instead of any terrain — every movement scene does; only the crowd
+    /// experiment wants its rolling hills.
+    pub fn wants_flat_ground(&self) -> bool {
+        !matches!(self, TestScene::Crowd)
     }
 }
 
@@ -89,6 +146,26 @@ impl Plugin for ScenePlugin {
         .add_systems(
             Startup,
             spawn_crowd_scene.run_if(in_scene(TestScene::Crowd)),
+        )
+        // Movement scenes: each pins the shared RTS camera onto its stage
+        // once, then the one-shot guard keeps it stable (the camera stays
+        // freely controllable afterwards).
+        .add_systems(
+            Update,
+            pin_scene_camera.run_if(resource_exists::<SceneCameraPose>),
+        )
+        .add_systems(
+            Startup,
+            (
+                spawn_arrival_scene.run_if(in_scene(TestScene::Arrival)),
+                spawn_perpendicular_scene.run_if(in_scene(TestScene::Perpendicular)),
+                spawn_head_on_scene.run_if(in_scene(TestScene::HeadOn)),
+                spawn_clash_scene.run_if(in_scene(TestScene::Clash)),
+                spawn_shove_scene.run_if(in_scene(TestScene::Shove)),
+                spawn_melee_scene.run_if(in_scene(TestScene::Melee)),
+                spawn_formation_cross_scene.run_if(in_scene(TestScene::FormationCross)),
+                spawn_formation_clash_scene.run_if(in_scene(TestScene::FormationClash)),
+            ),
         );
     }
 }
@@ -100,6 +177,310 @@ impl Plugin for ScenePlugin {
 /// the shader-module load gate live there.
 fn spawn_crowd_scene(mut commands: Commands) {
     crate::spawn_rts_camera(&mut commands);
+}
+
+// ---- Movement scenes -------------------------------------------------------
+//
+// Shared plumbing: every movement scene runs on the flat plane through the
+// game's full pipeline (planner -> move_step -> pbd_contact, formations on
+// FixedUpdate), with the RTS camera pinned once onto its stage. Boid ids
+// double as faction colours: `id % 3` picks the variation, so a faction
+// whose ids are `faction + 3n` wears one colour (0 red, 1 green, 2 blue).
+
+/// Where a movement scene wants its camera (focus point + zoom), consumed
+/// once by [`pin_scene_camera`].
+#[derive(Resource, Default)]
+struct SceneCameraPose {
+    focus: Vec3,
+    zoom: f32,
+}
+
+/// One-shot camera pin: focuses the shared RTS camera on the scene's
+/// stage. Runs only while a scene inserted the pose resource, and the
+/// `Local` guard keeps it to the first frame the camera exists.
+fn pin_scene_camera(
+    mut cameras: Query<&mut RtsCamera>,
+    pose: Res<SceneCameraPose>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    for mut camera in &mut cameras {
+        camera.focus.translation = pose.focus;
+        camera.target_focus.translation = pose.focus;
+        camera.zoom = pose.zoom;
+        camera.target_zoom = pose.zoom;
+        *done = true;
+    }
+}
+
+/// One unit spec for [`spawn_scene_boid`].
+struct BoidSpec {
+    pos: Vec3,
+    vel: Vec3,
+    target: Vec3,
+    faction: u8,
+    body: Body,
+}
+
+impl BoidSpec {
+    fn at(pos: Vec3, target: Vec3, faction: u8) -> Self {
+        BoidSpec {
+            pos,
+            vel: Vec3::ZERO,
+            target,
+            faction,
+            body: Body::default(),
+        }
+    }
+}
+
+fn scene_velocity(v: Vec3) -> Velocity {
+    let mut vel = Velocity::default();
+    vel.v = v;
+    vel
+}
+
+/// Spawns one boid whose visual variation matches its faction
+/// (`id = faction + 3·seq` keeps one colour per side).
+fn spawn_scene_boid(
+    commands: &mut Commands,
+    ids: &mut BoidIds,
+    variations: &BoidVariations,
+    spec: BoidSpec,
+) -> Entity {
+    let id = spec.faction as u32 + 3 * ids.next();
+    commands
+        .spawn(BoidBundle::with_id(
+            id,
+            Target {
+                pos: spec.target,
+                ..default()
+            },
+            variations,
+        ))
+        .insert(Transform::from_translation(spec.pos))
+        .insert(scene_velocity(spec.vel))
+        .insert(Faction(spec.faction))
+        .insert(spec.body)
+        .id()
+}
+
+/// Spawns a rectangular marching block under one formation with a `Move`
+/// order. `colour` decouples looks from allegiance (friendly blocks in a
+/// crossing still want distinguishing colours). Members spawn in their
+/// facing-frame grid around `origin`; `assign_slots` refines the mapping.
+fn spawn_marching_block(
+    commands: &mut Commands,
+    ids: &mut BoidIds,
+    variations: &BoidVariations,
+    faction: u8,
+    colour: u8,
+    origin: Vec3,
+    move_to: Vec3,
+    columns: usize,
+    rows: usize,
+) {
+    let facing = (move_to - origin).normalize_or_zero();
+    let formation = commands
+        .spawn((
+            Formation {
+                kind: FormationKind::Grid,
+                columns: Some(columns),
+                dir: facing,
+                tasks: VecDeque::from([FormationOrder::Move {
+                    pos: move_to,
+                    facing_dir: facing,
+                }]),
+                ..default()
+            },
+            Transform::from_translation(origin),
+        ))
+        .id();
+    let side = Vec3::new(-facing.z, 0.0, facing.x);
+    for row in 0..rows {
+        for col in 0..columns {
+            let offset = side * (col as f32 - (columns - 1) as f32 / 2.0) * FormationKind::SPACING
+                - facing * row as f32 * FormationKind::SPACING;
+            let id = colour as u32 + 3 * ids.next();
+            commands
+                .spawn(BoidBundle::with_id(id, Target::default(), variations))
+                .insert(Transform::from_translation(origin + offset + Vec3::Y * 0.5))
+                .insert(MemberOf(formation))
+                .insert(Faction(faction))
+                .insert(Body::default());
+        }
+    }
+}
+
+/// Spawns the shared RTS camera pinned on the stage. `height_m` is the
+/// wanted camera height in metres (converted to `RtsCamera` zoom units,
+/// where 0.0 = 30 km and 1.0 = `height_min` = 2 m — `--zoom`-style linear
+/// interpolation, so 0.99 ≈ 302 m).
+fn scene_camera(commands: &mut Commands, focus: Vec3, height_m: f32) {
+    crate::spawn_rts_camera(commands);
+    let zoom = ((30_000.0 - height_m) / (30_000.0 - 2.0)).clamp(0.0, 1.0);
+    commands.insert_resource(SceneCameraPose { focus, zoom });
+}
+
+fn spawn_arrival_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    spawn_scene_boid(
+        &mut commands,
+        &mut ids,
+        &variations,
+        BoidSpec::at(Vec3::new(-20.0, 0.5, 0.0), Vec3::new(20.0, 0.5, 0.0), 0),
+    );
+    scene_camera(&mut commands, Vec3::new(0.0, 0.0, 0.0), 35.0);
+}
+
+fn spawn_perpendicular_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    let mut spec = BoidSpec::at(
+        Vec3::new(-30.0, 0.5, 0.0),
+        Vec3::new(-10.0, 0.5, 25.0),
+        0,
+    );
+    spec.vel = Vec3::new(15.0, 0.0, 0.0);
+    spawn_scene_boid(&mut commands, &mut ids, &variations, spec);
+    scene_camera(&mut commands, Vec3::new(-15.0, 0.0, 10.0), 45.0);
+}
+
+fn spawn_head_on_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    spawn_scene_boid(
+        &mut commands,
+        &mut ids,
+        &variations,
+        BoidSpec::at(Vec3::new(-30.0, 0.5, 0.0), Vec3::new(30.0, 0.5, 0.0), 0),
+    );
+    // Same army (green), offset lane: anticipation must braid the pass.
+    spawn_scene_boid(
+        &mut commands,
+        &mut ids,
+        &variations,
+        BoidSpec::at(Vec3::new(30.0, 0.5, 1.5), Vec3::new(-30.0, 0.5, 1.5), 0),
+    );
+    scene_camera(&mut commands, Vec3::ZERO, 40.0);
+}
+
+fn spawn_clash_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    spawn_scene_boid(
+        &mut commands,
+        &mut ids,
+        &variations,
+        BoidSpec::at(Vec3::new(-25.0, 0.5, 0.0), Vec3::new(25.0, 0.5, 0.0), 0),
+    );
+    spawn_scene_boid(
+        &mut commands,
+        &mut ids,
+        &variations,
+        BoidSpec::at(Vec3::new(25.0, 0.5, 0.0), Vec3::new(-25.0, 0.5, 0.0), 1),
+    );
+    scene_camera(&mut commands, Vec3::ZERO, 35.0);
+}
+
+fn spawn_shove_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    let mut heavy = BoidSpec::at(
+        Vec3::new(-20.0, 0.5, 0.0),
+        Vec3::new(20.0, 0.5, 0.0),
+        0,
+    );
+    heavy.body = Body {
+        radius_m: 0.5,
+        mass_kg: 8.0,
+    };
+    spawn_scene_boid(&mut commands, &mut ids, &variations, heavy);
+    spawn_scene_boid(
+        &mut commands,
+        &mut ids,
+        &variations,
+        BoidSpec::at(Vec3::new(20.0, 0.5, 0.0), Vec3::new(-20.0, 0.5, 0.0), 1),
+    );
+    scene_camera(&mut commands, Vec3::ZERO, 35.0);
+}
+
+fn spawn_melee_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    // Three 3-wide ranks per faction, converging through the centre from
+    // evenly spaced bearings — every pair hostile, so the pile is pure
+    // contact dynamics.
+    for (faction, bearing) in (0u8..3).zip([90.0f32, 210.0, 330.0]) {
+        let bearing = bearing.to_radians();
+        let dir = Vec3::new(bearing.cos(), 0.0, bearing.sin());
+        let side = Vec3::new(-dir.z, 0.0, dir.x);
+        for row in 0..3 {
+            for col in 0..3 {
+                let pos = dir * (22.0 - row as f32 * FormationKind::SPACING)
+                    + side * (col as f32 - 1.0) * FormationKind::SPACING
+                    + Vec3::Y * 0.5;
+                // Through the centre and out the far side: a guaranteed
+                // three-way pile, not a polite ring.
+                spawn_scene_boid(
+                    &mut commands,
+                    &mut ids,
+                    &variations,
+                    BoidSpec::at(pos, -pos, faction),
+                );
+            }
+        }
+    }
+    scene_camera(&mut commands, Vec3::ZERO, 60.0);
+}
+
+fn spawn_formation_cross_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    // One army, two blocks with distinguishing colours, courses crossing
+    // at the centre — friendly throughout, so members of different blocks
+    // anticipate while slot-keeping holds each block together.
+    spawn_marching_block(
+        &mut commands,
+        &mut ids,
+        &variations,
+        0,
+        0,
+        Vec3::new(-45.0, 0.5, 0.0),
+        Vec3::new(45.0, 0.5, 0.0),
+        4,
+        3,
+    );
+    spawn_marching_block(
+        &mut commands,
+        &mut ids,
+        &variations,
+        0,
+        1,
+        Vec3::new(0.0, 0.5, 45.0),
+        Vec3::new(0.0, 0.5, -45.0),
+        4,
+        3,
+    );
+    scene_camera(&mut commands, Vec3::ZERO, 75.0);
+}
+
+fn spawn_formation_clash_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    // Hostile blocks on the same lane, marching straight through each
+    // other: no anticipation between armies, contact only — the melee at
+    // formation scale.
+    spawn_marching_block(
+        &mut commands,
+        &mut ids,
+        &variations,
+        0,
+        0,
+        Vec3::new(-40.0, 0.5, 0.0),
+        Vec3::new(40.0, 0.5, 0.0),
+        4,
+        3,
+    );
+    spawn_marching_block(
+        &mut commands,
+        &mut ids,
+        &variations,
+        2,
+        2,
+        Vec3::new(40.0, 0.5, 0.0),
+        Vec3::new(-40.0, 0.5, 0.0),
+        4,
+        3,
+    );
+    scene_camera(&mut commands, Vec3::ZERO, 75.0);
 }
 
 /// The flat-plane stand-in ground for `--flat` render-path benches and
@@ -198,6 +579,29 @@ fn billboard_scene_convert(
 mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
+
+    /// The scene registry stays parseable: unique kebab names, every one
+    /// round-trips through `from_name`, and the flat-ground request is
+    /// exactly "everything but the crowd hills".
+    #[test]
+    fn scene_names_round_trip_and_flat_ground_is_everything_but_crowd() {
+        let mut names: Vec<_> = TestScene::ALL.iter().map(|s| s.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), TestScene::ALL.len(), "names must be unique");
+        for scene in TestScene::ALL {
+            assert_eq!(TestScene::from_name(scene.name()), Some(scene));
+        }
+        assert!(!TestScene::Crowd.wants_flat_ground());
+        for scene in TestScene::ALL {
+            assert_eq!(
+                scene.wants_flat_ground(),
+                scene != TestScene::Crowd,
+                "{:?} flat-ground request drifted",
+                scene.name()
+            );
+        }
+    }
 
     /// A scene launch lands in `Playing` straight away (no main menu), and
     /// UiPlugin's later `init_state` — idempotent — must not clobber it.

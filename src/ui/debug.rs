@@ -11,6 +11,7 @@ use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
 use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState};
 use crate::kinematics::KinematicsTuning;
+use crate::pbd::PbdTuning;
 use crate::sky::SkyTuning;
 use crate::ui::GameState;
 use bevy::ecs::component::Mutable;
@@ -81,6 +82,7 @@ fn debug_panel(
     mut config: ResMut<DebugConfig>,
     mut kin: ResMut<KinematicsTuning>,
     mut boid: ResMut<BoidTuning>,
+    mut pbd: ResMut<PbdTuning>,
     mut form: ResMut<FormationTuning>,
     mut sky: ResMut<SkyTuning>,
     mut crowd: ResMut<CrowdTuning>,
@@ -183,15 +185,6 @@ fn debug_panel(
             tuned(&mut boid, ui, "Boid", false, |ui, boid: &mut BoidTuning| {
                 let mut changed = false;
                 changed |=
-                    slider(ui, &mut boid.repel_coef, 0.0..=0.5, "repel coefficient").changed();
-                changed |= slider(
-                    ui,
-                    &mut boid.obstacle_interaction_radius_m,
-                    0.5..=5.0,
-                    "obstacle radius (m)",
-                )
-                .changed();
-                changed |=
                     slider(ui, &mut boid.bob_amplitude_m, 0.0..=0.5, "bob amplitude (m)")
                         .changed();
                 changed |= slider(
@@ -209,6 +202,59 @@ fn debug_panel(
                 )
                 .changed();
                 changed |= reset(ui, boid);
+                changed
+            });
+
+            tuned(&mut pbd, ui, "PBD collisions", false, |ui, pbd: &mut PbdTuning| {
+                let mut changed = false;
+                changed |=
+                    slider_usize(ui, &mut pbd.iterations, 1..=12, "solver iterations").changed();
+                changed |=
+                    slider_usize(ui, &mut pbd.neighbors, 1..=16, "neighbours per boid").changed();
+                changed |= slider(ui, &mut pbd.friction, 0.0..=1.0, "contact friction").changed();
+                changed |= slider(
+                    ui,
+                    &mut pbd.hostile_friction_scale,
+                    0.0..=1.0,
+                    "hostile friction scale",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut pbd.anticipation_horizon_sec,
+                    0.0..=5.0,
+                    "anticipation horizon (s)",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut pbd.anticipation_stiffness,
+                    0.0..=1.0,
+                    "anticipation stiffness",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut pbd.braking_keep,
+                    0.0..=1.0,
+                    "anticipation braking keep",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut pbd.candidate_margin_m,
+                    0.0..=10.0,
+                    "candidate margin (m)",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut pbd.obstacle_margin_m,
+                    0.0..=10.0,
+                    "obstacle margin (m)",
+                )
+                .changed();
+                changed |= reset(ui, pbd);
                 changed
             });
 
@@ -388,6 +434,16 @@ fn slider(
     ui: &mut egui::Ui,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
+    label: &str,
+) -> egui::Response {
+    ui.add(egui::Slider::new(value, range).text(label))
+}
+
+/// Integer slider (whole counts: solver iterations, neighbour counts).
+fn slider_usize(
+    ui: &mut egui::Ui,
+    value: &mut usize,
+    range: std::ops::RangeInclusive<usize>,
     label: &str,
 ) -> egui::Response {
     ui.add(egui::Slider::new(value, range).text(label))

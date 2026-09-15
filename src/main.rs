@@ -6,6 +6,7 @@ mod freecam;
 mod horse;
 mod kinematics;
 mod launch;
+mod pbd;
 mod player;
 mod preprocess;
 mod resources;
@@ -76,14 +77,16 @@ fn main() {
 
     // Read out the scalar flags the plugin chain needs before `launch`
     // moves into the resource.
-    let (bench, shadows, flat_scene, forced_render, no_vsync, scene_active, billboard_scene, crowd_scene) = (
+    let (bench, shadows, flat_scene, forced_render, no_vsync, scene_active, scene_flat, crowd_scene) = (
         launch.bench,
         launch.shadows,
         launch.flat,
         launch.force_meshes || launch.force_billboards,
         launch.no_vsync,
         launch.scene.is_some(),
-        launch.in_scene(TestScene::Billboard),
+        launch
+            .scene
+            .is_some_and(|scene| scene.wants_flat_ground()),
         launch.in_scene(TestScene::Crowd),
     );
     let mut sky = SkyTuning {
@@ -165,6 +168,8 @@ fn main() {
         .init_resource::<KinematicsTuning>()
         .init_resource::<BoidTuning>()
         .init_resource::<FormationTuning>()
+        .init_resource::<pbd::PbdTuning>()
+        .init_resource::<pbd::PbdScratch>()
         .insert_resource(ClearColor(Color::srgb(0.38, 0.62, 0.86)))
         .init_resource::<SelectionGizmo>()
         .init_resource::<FormationSelectionGizmo>()
@@ -175,12 +180,13 @@ fn main() {
         )
         .add_systems(Startup, setup);
 
-    if flat_scene || billboard_scene {
-        // Flat ground for `--flat` render-path benches and the billboard
-        // comparison scene: a plain plane, no water/obstacles, so nothing
-        // but the units cost GPU time. The terrain settings resource
-        // still exists so the F3 panel's `Res` is valid; without the
-        // plugin it just has nothing to rebuild.
+    if flat_scene || scene_flat {
+        // Flat ground for `--flat` render-path benches and every scene
+        // that asks for one (`TestScene::wants_flat_ground`): a plain
+        // plane, no water/obstacles, so nothing but the units cost GPU
+        // time. The terrain settings resource still exists so the F3
+        // panel's `Res` is valid; without the plugin it just has nothing
+        // to rebuild.
         app.add_systems(Startup, scene::spawn_flat_ground)
             .init_resource::<DemoTerrain>();
     } else if crowd_scene {
@@ -200,8 +206,10 @@ fn main() {
         .add_systems(
             Update,
             (
-                soft_collisions,
                 move_step,
+                // Positional collision response: after integration, before
+                // grounding re-seats y (contact, anticipation, obstacles).
+                pbd::pbd_contact.after(move_step).before(ground_boids),
                 ground_boids.after(move_step).before(bob),
                 bob,
                 draw_cursor,
@@ -238,7 +246,6 @@ fn main() {
                     not(egui_wants_any_pointer_input)
                         .and_then(not(egui_wants_any_keyboard_input)),
                 ),
-                hard_collisions.after(soft_collisions),
             )
                 .run_if(in_state(GameState::Playing)),
         )
