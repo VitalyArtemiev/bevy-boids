@@ -63,10 +63,15 @@ impl Default for Body {
     }
 }
 
-pub const SOLVER_ITERATIONS: usize = 4;
+/// One Jacobi pass per step. With 12 candidates the per-frame pass plus
+/// the next frame's fresh positions converges fast enough for the braid
+/// scenes — manual tuning found extra iterations buy nothing visible.
+pub const SOLVER_ITERATIONS: usize = 1;
 /// Candidate neighbours gathered per boid (`k_nearest`). Must stay within
-/// [`NEIGHBOR_SLOTS`].
-pub const NEIGHBOR_COUNT: usize = 6;
+/// [`NEIGHBOR_SLOTS`]. 12 (not the theoretical ~6–8 simultaneous contacts)
+/// is deliberate: manual tuning found the extra look-ahead coverage is
+/// what makes moving blocks braid instead of snagging.
+pub const NEIGHBOR_COUNT: usize = 12;
 /// Share of the tangential relative slip a contact removes per step,
 /// clamped by the friction cone `μ × overlap`.
 pub const FRICTION: f32 = 0.4;

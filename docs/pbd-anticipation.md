@@ -87,10 +87,13 @@ Solver shape:
   staleness margin (query radius += max relative speed × tree refresh
   period); the tree gives candidates, live positions come from the scratch
   copy.
-- **Jacobi iterations designed in from day one** (`iterations` tuning,
-  default ~4; the paper uses ~6 with delta-averaging coefficient 1.2).
-  `iterations = 1` degenerates to single-pass. Do not land the buffers
-  single-pass-only: retrofitting the loop is the expensive part.
+- **Jacobi iterations designed in from day one** (the paper uses ~6 with
+  delta-averaging coefficient 1.2). Defaults retuned by hand after the
+  scenes landed: 12 candidates × 1 pass — wider look-ahead coverage does
+  more for braid quality than re-relaxing a smaller candidate set, and one
+  pass per frame against fresh next-frame positions converges fast enough.
+  Measured 0.8 ms at 10k boids in release. The loop stays
+  multi-iteration-capable: retrofitting it is the expensive part.
 - Frictional contact: inequality distance constraint
   `C(xi,xj) = |xi−xj| − (ri+rj) ≥ 0`, split by inverse mass, with kinematic
   friction on tangential slip (Macklin et al. unified-particles style).

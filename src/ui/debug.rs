@@ -215,7 +215,9 @@ fn debug_panel(
                 changed |= slider(
                     ui,
                     &mut pbd.hostile_friction_scale,
-                    0.0..=1.0,
+                    // Above 1.0 it is a deliberate grind multiplier: sticky
+                    // enemy contact (shield walls), not just slicker slide.
+                    0.0..=5.0,
                     "hostile friction scale",
                 )
                 .changed();
