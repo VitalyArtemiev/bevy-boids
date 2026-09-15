@@ -130,6 +130,24 @@ pub fn arrival_plan(
     (dir * speed, speed)
 }
 
+/// Steering-authority multiplier for the distance left to a target with a
+/// `soft_arrival_m` fade: 1.0 at or beyond the radius, `(l/r)²` inside it,
+/// and always 1.0 when the radius is 0 (crisp arrival). The ramp is
+/// floored at [`SOFT_AUTHORITY_FLOOR`]: near the target slot-keeping keeps
+/// just enough authority to settle onto the slot and brake the final
+/// approach, while staying well below the PBD solver's local forces —
+/// that balance is what lets avoidance win the last stretch without
+/// letting arrivals drift.
+pub const SOFT_AUTHORITY_FLOOR: f32 = 0.25;
+
+pub fn arrival_authority(distance_m: f32, soft_radius_m: f32) -> f32 {
+    if soft_radius_m <= 0.0 {
+        return 1.0;
+    }
+    let ratio = (distance_m / soft_radius_m).clamp(0.0, 1.0);
+    (ratio * ratio).max(SOFT_AUTHORITY_FLOOR)
+}
+
 /// Gravity's pull along the terrain surface, projected onto the ground
 /// plane: `g·sin(θ)·cos(θ)` pointing downhill, m/s². Peaks at half of
 /// `gravity_mpss` on a 45° grade and falls off beyond it as the horizontal
@@ -304,6 +322,38 @@ mod tests {
             max_heading_rate <= tuning.max_acceleration_mpss / 3.0 + 0.2,
             "heading snapped at {max_heading_rate} rad/s"
         );
+    }
+
+    #[test]
+    fn arrival_authority_fades_inside_the_soft_radius() {
+        // Crisp target (radius 0): full authority everywhere.
+        assert_eq!(arrival_authority(0.0, 0.0), 1.0);
+        assert_eq!(arrival_authority(0.5, 0.0), 1.0);
+        // Soft target: quadratic ramp with a settle floor — floored at the
+        // target, quarter at half the radius, full at and beyond.
+        assert_eq!(arrival_authority(0.0, 6.0), SOFT_AUTHORITY_FLOOR);
+        assert!((arrival_authority(3.0, 6.0) - 0.25).abs() < 1e-5);
+        assert_eq!(arrival_authority(6.0, 6.0), 1.0);
+        assert_eq!(arrival_authority(20.0, 6.0), 1.0);
+    }
+
+    /// Soft arrival must hand the last stretch to avoidance: with the raw
+    /// steering demand saturating the clamp (a unit moving away fast), the
+    /// same situation steers with markedly less acceleration under a soft
+    /// radius than a crisp one.
+    #[test]
+    fn soft_arrival_reduces_steering_authority_near_the_target() {
+        let tuning = KinematicsTuning::default();
+        let pos = Vec3::ZERO;
+        let near = Vec3::new(3.0, 0.0, 0.0);
+        let vel = Vec3::new(-5.0, 0.0, 0.0); // moving away: raw demand 16 m/s²
+
+        let (_, speed) = arrival_plan(pos, near, vel, tuning.max_velocity_mps, &tuning);
+        let raw = (Vec3::new(speed, 0.0, 0.0) - vel) / tuning.steer_response_sec;
+        let crisp_a = raw.clamp_length_max(tuning.max_acceleration_mpss * arrival_authority(3.0, 0.0));
+        let soft_a = raw.clamp_length_max(tuning.max_acceleration_mpss * arrival_authority(3.0, 6.0));
+
+        assert!(soft_a.length() < crisp_a.length() * 0.4);
     }
 
     #[test]

@@ -167,44 +167,51 @@ XSPH cohesion (§4.3) is **rejected** for now: formations already provide
 cohesion, and velocity-matching toward neighbours fights slot targets.
 Revisit only as a per-LOD flavour term, off by default.
 
-## Open problem: the head-on formation braid jams
+## The head-on formation braid — fixed by soft slot arrivals
 
 `--scene formation-braid` (two friendly blocks, same lane, marching at
-each other) pins the failure: the lone-pair `head-on` scene braids
-cleanly, but the formation-scale meeting stalls into a deadlocked mixed
-phalanx wall at the centre — no lateral lanes open, nobody passes. Three
-mechanisms stack:
+each other) pinned the original failure: the lone-pair `head-on` scene
+braids cleanly, but the formation-scale meeting stalled into a deadlocked
+mixed phalanx wall at the centre. Three mechanisms stacked:
 
 1. **Mirror symmetry.** A block-block meeting has no inherent sidestep
    side: each interior member's anticipated pairs sit symmetrically left
    and right, so their lateral corrections cancel. The lone pair only
    braids because of its deliberate lane offset (and numerical noise).
 2. **Slots fight the sidestep.** `dispatch_formation_goals` rewrites each
-   member's `Target` to its slot every tick — a *nearby* point, so any
-   lateral displacement immediately produces a full-strength restoring
-   acceleration. The lone pair's target is far away (displacement barely
-   changes the bearing), which is why its sidestep sticks. The
-   anticipation nudge (stiffness ≤ k, × mass share, × 1/iterations) loses
-   that tug-of-war every tick.
+   member's `Target` to its slot every tick, and while a `Move` is active
+   `plan_goal`'s `MIN_LEAD` keeps every slot ~4 m ahead of the centre of
+   mass — so the jam's forward pressure is full-strength slot steering
+   into the wall.
 3. **Friendly contact boxes the wall in.** Contact applies between
    compatriots too; once the blocks compress, same-army neighbours at
-   1 m spacing seal the ends of the wall, so even members that do pick a
-   side have nowhere to go until the whole block fans out together.
+   1 m spacing seal the ends of the wall.
 
-Candidate fixes, in increasing order of scope (none built yet):
+**The fix (built): soft slot arrivals.** Member slot targets now carry
+`Target::soft_arrival_m` (set from `FormationTuning::slot_soft_radius_m`,
+default 6 m, F1-tunable): inside the radius, `follow_target`'s
+acceleration clamp ramps down quadratically (`kinematics::arrival_authority`,
+floored at 0.25). Near their slots, members steer at ≤ ~1.2 m/s² — well
+below the solver's avoidance authority — so anticipation opens lateral
+lanes instead of being crushed flat. The floor matters: authority fading
+to *zero* let post-arrival momentum drift formations past their
+destination (the march test caught this); the quarter floor keeps enough
+settle/brake authority for crisp arrivals. Radius 6 m rather than the
+naive ~2 m because the march lead already keeps members ~4 m from their
+slots — a smaller fade never engages where the pressure builds.
+Verified in the scene: the blocks now interweave like a braided cable and
+pass (previously a stable deadlocked wall); the 90° `formation-cross` and
+all 102 tests unchanged.
+
+Remaining candidates if multi-block traffic still clogs (not built):
 
 - **Consistent passing side** — bias the §4.5 sidestep laterally by a
   fixed handedness relative to the closing direction ("keep right"),
   keyed per formation so both blocks pick the same global convention.
-  Cheap, breaks the symmetry the way real roads do; probably enough for
-  1-vs-1 blocks, less so for multi-block traffic.
-- **Slot slack under avoidance pressure** — let dispatch offset slot
-  targets by accumulated anticipation corrections (or temporarily widen
-  spacing when the formation's COM speed collapses), so slots stop
-  enforcing the lane mid-conflict. Touches the formation pipeline, not
-  the solver.
+  Would make the braid deterministic instead of noise-broken, and scale
+  to more than two blocks.
 - **Formation-level deconfliction** — plan-level: two formations whose
   planned paths intersect resolve at the `FormationGoal` layer (one
   yields, detours or sidesteps as a whole). This is what RTS games
-  actually do, and it subsumes the others for large blocks; the paper has
-  nothing equivalent (its agents have no group structure).
+  actually do for large blocks; the paper has nothing equivalent (its
+  agents have no group structure).

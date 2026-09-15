@@ -1,4 +1,4 @@
-use crate::kinematics::{KinematicsTuning, Velocity, arrival_plan};
+use crate::kinematics::{KinematicsTuning, Velocity, arrival_authority, arrival_plan};
 use bevy::math::Vec3;
 use bevy::prelude::{Component, Query, Res, Transform};
 
@@ -10,6 +10,14 @@ pub struct Target {
     /// Multiplier on the tuning max velocity — how fast this entity closes
     /// on its target (radial-menu Walk < Run; 1.0 = full speed).
     pub speed_scale: f32,
+    /// Steering-authority fade near the target: inside this radius the
+    /// acceleration clamp ramps down quadratically (0 at the target, full
+    /// at the radius), so local forces — the PBD solver's anticipation and
+    /// contact — outmuscle slot-keeping when a unit is roughly where it
+    /// should be. 0 keeps crisp, full-authority arrival (the default for
+    /// every target except formation slots, which set it from
+    /// `FormationTuning::slot_soft_radius_m`).
+    pub soft_arrival_m: f32,
 }
 
 impl Default for Target {
@@ -18,6 +26,7 @@ impl Default for Target {
             pos: Vec3::ZERO,
             dir: Vec3::ZERO,
             speed_scale: 1.0,
+            soft_arrival_m: 0.0,
         }
     }
 }
@@ -41,7 +50,13 @@ pub fn follow_target(
         let (desired_v, speed) =
             arrival_plan(transform.translation, target.pos, vel.v, cap, &tuning);
         vel.target_v = speed;
+        // Near a soft target the steering authority fades out, leaving
+        // avoidance in charge of the last stretch (see `Target::soft_arrival_m`).
+        let authority = arrival_authority(
+            transform.translation.distance(target.pos),
+            target.soft_arrival_m,
+        );
         vel.a = ((desired_v - vel.v) / tuning.steer_response_sec)
-            .clamp_length_max(tuning.max_acceleration_mpss);
+            .clamp_length_max(tuning.max_acceleration_mpss * authority);
     }
 }

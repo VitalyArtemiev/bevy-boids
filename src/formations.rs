@@ -734,6 +734,13 @@ pub const MIN_LEAD: f32 = 2.0 * FormationKind::SPACING;
 
 /// Center-of-mass arrival tolerance for [`FormationOrder::Move`].
 pub const ARRIVE_TOLERANCE: f32 = 2.0;
+/// Default slot-steering authority fade, metres (see
+/// [`FormationTuning::slot_soft_radius_m`]). Sized to cover the march
+/// lead: while a `Move` is active, `plan_goal` keeps every member's slot
+/// [`MIN_LEAD`] (= 2× spacing) ahead of the center of mass, so members
+/// ride ~4 m from their slots even in perfect order — a fade much smaller
+/// than that never engages where formation pressure actually builds.
+pub const SLOT_SOFT_RADIUS_M: f32 = 6.0;
 
 /// Runtime-tunable formation geometry; exposed as sliders by the debug UI.
 /// Defaults mirror the consts (which stay authoritative for docs and
@@ -746,6 +753,13 @@ pub struct FormationTuning {
     pub lead_time_sec: f32,
     /// Center-of-mass arrival tolerance for `Move`, metres (`ARRIVE_TOLERANCE`).
     pub arrive_tolerance_m: f32,
+    /// Slot-steering authority fade, metres (`SLOT_SOFT_RADIUS_M`): member
+    /// slot targets set `Target::soft_arrival_m` to this, so inside the
+    /// radius a unit's steering accel fades quadratically and the PBD
+    /// solver's avoidance/contact outmuscle slot-keeping — the fix for the
+    /// head-on braid jam, where full-strength slot pressure crushed both
+    /// blocks into a wall no lateral force could open. 0 = crisp slots.
+    pub slot_soft_radius_m: f32,
 }
 
 impl Default for FormationTuning {
@@ -754,6 +768,7 @@ impl Default for FormationTuning {
             spacing_m: FormationKind::SPACING,
             lead_time_sec: LEAD_TIME,
             arrive_tolerance_m: ARRIVE_TOLERANCE,
+            slot_soft_radius_m: SLOT_SOFT_RADIUS_M,
         }
     }
 }
@@ -863,9 +878,12 @@ pub fn dispatch_formation_goals(
                     }
                 } else if simulated.is_some() {
                     // Loaded boid: direct steering; unloaded ones have
-                    // nothing to command.
+                    // nothing to command. Slot targets carry the soft
+                    // arrival fade so avoidance outranks slot-keeping in
+                    // the last stretch.
                     target.pos = pos;
                     target.dir = facing;
+                    target.soft_arrival_m = tuning.slot_soft_radius_m;
                 }
             }
         }

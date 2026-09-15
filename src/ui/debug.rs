@@ -271,6 +271,13 @@ fn debug_panel(
                     "arrival tolerance (m)",
                 )
                 .changed();
+                changed |= slider(
+                    ui,
+                    &mut form.slot_soft_radius_m,
+                    0.0..=15.0,
+                    "slot soft radius (m)",
+                )
+                .changed();
                 changed |= reset(ui, form);
                 changed
             });
