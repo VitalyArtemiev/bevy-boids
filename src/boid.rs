@@ -110,11 +110,19 @@ impl FromWorld for BoidVariations {
             let (center, radius) =
                 crate::preprocess::mesh_bounds(meshes.get(&mesh).expect("just added"));
             drop(meshes);
-            let texture = world.resource_mut::<Assets<Image>>().add(uv_debug_texture());
+            let texture = world
+                .resource_mut::<Assets<Image>>()
+                .add(uv_debug_texture());
             (mesh, texture, center, radius)
         };
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        Self(tinted_capsules(mesh, texture, center, radius, &mut materials))
+        Self(tinted_capsules(
+            mesh,
+            texture,
+            center,
+            radius,
+            &mut materials,
+        ))
     }
 }
 
@@ -128,8 +136,7 @@ pub fn boid_variations(
 ) -> Vec<BoidVariation> {
     let mesh = meshes.add(Capsule3d::default());
     let texture = images.add(uv_debug_texture());
-    let (center, radius) =
-        crate::preprocess::mesh_bounds(meshes.get(&mesh).expect("just added"));
+    let (center, radius) = crate::preprocess::mesh_bounds(meshes.get(&mesh).expect("just added"));
     tinted_capsules(mesh, texture, center, radius, materials)
 }
 
@@ -174,7 +181,6 @@ pub struct BoidBundle {
     body: Body,
     mesh: Mesh3d,
     material: MeshMaterial3d<StandardMaterial>,
-    bob: Bob,
     ground: GroundY,
     tracked: TrackedByTree,
 }
@@ -187,7 +193,6 @@ impl BoidBundle {
         let mut rng = rand::rng();
         let x = rng.random_range(-10.0..10.0);
         let z = rng.random_range(-10.0..10.0);
-        let bob_offset = rng.random_range(-20.0..20.0);
 
         BoidBundle {
             boid: Boid { id },
@@ -195,7 +200,6 @@ impl BoidBundle {
             target,
             mesh: Mesh3d(variation.mesh.clone()),
             material: MeshMaterial3d(variation.material.clone()),
-            bob: Bob { offset: bob_offset, ..default() },
             ..default()
         }
     }
@@ -209,14 +213,12 @@ impl BoidBundle {
         let mut rng = rand::rng();
         let x = rng.random_range(-10.0..10.0);
         let z = rng.random_range(-10.0..10.0);
-        let bob_offset = rng.random_range(-20.0..20.0);
 
         BoidBundle {
             transform: Transform::from_xyz(x, 0.5, z),
             target,
             mesh: Mesh3d(mesh),
             material: MeshMaterial3d(material),
-            bob: Bob { offset: bob_offset, ..default() },
             ..default()
         }
     }
@@ -227,64 +229,77 @@ impl BoidBundle {
 /// lives in [`crate::pbd::PbdTuning`].)
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct BoidTuning {
-    /// Idle bob height, metres.
+    /// Bob height, metres.
     pub bob_amplitude_m: f32,
-    /// Bob frequency per m/s of speed.
-    pub bob_freq_coef: f32,
-    /// Floor for the bob frequency, Hz.
-    pub bob_freq_min_hz: f32,
+    /// Idle sway cadence, Hz (stationary units visibly breathe).
+    pub bob_freq_idle_hz: f32,
+    /// Marching cadence, Hz.
+    pub bob_freq_walk_hz: f32,
+    /// Sprint cadence, Hz.
+    pub bob_freq_run_hz: f32,
 }
 
 impl Default for BoidTuning {
     fn default() -> Self {
         Self {
             bob_amplitude_m: BOB_AMPLITUDE,
-            bob_freq_coef: BOB_FREQ_COEF,
-            bob_freq_min_hz: BOB_FREQ_MIN,
+            bob_freq_idle_hz: BOB_FREQ_IDLE,
+            bob_freq_walk_hz: BOB_FREQ_WALK,
+            bob_freq_run_hz: BOB_FREQ_RUN,
         }
     }
 }
 
-#[derive(Component, Default)]
-pub struct Bob {
-    /// Per-boid phase de-sync so a crowd never bobs in lockstep.
-    pub offset: f32,
-    /// Accumulated bob phase (`phase += freq·dt` each frame). Accumulating
-    /// is what keeps the visible frequency equal to `freq` while speed —
-    /// and therefore frequency — changes: computing `sin(freq · elapsed)`
-    /// instead turns every frequency change into a phase jump of
-    /// `Δfreq · elapsed`, i.e. acceleration-driven chatter that worsens
-    /// the longer the app runs.
-    pub phase: f32,
-}
-
 const BOB_AMPLITUDE: f32 = 0.1;
-/// Bob frequency per m/s of speed: a 5 m/s march bobs at ~0.75 Hz, a
-/// 20 m/s run at ~3 Hz.
-const BOB_FREQ_COEF: f32 = 0.15;
-/// Idle sway floor, Hz — visible breathing at rest, not the sub-perceptual
-/// 0.05 Hz this used to be.
-const BOB_FREQ_MIN: f32 = 0.5;
+const BOB_FREQ_IDLE: f32 = 0.5;
+const BOB_FREQ_WALK: f32 = 1.2;
+const BOB_FREQ_RUN: f32 = 3.0;
+/// Speed ranges the cadence weights sweep across, m/s: idle fades out by
+/// `IDLE_FADE_END`, run takes over from `RUN_FADE_START`.
+const IDLE_FADE_END: f32 = 3.0;
+const RUN_FADE_START: f32 = 6.0;
+const RUN_FADE_END: f32 = 14.0;
 /// Capsule3d::default() is 1 m tall; its centre rides half a metre above
 /// the terrain surface tracked by GroundY.
 const BOID_HALF_HEIGHT: f32 = 0.5;
 
+/// Per-boid bob phase de-sync, derived from the stable spawn id — a
+/// golden-ratio hash spreads consecutive ids evenly around the circle, so
+/// a crowd never bobs in lockstep and no per-boid state is stored.
+fn bob_offset(id: u32) -> f32 {
+    use std::f32::consts::TAU;
+    ((id as f32) * 0.618_034).fract() * TAU
+}
+
+fn smoothstep(x: f32, start: f32, end: f32) -> f32 {
+    let t = ((x - start) / (end - start)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Cosmetic vertical bob. Three fixed cadences (idle / walk / run) blended
+/// by speed — a speed change morphs the weights, it cannot jump the phase,
+/// because every cadence is a pure function of global time. This keeps the
+/// effect stateless (no accumulated phase per boid; 200k-unit fields pay
+/// three `sin`s and nothing else) at the cost of the cadence being
+/// approximate rather than exactly `coef × speed`.
 pub fn bob(
-    mut q_boids: Query<(&mut Transform, &Velocity, &mut Bob, &GroundY), With<Boid>>,
+    mut q_boids: Query<(&mut Transform, &Velocity, &Boid, &GroundY)>,
     time: Res<Time>,
     tuning: Res<BoidTuning>,
 ) {
     use std::f32::consts::TAU;
-    let dt = time.delta_secs();
-    for (mut transform, vel, mut bob, ground) in &mut q_boids {
-        // `freq` is Hz, phase is radians — the TAU is what the original
-        // `sin(freq · elapsed)` was missing, another ~6x shrink on top of
-        // the clamps.
-        let freq = (vel.v.length() * tuning.bob_freq_coef).max(tuning.bob_freq_min_hz);
-        bob.phase += TAU * freq * dt;
-        transform.translation.y = ground.surface
-            + BOID_HALF_HEIGHT
-            + tuning.bob_amplitude_m * f32::sin(bob.phase + bob.offset)
+    let t = time.elapsed_secs();
+    for (mut transform, vel, boid, ground) in &mut q_boids {
+        let v = vel.v.length();
+        let w_idle = 1.0 - smoothstep(v, IDLE_FADE_END * 0.25, IDLE_FADE_END);
+        let w_run = smoothstep(v, RUN_FADE_START, RUN_FADE_END);
+        let w_walk = (1.0 - w_idle - w_run).clamp(0.0, 1.0);
+        let arg = t + bob_offset(boid.id);
+        let bob_height = tuning.bob_amplitude_m
+            * (w_idle * f32::sin(TAU * tuning.bob_freq_idle_hz * arg)
+                + w_walk * f32::sin(TAU * tuning.bob_freq_walk_hz * arg)
+                + w_run * f32::sin(TAU * tuning.bob_freq_run_hz * arg));
+        transform.translation.y = ground.surface + BOID_HALF_HEIGHT + bob_height
     }
 }
 
@@ -322,13 +337,13 @@ mod tests {
         }
     }
 
-    /// Bob advances its accumulated phase by exactly `freq·dt` — the
-    /// property whose absence made bobbing read as acceleration-driven:
-    /// `sin(freq · elapsed)` jumps phase by `Δfreq · elapsed` whenever
-    /// speed changes, chatter that worsens the longer the app runs.
-    /// A stationary boid must still advance at the floor frequency.
+    /// Bob is stateless: the animation is a pure function of global time
+    /// and current speed, so (a) a speed change can never jump the height
+    /// — the failure that made bobbing read as acceleration-driven when
+    /// phase was `freq × elapsed` — and (b) a stationary boid still sways
+    /// at the idle cadence, while a sprinting one bobs visibly faster.
     #[test]
-    fn bob_advances_phase_by_frequency_times_dt() {
+    fn bob_is_stateless_continuous_and_speed_responsive() {
         use bevy::app::App;
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
@@ -342,53 +357,81 @@ mod tests {
         let e = app
             .world_mut()
             .spawn((
-                Boid::default(),
+                Boid { id: 7 },
                 Transform::IDENTITY,
                 Velocity::default(),
-                Bob::default(),
                 GroundY::default(),
             ))
             .id();
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f32(dt),
-        ));
 
-        let phase = |app: &App, e| app.world().get::<Bob>(e).unwrap().phase;
-
-        use std::f32::consts::TAU;
-        // Stationary: the floor frequency, visible idle sway.
-        app.update();
-        let p0 = phase(&app, e);
-        app.update();
-        let p1 = phase(&app, e);
-        assert!(
-            (p1 - p0 - TAU * tuning.bob_freq_min_hz * dt).abs() < 1e-5,
-            "stationary phase advance must be the floor frequency"
-        );
-
-        // Quarter period at the floor: the boid visibly rises off the seat.
-        for _ in 0..29 {
+        let tick = |app: &mut App, secs: f32| {
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+                secs,
+            )));
             app.update();
+            app.world().get::<Transform>(e).unwrap().translation.y
+        };
+        let set_speed = |app: &mut App, v: f32| {
+            app.world_mut().get_mut::<Velocity>(e).unwrap().v = Vec3::X * v;
+        };
+
+        // (a) Smooth under speed wobble after a long session: with the old
+        // freq×elapsed phase, ±0.1 m/s of per-frame jitter moved the phase
+        // by TAU·coef·Δv·elapsed (hundreds of radians by now) — chatter.
+        // Here the sine arguments do not depend on speed at all, so the
+        // per-frame move is bounded by the fastest cadence times dt.
+        tick(&mut app, 600.0);
+        set_speed(&mut app, 20.0);
+        let mut prev = tick(&mut app, dt);
+        for i in 0..120 {
+            set_speed(&mut app, 20.0 + if i % 2 == 0 { 0.1 } else { -0.1 });
+            let y = tick(&mut app, dt);
+            assert!(
+                (y - prev).abs()
+                    <= tuning.bob_amplitude_m * std::f32::consts::TAU * tuning.bob_freq_run_hz * dt
+                        + 1e-4,
+                "bob must stay smooth under speed wobble, moved {}",
+                (y - prev).abs()
+            );
+            prev = y;
         }
-        let y = app.world().get::<Transform>(e).unwrap().translation.y;
+
+        // (b) Idle sway: stationary, the height sweeps the full amplitude
+        // range within one idle period.
+        set_speed(&mut app, 0.0);
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for _ in 0..(1.0 / tuning.bob_freq_idle_hz / dt) as usize {
+            let y = tick(&mut app, dt);
+            lo = lo.min(y);
+            hi = hi.max(y);
+        }
         assert!(
-            (y - (BOID_HALF_HEIGHT + tuning.bob_amplitude_m)).abs() < 1e-3,
-            "idle bob must reach full amplitude, y {y}"
+            hi - lo >= tuning.bob_amplitude_m,
+            "idle bob must be visible, sweep {}",
+            hi - lo
         );
 
-        // Speeding up mid-run: advance is exactly coef·speed·dt — no
-        // elapsed-time phase jump from the frequency change itself.
-        app.world_mut()
-            .get_mut::<Velocity>(e)
-            .unwrap()
-            .v = Vec3::X * 10.0;
-        app.update();
-        let p2 = phase(&app, e);
-        app.update();
-        let p3 = phase(&app, e);
+        // (b) Cadence follows speed: sign changes of the bob around its
+        // seat over one second — idle slower than sprint.
+        let crossings = |app: &mut App, v: f32| {
+            set_speed(app, v);
+            let mut sign = 0i32;
+            let mut count = 0;
+            for _ in 0..(1.0 / dt) as usize {
+                let y = tick(app, dt) - (BOID_HALF_HEIGHT);
+                let s = (y > 0.0) as i32;
+                if sign != 0 && s != sign {
+                    count += 1;
+                }
+                sign = s;
+            }
+            count
+        };
+        let idle = crossings(&mut app, 0.0);
+        let run = crossings(&mut app, 20.0);
         assert!(
-            (p3 - p2 - TAU * tuning.bob_freq_coef * 10.0 * dt).abs() < 1e-5,
-            "moving phase advance must be coef × speed × dt"
+            run > idle,
+            "sprint must bob faster than idle ({run} vs {idle} crossings)"
         );
     }
 }

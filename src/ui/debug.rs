@@ -5,15 +5,15 @@
 //! owning module's `*Tuning` resource, read it from the system, and add one
 //! `Slider::new` line in the matching section here.
 
-use crate::boid::BoidTuning;
 use crate::billboard::BillboardTuning;
+use crate::boid::BoidTuning;
 use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
-use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState};
 use crate::kinematics::KinematicsTuning;
 use crate::pbd::PbdTuning;
 use crate::sky::SkyTuning;
 use crate::ui::GameState;
+use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState};
 use bevy::ecs::component::Mutable;
 use bevy::prelude::*;
 use bevy_egui::egui;
@@ -119,170 +119,196 @@ fn debug_panel(
             ));
             ui.separator();
 
-            tuned(&mut kin, ui, "Kinematics", true, |ui, kin: &mut KinematicsTuning| {
-                let mut changed = false;
-                changed |= slider(
-                    ui,
-                    &mut kin.max_velocity_mps,
-                    0.0..=50.0,
-                    "max velocity (m/s)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.brownian_velocity_mps,
-                    0.0..=0.5,
-                    "brownian jitter (m/s)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.max_acceleration_mpss,
-                    0.0..=50.0,
-                    "max acceleration (m/s²)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.deceleration_time_sec,
-                    0.1..=5.0,
-                    "deceleration time (s)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.steer_response_sec,
-                    0.05..=2.0,
-                    "steer response (s)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.misalign_slowdown,
-                    0.0..=1.0,
-                    "misalignment slowdown",
-                )
-                .changed();
-                changed |= slider(ui, &mut kin.gravity_mpss, 0.0..=30.0, "gravity (m/s²)").changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.slope_accel_coef,
-                    0.0..=3.0,
-                    "uphill thrust loss",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut kin.slope_cap_coef,
-                    0.0..=3.0,
-                    "downhill cap gain",
-                )
-                .changed();
-                changed |= reset(ui, kin);
-                changed
-            });
+            tuned(
+                &mut kin,
+                ui,
+                "Kinematics",
+                true,
+                |ui, kin: &mut KinematicsTuning| {
+                    let mut changed = false;
+                    changed |= slider(
+                        ui,
+                        &mut kin.max_velocity_mps,
+                        0.0..=50.0,
+                        "max velocity (m/s)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut kin.brownian_velocity_mps,
+                        0.0..=0.5,
+                        "brownian jitter (m/s)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut kin.max_acceleration_mpss,
+                        0.0..=50.0,
+                        "max acceleration (m/s²)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut kin.deceleration_time_sec,
+                        0.1..=5.0,
+                        "deceleration time (s)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut kin.steer_response_sec,
+                        0.05..=2.0,
+                        "steer response (s)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut kin.misalign_slowdown,
+                        0.0..=1.0,
+                        "misalignment slowdown",
+                    )
+                    .changed();
+                    changed |=
+                        slider(ui, &mut kin.gravity_mpss, 0.0..=30.0, "gravity (m/s²)").changed();
+                    changed |= slider(
+                        ui,
+                        &mut kin.slope_accel_coef,
+                        0.0..=3.0,
+                        "uphill thrust loss",
+                    )
+                    .changed();
+                    changed |= slider(ui, &mut kin.slope_cap_coef, 0.0..=3.0, "downhill cap gain")
+                        .changed();
+                    changed |= reset(ui, kin);
+                    changed
+                },
+            );
 
             tuned(&mut boid, ui, "Boid", false, |ui, boid: &mut BoidTuning| {
                 let mut changed = false;
-                changed |=
-                    slider(ui, &mut boid.bob_amplitude_m, 0.0..=0.5, "bob amplitude (m)")
-                        .changed();
                 changed |= slider(
                     ui,
-                    &mut boid.bob_freq_coef,
-                    0.0..=1.0,
-                    "bob frequency coefficient",
+                    &mut boid.bob_amplitude_m,
+                    0.0..=0.5,
+                    "bob amplitude (m)",
                 )
                 .changed();
                 changed |= slider(
                     ui,
-                    &mut boid.bob_freq_min_hz,
+                    &mut boid.bob_freq_idle_hz,
                     0.0..=2.0,
-                    "bob frequency minimum (Hz)",
+                    "bob idle cadence (Hz)",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut boid.bob_freq_walk_hz,
+                    0.0..=4.0,
+                    "bob walk cadence (Hz)",
+                )
+                .changed();
+                changed |= slider(
+                    ui,
+                    &mut boid.bob_freq_run_hz,
+                    0.0..=8.0,
+                    "bob run cadence (Hz)",
                 )
                 .changed();
                 changed |= reset(ui, boid);
                 changed
             });
 
-            tuned(&mut pbd, ui, "PBD collisions", false, |ui, pbd: &mut PbdTuning| {
-                let mut changed = false;
-                changed |=
-                    slider_usize(ui, &mut pbd.iterations, 1..=12, "solver iterations").changed();
-                changed |=
-                    slider_usize(ui, &mut pbd.neighbors, 1..=16, "neighbours per boid").changed();
-                changed |= slider(ui, &mut pbd.friction, 0.0..=1.0, "contact friction").changed();
-                changed |= slider(
-                    ui,
-                    &mut pbd.hostile_friction_scale,
-                    // Above 1.0 it is a deliberate grind multiplier: sticky
-                    // enemy contact (shield walls), not just slicker slide.
-                    0.0..=5.0,
-                    "hostile friction scale",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut pbd.anticipation_horizon_sec,
-                    0.0..=5.0,
-                    "anticipation horizon (s)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut pbd.anticipation_stiffness,
-                    0.0..=1.0,
-                    "anticipation stiffness",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut pbd.braking_keep,
-                    0.0..=1.0,
-                    "anticipation braking keep",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut pbd.candidate_margin_m,
-                    0.0..=10.0,
-                    "candidate margin (m)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut pbd.obstacle_margin_m,
-                    0.0..=10.0,
-                    "obstacle margin (m)",
-                )
-                .changed();
-                changed |= reset(ui, pbd);
-                changed
-            });
-
-            tuned(&mut form, ui, "Formations", false, |ui, form: &mut FormationTuning| {
-                let mut changed = false;
-                changed |= slider(ui, &mut form.spacing_m, 0.5..=10.0, "slot spacing (m)")
+            tuned(
+                &mut pbd,
+                ui,
+                "PBD collisions",
+                false,
+                |ui, pbd: &mut PbdTuning| {
+                    let mut changed = false;
+                    changed |= slider_usize(ui, &mut pbd.iterations, 1..=12, "solver iterations")
+                        .changed();
+                    changed |= slider_usize(ui, &mut pbd.neighbors, 1..=16, "neighbours per boid")
+                        .changed();
+                    changed |=
+                        slider(ui, &mut pbd.friction, 0.0..=1.0, "contact friction").changed();
+                    changed |= slider(
+                        ui,
+                        &mut pbd.hostile_friction_scale,
+                        // Above 1.0 it is a deliberate grind multiplier: sticky
+                        // enemy contact (shield walls), not just slicker slide.
+                        0.0..=5.0,
+                        "hostile friction scale",
+                    )
                     .changed();
-                changed |=
-                    slider(ui, &mut form.lead_time_sec, 0.0..=60.0, "lead time (s)").changed();
-                changed |= slider(
-                    ui,
-                    &mut form.arrive_tolerance_m,
-                    0.0..=10.0,
-                    "arrival tolerance (m)",
-                )
-                .changed();
-                changed |= slider(
-                    ui,
-                    &mut form.slot_soft_radius_m,
-                    0.0..=15.0,
-                    "slot soft radius (m)",
-                )
-                .changed();
-                changed |= reset(ui, form);
-                changed
-            });
+                    changed |= slider(
+                        ui,
+                        &mut pbd.anticipation_horizon_sec,
+                        0.0..=5.0,
+                        "anticipation horizon (s)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut pbd.anticipation_stiffness,
+                        0.0..=1.0,
+                        "anticipation stiffness",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut pbd.braking_keep,
+                        0.0..=1.0,
+                        "anticipation braking keep",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut pbd.candidate_margin_m,
+                        0.0..=10.0,
+                        "candidate margin (m)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut pbd.obstacle_margin_m,
+                        0.0..=10.0,
+                        "obstacle margin (m)",
+                    )
+                    .changed();
+                    changed |= reset(ui, pbd);
+                    changed
+                },
+            );
+
+            tuned(
+                &mut form,
+                ui,
+                "Formations",
+                false,
+                |ui, form: &mut FormationTuning| {
+                    let mut changed = false;
+                    changed |=
+                        slider(ui, &mut form.spacing_m, 0.5..=10.0, "slot spacing (m)").changed();
+                    changed |=
+                        slider(ui, &mut form.lead_time_sec, 0.0..=60.0, "lead time (s)").changed();
+                    changed |= slider(
+                        ui,
+                        &mut form.arrive_tolerance_m,
+                        0.0..=10.0,
+                        "arrival tolerance (m)",
+                    )
+                    .changed();
+                    changed |= slider(
+                        ui,
+                        &mut form.slot_soft_radius_m,
+                        0.0..=15.0,
+                        "slot soft radius (m)",
+                    )
+                    .changed();
+                    changed |= reset(ui, form);
+                    changed
+                },
+            );
 
             tuned(&mut sky, ui, "Sky", false, |ui, sky: &mut SkyTuning| {
                 let mut changed = false;
@@ -293,13 +319,8 @@ fn debug_panel(
                     "sun elevation (°)",
                 )
                 .changed();
-                changed |= slider(
-                    ui,
-                    &mut sky.sun_azimuth_deg,
-                    0.0..=360.0,
-                    "sun azimuth (°)",
-                )
-                .changed();
+                changed |=
+                    slider(ui, &mut sky.sun_azimuth_deg, 0.0..=360.0, "sun azimuth (°)").changed();
                 changed |= ui.checkbox(&mut sky.shadows, "shadow maps").changed();
                 changed |= reset(ui, sky);
                 changed
@@ -315,11 +336,10 @@ fn debug_panel(
                     changed |= slider(ui, &mut crowd.density, 0.2..=1.2, "crowd density").changed();
                     changed |= slider(ui, &mut crowd.glint_rate_hz, 0.0..=1.0, "glint rate (Hz)")
                         .changed();
-                    changed |=
-                        slider(ui, &mut crowd.glint_strength, 0.0..=3.0, "glint strength")
-                            .changed();
-                    changed |= slider(ui, &mut crowd.dust_density, 0.0..=3.0, "dust density")
+                    changed |= slider(ui, &mut crowd.glint_strength, 0.0..=3.0, "glint strength")
                         .changed();
+                    changed |=
+                        slider(ui, &mut crowd.dust_density, 0.0..=3.0, "dust density").changed();
                     changed |= reset(ui, crowd);
                     changed
                 },
@@ -370,15 +390,9 @@ fn debug_panel(
                 .default_open(false)
                 .show(ui, |ui| {
                     if let Ok(mut controls) = q_controls.single_mut() {
-                        let controls: &mut RtsCameraControls =
-                            controls.bypass_change_detection();
-                        controls_changed |= slider(
-                            ui,
-                            &mut controls.pan_speed,
-                            1.0..=100.0,
-                            "pan speed",
-                        )
-                        .changed();
+                        let controls: &mut RtsCameraControls = controls.bypass_change_detection();
+                        controls_changed |=
+                            slider(ui, &mut controls.pan_speed, 1.0..=100.0, "pan speed").changed();
                     }
                 });
             if controls_changed {
