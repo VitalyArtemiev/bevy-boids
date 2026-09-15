@@ -166,3 +166,45 @@ to 20 m/s units):
 XSPH cohesion (§4.3) is **rejected** for now: formations already provide
 cohesion, and velocity-matching toward neighbours fights slot targets.
 Revisit only as a per-LOD flavour term, off by default.
+
+## Open problem: the head-on formation braid jams
+
+`--scene formation-braid` (two friendly blocks, same lane, marching at
+each other) pins the failure: the lone-pair `head-on` scene braids
+cleanly, but the formation-scale meeting stalls into a deadlocked mixed
+phalanx wall at the centre — no lateral lanes open, nobody passes. Three
+mechanisms stack:
+
+1. **Mirror symmetry.** A block-block meeting has no inherent sidestep
+   side: each interior member's anticipated pairs sit symmetrically left
+   and right, so their lateral corrections cancel. The lone pair only
+   braids because of its deliberate lane offset (and numerical noise).
+2. **Slots fight the sidestep.** `dispatch_formation_goals` rewrites each
+   member's `Target` to its slot every tick — a *nearby* point, so any
+   lateral displacement immediately produces a full-strength restoring
+   acceleration. The lone pair's target is far away (displacement barely
+   changes the bearing), which is why its sidestep sticks. The
+   anticipation nudge (stiffness ≤ k, × mass share, × 1/iterations) loses
+   that tug-of-war every tick.
+3. **Friendly contact boxes the wall in.** Contact applies between
+   compatriots too; once the blocks compress, same-army neighbours at
+   1 m spacing seal the ends of the wall, so even members that do pick a
+   side have nowhere to go until the whole block fans out together.
+
+Candidate fixes, in increasing order of scope (none built yet):
+
+- **Consistent passing side** — bias the §4.5 sidestep laterally by a
+  fixed handedness relative to the closing direction ("keep right"),
+  keyed per formation so both blocks pick the same global convention.
+  Cheap, breaks the symmetry the way real roads do; probably enough for
+  1-vs-1 blocks, less so for multi-block traffic.
+- **Slot slack under avoidance pressure** — let dispatch offset slot
+  targets by accumulated anticipation corrections (or temporarily widen
+  spacing when the formation's COM speed collapses), so slots stop
+  enforcing the lane mid-conflict. Touches the formation pipeline, not
+  the solver.
+- **Formation-level deconfliction** — plan-level: two formations whose
+  planned paths intersect resolve at the `FormationGoal` layer (one
+  yields, detours or sidesteps as a whole). This is what RTS games
+  actually do, and it subsumes the others for large blocks; the paper has
+  nothing equivalent (its agents have no group structure).

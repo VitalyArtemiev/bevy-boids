@@ -67,6 +67,13 @@ pub enum TestScene {
     /// Two friendly formations on crossing courses — member-level
     /// anticipation must braid the blocks through each other.
     FormationCross,
+    /// Two friendly formations HEAD-ON on the same lane — the hard braid
+    /// case: unlike [`TestScene::FormationCross`]'s transient 90°
+    /// crossing, the conflict zone persists, formation slots pull members
+    /// back into the lane, and the block geometry is mirror-symmetric
+    /// (no inherent sidestep side). Braiding works for the lone pair of
+    /// `head-on`; this scene is the formation-scale stress test.
+    FormationBraid,
     /// Two hostile formations marching straight through each other —
     /// contact-only, the clash at formation scale.
     FormationClash,
@@ -74,7 +81,7 @@ pub enum TestScene {
 
 impl TestScene {
     /// Every scene, for listing and tests.
-    pub const ALL: [TestScene; 10] = [
+    pub const ALL: [TestScene; 11] = [
         TestScene::Billboard,
         TestScene::Crowd,
         TestScene::Arrival,
@@ -84,6 +91,7 @@ impl TestScene {
         TestScene::Shove,
         TestScene::Melee,
         TestScene::FormationCross,
+        TestScene::FormationBraid,
         TestScene::FormationClash,
     ];
 
@@ -99,6 +107,7 @@ impl TestScene {
             TestScene::Shove => "shove",
             TestScene::Melee => "melee",
             TestScene::FormationCross => "formation-cross",
+            TestScene::FormationBraid => "formation-braid",
             TestScene::FormationClash => "formation-clash",
         }
     }
@@ -164,6 +173,7 @@ impl Plugin for ScenePlugin {
                 spawn_shove_scene.run_if(in_scene(TestScene::Shove)),
                 spawn_melee_scene.run_if(in_scene(TestScene::Melee)),
                 spawn_formation_cross_scene.run_if(in_scene(TestScene::FormationCross)),
+                spawn_formation_braid_scene.run_if(in_scene(TestScene::FormationBraid)),
                 spawn_formation_clash_scene.run_if(in_scene(TestScene::FormationClash)),
             ),
         );
@@ -448,6 +458,35 @@ fn spawn_formation_cross_scene(mut commands: Commands, variations: Res<BoidVaria
         1,
         Vec3::new(0.0, 0.5, 45.0),
         Vec3::new(0.0, 0.5, -45.0),
+        4,
+        3,
+    );
+    scene_camera(&mut commands, Vec3::ZERO, 75.0);
+}
+
+fn spawn_formation_braid_scene(mut commands: Commands, variations: Res<BoidVariations>, mut ids: ResMut<BoidIds>) {
+    // One army, head-on: red marches east, green marches west, same lane.
+    // Everything anticipates (friendly) — the blocks must braid through
+    // each other or jam; that tension is the point of the scene.
+    spawn_marching_block(
+        &mut commands,
+        &mut ids,
+        &variations,
+        0,
+        0,
+        Vec3::new(-40.0, 0.5, 0.0),
+        Vec3::new(40.0, 0.5, 0.0),
+        4,
+        3,
+    );
+    spawn_marching_block(
+        &mut commands,
+        &mut ids,
+        &variations,
+        0,
+        1,
+        Vec3::new(40.0, 0.5, 0.0),
+        Vec3::new(-40.0, 0.5, 0.0),
         4,
         3,
     );
