@@ -83,10 +83,13 @@ Components:
 Solver shape:
 - Scratch SoA resource (positions, deltas, entity→index map) — reused
   buffers, zero steady-state allocation.
-- Candidate pairs gathered **once per step** from `Res<NNTree>` with a
-  staleness margin (query radius += max relative speed × tree refresh
-  period); the tree gives candidates, live positions come from the scratch
-  copy.
+- Candidate pairs gathered **once per step** from `Res<NNTree>`:
+  `k_nearest` (the tuning's neighbour count + 1 for self), then a
+  keep-filter on live scratch positions — pairs within contact distance +
+  a small margin stay candidates, as do any pair with a live anticipation
+  push. Tree staleness cannot leak in through the filter (it runs on
+  live positions); it only biases *which* entities the k-nearest query
+  returns.
 - **Jacobi iterations designed in from day one** (the paper uses ~6 with
   delta-averaging coefficient 1.2). Defaults retuned by hand after the
   scenes landed: 12 candidates × 1 pass — wider look-ahead coverage does
@@ -109,13 +112,18 @@ Validation gates:
   iterations at melee default — assert bounded penetration (< slop) at every
   tick slice. This is the test that validates the per-pair-skip extension.
 - Friendly head-on pass without interpenetration; heavier unit shoves the
-  lighter; obstacle stop test.
-- Wall-clock perf test at 10k agents in the `nearest_solver_scales_to_10k`
-  style (contact degree is geometrically bounded ~6–8 for disks, so a melee
+  lighter. Obstacle seating has no integration test yet — it is verified
+  by the obstacle scenes only.
+- Wall-clock perf test `pbd_contact_scales_to_10k_boids`
+  (contact degree is geometrically bounded ~6–8 for disks, so a melee
   is not asymptotically worse than a march; enemy pairs also skip the
   expensive Stage 3 constraints exactly where density peaks).
-- Bench decision: kd-tree `AutomaticUpdate` refresh 1 s → 0.25 s (position
-  staleness at 20 m/s is up to 20 m today).
+- Known gap: kd-tree `AutomaticUpdate` refresh is still 1 s, so tree
+  positions can be a refresh period old (up to ~20 m at 20 m/s). The
+  live-position keep-filter and symmetric gather (a moved boid still has
+  its neighbours in *their* candidate lists) absorb most of it, but
+  shortening the refresh (0.25 s) is the standing lever if fast units
+  ever visibly clip through each other right after a refresh.
 
 ## Stage 3 — long-range anticipation (paper §4.4–4.5) — as built
 

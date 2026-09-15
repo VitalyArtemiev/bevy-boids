@@ -176,7 +176,6 @@ pub struct BoidBundle {
     material: MeshMaterial3d<StandardMaterial>,
     bob: Bob,
     ground: GroundY,
-    collision: SoftCollision,
     tracked: TrackedByTree,
 }
 

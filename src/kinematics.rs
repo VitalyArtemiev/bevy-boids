@@ -7,8 +7,6 @@ use bevy_spatial::kdtree::KDTree3;
 pub struct Velocity {
     pub v: Vec3,
     pub a: Vec3,
-    ///Acceleration due to collisions
-    pub push: Vec3,
     pub(crate) target_v: f32,
     /// Uphill terrain gradient (dh/dx, dh/dz) under the entity, lazily
     /// sampled once per metre column (`slope_col`) — a gradient is three
@@ -22,7 +20,6 @@ impl Default for Velocity {
         Velocity {
             v: Vec3::ZERO,
             a: Vec3::ZERO,
-            push: Vec3::ZERO,
             target_v: 0.0,
             slope: Vec2::ZERO,
             // Sentinel column: forces a first sample in `move_step`.
@@ -218,9 +215,8 @@ pub fn move_step(
             // clamping it away — a snap would teleport away momentum.
             vel.v *= ((len - tuning.max_acceleration_mpss * dt).max(cap)) / len;
         }
-        let v = vel.v + vel.push * dt;
-        vel.v = v.clamp_length_max(tuning.max_velocity_mps);
-        transform.translation += v.clamp_length_max(tuning.max_velocity_mps) * dt;
+        vel.v = vel.v.clamp_length_max(tuning.max_velocity_mps);
+        transform.translation += vel.v * dt;
     });
 }
 
@@ -229,15 +225,11 @@ pub type NNTree = KDTree3<TrackedByTree>;
 #[derive(Component, Default)]
 pub struct TrackedByTree;
 
+/// Marks an entity the PBD solver seats boids against (the obstacle
+/// cuboids). Pure marker: mass/infinite, geometry comes from `Obstacle`
+/// and the transform.
 #[derive(Component, Default)]
-pub struct SoftCollision {
-    tracked: TrackedByTree,
-}
-
-#[derive(Component, Default)]
-pub struct HardCollision {
-    tracked: TrackedByTree,
-}
+pub struct HardCollision;
 
 #[cfg(test)]
 mod tests {

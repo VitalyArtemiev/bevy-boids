@@ -75,8 +75,10 @@ pub const NEIGHBOR_COUNT: usize = 12;
 /// Share of the tangential relative slip a contact removes per step,
 /// clamped by the friction cone `μ × overlap`.
 pub const FRICTION: f32 = 0.4;
-/// Hostile contacts are slicker — clashing bodies slide off each other
-/// rather than grinding to a standstill.
+/// Multiplier on contact friction for hostile pairs. Default 0.25 —
+/// clashing bodies slide off each other instead of grinding to a
+/// standstill; values above 1.0 make enemy contact deliberately sticky
+/// (the shield-wall grind), exposed by the debug UI up to 5×.
 pub const HOSTILE_FRICTION_SCALE: f32 = 0.25;
 /// How far ahead (seconds) the long-range constraint looks for friendly
 /// pairs. The paper's 20 s horizon is tuned for 1.4 m/s pedestrians; our
@@ -91,14 +93,22 @@ pub const ANTICIPATION_STIFFNESS: f32 = 0.35;
 /// sidestep (agents never slow for each other), 1 = plain anticipation.
 pub const BRAKING_KEEP: f32 = 0.3;
 /// Extra metres on the contact-distance test when filtering neighbour
-/// candidates, buying back some of the kd-tree's staleness (tree positions
-/// can be a refresh period old).
+/// candidates: pairs this close to touching stay candidates even while
+/// not yet overlapping, so later Jacobi iterations (and the next frame)
+/// still see them as positions move. The filter runs on live scratch
+/// positions, so kd-tree staleness does not leak in here.
 pub const CANDIDATE_MARGIN_M: f32 = 2.0;
 /// Extra metres on the obstacle proximity query.
 pub const OBSTACLE_MARGIN_M: f32 = 1.0;
+/// Half-extent of the 1 m obstacle cuboid in the ground plane (matches
+/// the cube mesh the `ObstacleBundle` spawns).
+const OBSTACLE_HALF_EXTENT: f32 = 0.5;
 /// Fixed per-boid neighbour slots — the scratch arrays are flat, not CSR:
-/// one gather pass, no two-phase offset build, and 16 slots comfortably
-/// cover the ~6–8 simultaneous contacts a disk can even have.
+/// one gather pass, no two-phase offset build. Must stay ≥ the largest
+/// tunable `neighbors` (the debug slider caps at this value); the default
+/// gather is 12, sized above the ~6–8 simultaneous contacts a disk can
+/// even have so look-ahead coverage out to near-contact pairs is what
+/// the braid needs.
 pub const NEIGHBOR_SLOTS: usize = 16;
 /// Solver work is chunk-parallel over these many boids per task.
 const PAR_CHUNK: usize = 256;
@@ -545,29 +555,34 @@ pub fn pbd_contact(
     // -- Obstacle seating (§4.7: static obstacles have infinite mass) -----
     // Few obstacles with few contacts each: a serial obstacle-centric
     // loop, projecting disks out of the cuboid's XZ square.
-    for (_obstacle, transform) in &q_obstacles {
-        let center = transform.translation;
-        let reach = 0.5 + s.radius.first().copied().unwrap_or(0.5) + tuning.obstacle_margin_m;
-        for (_pos, hit) in tree.within_distance(center, reach) {
-            let Some(&i) = hit.and_then(|e| s.entity_to_idx.get(&e)) else {
-                continue;
-            };
-            let p = s.pos_a[i];
-            let closest = Vec3::new(
-                p.x.clamp(center.x - 0.5, center.x + 0.5),
-                p.y,
-                p.z.clamp(center.z - 0.5, center.z + 0.5),
-            );
-            let d = p - closest;
-            let dist = d.xz().length();
-            let r = s.radius[i];
-            if dist < r && dist > 1e-6 {
-                let push = d.xz() / dist * (r - dist);
-                s.pos_a[i] += Vec3::new(push.x, 0.0, push.y);
-            } else if dist <= 1e-6 {
-                // Dead centre on the square: any push works; the next step
-                // has gradient again.
-                s.pos_a[i].x += r;
+    if !q_obstacles.is_empty() {
+        // Widest boid decides the query reach (radii can be mixed —
+        // the shove scene pairs a heavy 0.5 m disk with 0.45 m troops).
+        let max_radius = s.radius.iter().copied().fold(0.0_f32, f32::max);
+        for (_obstacle, transform) in &q_obstacles {
+            let center = transform.translation;
+            let reach = OBSTACLE_HALF_EXTENT + max_radius + tuning.obstacle_margin_m;
+            for (_pos, hit) in tree.within_distance(center, reach) {
+                let Some(&i) = hit.and_then(|e| s.entity_to_idx.get(&e)) else {
+                    continue;
+                };
+                let p = s.pos_a[i];
+                let closest = Vec3::new(
+                    p.x.clamp(center.x - OBSTACLE_HALF_EXTENT, center.x + OBSTACLE_HALF_EXTENT),
+                    p.y,
+                    p.z.clamp(center.z - OBSTACLE_HALF_EXTENT, center.z + OBSTACLE_HALF_EXTENT),
+                );
+                let d = p - closest;
+                let dist = d.xz().length();
+                let r = s.radius[i];
+                if dist < r && dist > 1e-6 {
+                    let push = d.xz() / dist * (r - dist);
+                    s.pos_a[i] += Vec3::new(push.x, 0.0, push.y);
+                } else if dist <= 1e-6 {
+                    // Dead centre on the square: any push works; the next
+                    // step has gradient again.
+                    s.pos_a[i].x += r;
+                }
             }
         }
     }
@@ -1011,9 +1026,9 @@ mod tests {
 
     /// Wall-clock budget for the whole solver step at 10k boids (gather +
     /// iterations + write-back), in the style of
-    /// `nearest_solver_scales_to_10k_members`. Measured 1.3 ms in release
-    /// on the dev box; the budget keeps ~8x headroom for CI noise and
-    /// slower machines.
+    /// `nearest_solver_scales_to_10k_members`. Measured 0.8 ms in release
+    /// on the dev box at the 12-candidates/1-pass defaults; the budget
+    /// keeps ~12x headroom for CI noise and slower machines.
     #[test]
     fn pbd_contact_scales_to_10k_boids() {
         let mut app = App::new();
