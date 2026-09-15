@@ -51,11 +51,11 @@ use bevy::render::render_resource::{AsBindGroup, RenderPipelineDescriptor};
 use bevy::shader::ShaderRef;
 
 use crate::boid::{Boid, BoidVariations, variation_for};
-use crate::ui::debug::DebugConfig;
 use crate::kinematics::Velocity;
 use crate::launch::LaunchConfig;
 use crate::preprocess::atlas;
 use crate::target::Target;
+use crate::ui::debug::DebugConfig;
 use std::f32::consts::TAU;
 
 /// Swap-out distance, metres: beyond it the mesh detaches. Default leaves
@@ -327,7 +327,9 @@ pub fn swap_boid_lod(
     };
     let camera_pos = camera.translation();
     let swap_at = tuning.swap_distance_m * tuning.swap_distance_m;
-    let restore_at = (tuning.swap_distance_m - tuning.hysteresis_m).max(0.0).powi(2);
+    let restore_at = (tuning.swap_distance_m - tuning.hysteresis_m)
+        .max(0.0)
+        .powi(2);
 
     for (entity, boid, transform, billboard) in &boids {
         let distance_sq = camera_pos.distance_squared(transform.translation);
@@ -351,8 +353,13 @@ pub fn swap_boid_lod(
                 // Application-time validity check, see attach_billboard.
                 commands.queue(move |world: &mut World| {
                     if let Ok(mut boid) = world.get_entity_mut(entity) {
-                        boid.remove::<(Billboard, MeshTag, Mesh3d, MeshMaterial3d<BillboardMaterial>)>()
-                            .insert((Mesh3d(mesh), MeshMaterial3d(material)));
+                        boid.remove::<(
+                            Billboard,
+                            MeshTag,
+                            Mesh3d,
+                            MeshMaterial3d<BillboardMaterial>,
+                        )>()
+                        .insert((Mesh3d(mesh), MeshMaterial3d(material)));
                     }
                 });
             }
@@ -531,10 +538,15 @@ mod tests {
         assert!(world.get::<MeshTag>(far).is_some());
         assert!(world.get::<Mesh3d>(far).is_some(), "quad mesh attached");
         assert!(
-            world.get::<MeshMaterial3d<BillboardMaterial>>(far).is_some(),
+            world
+                .get::<MeshMaterial3d<BillboardMaterial>>(far)
+                .is_some(),
             "atlas material attached"
         );
-        assert!(world.get::<Billboard>(near).is_none(), "near boid stays meshed");
+        assert!(
+            world.get::<Billboard>(near).is_none(),
+            "near boid stays meshed"
+        );
         assert!(world.get::<Mesh3d>(near).is_some());
     }
 
@@ -596,7 +608,8 @@ mod tests {
             .get::<MeshMaterial3d<StandardMaterial>>(far)
             .expect("mesh material restored");
         assert_eq!(
-            restored.0, catalog[variation_for(1)].material,
+            restored.0,
+            catalog[variation_for(1)].material,
             "the soldier returns to ITS OWN mesh"
         );
         let kept = world

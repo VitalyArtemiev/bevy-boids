@@ -112,10 +112,7 @@ pub fn apply_camera_mode(
                     .entity(entity)
                     .remove::<RtsCamera>()
                     .remove::<RtsCameraControls>()
-                    .insert(Freecam {
-                        saved,
-                        ..default()
-                    });
+                    .insert(Freecam { saved, ..default() });
             }
         }
     }
@@ -296,11 +293,7 @@ mod tests {
             .advance_by(Duration::from_secs_f32(1.0));
         app.update();
 
-        let translation = app
-            .world()
-            .get::<Transform>(camera)
-            .unwrap()
-            .translation;
+        let translation = app.world().get::<Transform>(camera).unwrap().translation;
         assert!(
             (translation.z + FREECAM_BASE_SPEED_MPS).abs() < 1e-3,
             "W did not fly down -Z: {translation:?}"

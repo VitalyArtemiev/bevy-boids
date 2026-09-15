@@ -342,8 +342,10 @@ mod tests {
 
         let (_, speed) = arrival_plan(pos, near, vel, tuning.max_velocity_mps, &tuning);
         let raw = (Vec3::new(speed, 0.0, 0.0) - vel) / tuning.steer_response_sec;
-        let crisp_a = raw.clamp_length_max(tuning.max_acceleration_mpss * arrival_authority(3.0, 0.0));
-        let soft_a = raw.clamp_length_max(tuning.max_acceleration_mpss * arrival_authority(3.0, 6.0));
+        let crisp_a =
+            raw.clamp_length_max(tuning.max_acceleration_mpss * arrival_authority(3.0, 0.0));
+        let soft_a =
+            raw.clamp_length_max(tuning.max_acceleration_mpss * arrival_authority(3.0, 6.0));
 
         assert!(soft_a.length() < crisp_a.length() * 0.4);
     }
@@ -401,9 +403,9 @@ mod tests {
             ));
             let dt = 1.0 / 60.0;
             for _ in 0..600 {
-                app.insert_resource(TimeUpdateStrategy::ManualDuration(
-                    Duration::from_secs_f32(dt),
-                ));
+                app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+                    dt,
+                )));
                 app.update();
             }
             let mut vel = app.world_mut().query::<&Velocity>();

@@ -11,10 +11,10 @@
 //! `frontage_position_system`, which skips releases that didn't drag).
 
 use crate::formations::{Formation, FormationKind, FormationOrder, Members};
-use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, started};
 use crate::player::{Selected, get_intersection};
 use crate::terrain::HeightField;
 use crate::ui::GameState;
+use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, started};
 use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
@@ -156,16 +156,18 @@ pub fn label_layout(
 
     let rot = egui::emath::Rot2::from_angle(angle);
     let half = galley.size() / 2.0;
-    let pos = egui::pos2(
-        center.x - (rot * half).x,
-        center.y - (rot * half).y,
-    );
+    let pos = egui::pos2(center.x - (rot * half).x, center.y - (rot * half).y);
     // egui and bevy have distinct Vec2 types; convert at the boundary.
     let corner = |sx: f32, sy: f32| {
         let v = rot * egui::vec2(half.x * sx, half.y * sy);
         center + Vec2::new(v.x, v.y)
     };
-    let quad = [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)];
+    let quad = [
+        corner(-1.0, -1.0),
+        corner(1.0, -1.0),
+        corner(1.0, 1.0),
+        corner(-1.0, 1.0),
+    ];
     LabelLayout {
         center,
         angle,
@@ -527,14 +529,7 @@ fn radial_ui(
                     painter.add(egui::Shape::line(rim, stroke));
 
                     let label = item_label(*item, &ring.path);
-                    let layout = label_layout(
-                        ctx,
-                        ring.center,
-                        start,
-                        end,
-                        label,
-                        LABEL_FONT_SIZE,
-                    );
+                    let layout = label_layout(ctx, ring.center, start, end, label, LABEL_FONT_SIZE);
                     painter.add(egui::Shape::Text(egui::epaint::TextShape {
                         pos: layout.pos,
                         galley: layout.galley,
@@ -853,22 +848,18 @@ mod tests {
                     for (i, item) in ring.items.iter().enumerate() {
                         let (start, end) = ring.angles[i];
                         let label = item_label(*item, &ring.path);
-                        for (font_size, check_radial) in [
-                            (LABEL_FONT_SIZE, true),
-                            (LABEL_FONT_SIZE * 1.5, false),
-                        ] {
+                        for (font_size, check_radial) in
+                            [(LABEL_FONT_SIZE, true), (LABEL_FONT_SIZE * 1.5, false)]
+                        {
                             let layout =
                                 label_layout(&ctx, ring.center, start, end, label, font_size);
                             for corner in layout.quad {
-                                let offset =
-                                    Vec2::new(corner.x, corner.y) - ring.center;
+                                let offset = Vec2::new(corner.x, corner.y) - ring.center;
                                 let d = offset.length();
                                 if check_radial {
                                     assert!(
-                                        (INNER_RADIUS_PX + RADIAL_PAD_PX)
-                                            < d
-                                            && d
-                                                < (OUTER_RADIUS_PX - RADIAL_PAD_PX),
+                                        (INNER_RADIUS_PX + RADIAL_PAD_PX) < d
+                                            && d < (OUTER_RADIUS_PX - RADIAL_PAD_PX),
                                         "{label:?} ({font_size}px) corner at radius {d} \
                                          clips the inner/outer edge (pad {RADIAL_PAD_PX})"
                                     );

@@ -79,8 +79,7 @@ pub const FIT_MARGIN: f32 = 1.1;
 pub const POSE_COUNT: u32 = 1;
 
 /// Total baked views: the nadir plus every ring slot.
-const VIEW_COUNT: usize =
-    1 + RING_CELL_COUNTS[0] + RING_CELL_COUNTS[1] + RING_CELL_COUNTS[2];
+const VIEW_COUNT: usize = 1 + RING_CELL_COUNTS[0] + RING_CELL_COUNTS[1] + RING_CELL_COUNTS[2];
 
 /// Atlas width in cells. Chosen so the albedo half packs exactly for the
 /// current [`RING_CELL_COUNTS`] (49 views = a clean 7×7 half per pose,
@@ -96,10 +95,8 @@ pub const HALF_ROWS: u32 = (VIEW_COUNT as u32 + ATLAS_WIDTH_CELLS - 1) / ATLAS_W
 pub const ATLAS_GRID: UVec2 = UVec2::new(ATLAS_WIDTH_CELLS, 2 * HALF_ROWS * POSE_COUNT);
 
 /// Atlas size in pixels.
-pub const ATLAS_SIZE_PX: UVec2 = UVec2::new(
-    ATLAS_GRID.x * CELL_SIZE_PX,
-    ATLAS_GRID.y * CELL_SIZE_PX,
-);
+pub const ATLAS_SIZE_PX: UVec2 =
+    UVec2::new(ATLAS_GRID.x * CELL_SIZE_PX, ATLAS_GRID.y * CELL_SIZE_PX);
 
 /// One baked view: where the pre-render camera sits.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,7 +157,9 @@ pub fn camera_transform(sample: &ViewSample, center: Vec3, distance: f32) -> Tra
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn view_index(polar: f32, azimuth: f32) -> usize {
     let rings = RING_CELL_COUNTS.len() as f32;
-    let ring = (polar / MAX_ANGLE_FROM_VERTICAL * rings).round().clamp(0.0, rings) as usize;
+    let ring = (polar / MAX_ANGLE_FROM_VERTICAL * rings)
+        .round()
+        .clamp(0.0, rings) as usize;
     if ring == 0 {
         // Nadir: an upright model's projection does not depend on azimuth.
         return 0;
@@ -184,10 +183,7 @@ pub fn albedo_cell(index: usize, pose: usize) -> UVec2 {
 /// shader fetch it with `nuv = 1.0 - uv` regardless of pose count.
 pub fn normal_cell(index: usize, pose: usize) -> UVec2 {
     let albedo = albedo_cell(index, pose);
-    UVec2::new(
-        ATLAS_GRID.x - 1 - albedo.x,
-        ATLAS_GRID.y - 1 - albedo.y,
-    )
+    UVec2::new(ATLAS_GRID.x - 1 - albedo.x, ATLAS_GRID.y - 1 - albedo.y)
 }
 
 /// Copies one `cell_size`-square RGBA8 cell into a row-major atlas buffer.
@@ -199,8 +195,7 @@ pub fn blit_cell(dst: &mut [u8], dst_width_px: u32, cell: UVec2, cell_size: u32,
     for y in 0..cell_size {
         let src_row = y * row_bytes;
         let dst_row = ((dst_y + y) * dst_width_px as usize + dst_x) * 4;
-        dst[dst_row..dst_row + row_bytes]
-            .copy_from_slice(&src[src_row..src_row + row_bytes]);
+        dst[dst_row..dst_row + row_bytes].copy_from_slice(&src[src_row..src_row + row_bytes]);
     }
 }
 
@@ -262,7 +257,11 @@ mod tests {
                 .count();
             assert_eq!(in_ring, *count, "ring {ring} occupancy");
         }
-        assert!(view_samples().iter().all(|s| s.polar <= MAX_ANGLE_FROM_VERTICAL));
+        assert!(
+            view_samples()
+                .iter()
+                .all(|s| s.polar <= MAX_ANGLE_FROM_VERTICAL)
+        );
     }
 
     #[test]
@@ -273,10 +272,13 @@ mod tests {
 
     #[test]
     fn polar_argument_sets_the_angle_from_nadir() {
-        for polar in [0.0, 0.05, MAX_ANGLE_FROM_VERTICAL / 2.0, MAX_ANGLE_FROM_VERTICAL] {
-            let angle = view_direction(polar, 1.7)
-                .angle_between(Vec3::NEG_Y)
-                .abs();
+        for polar in [
+            0.0,
+            0.05,
+            MAX_ANGLE_FROM_VERTICAL / 2.0,
+            MAX_ANGLE_FROM_VERTICAL,
+        ] {
+            let angle = view_direction(polar, 1.7).angle_between(Vec3::NEG_Y).abs();
             assert!((angle - polar).abs() < 1e-5, "polar {polar} gave {angle}");
         }
     }
@@ -355,8 +357,14 @@ mod tests {
                     normal,
                     UVec2::new(ATLAS_GRID.x - 1 - albedo.x, ATLAS_GRID.y - 1 - albedo.y)
                 );
-                assert!(seen.insert(albedo), "duplicate albedo cell for view {index}");
-                assert!(seen.insert(normal), "duplicate normal cell for view {index}");
+                assert!(
+                    seen.insert(albedo),
+                    "duplicate albedo cell for view {index}"
+                );
+                assert!(
+                    seen.insert(normal),
+                    "duplicate normal cell for view {index}"
+                );
             }
         }
         assert_eq!(

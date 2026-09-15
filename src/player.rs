@@ -3,10 +3,12 @@ use crate::formations::{
     Formation, FormationKind, FormationOrder, FormationSlot, FormationTuning, MemberOf, Members,
     QuickCommandGroup,
 };
-use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState, completed, fired, started};
 use crate::kinematics::{NNTree, Velocity};
 use crate::target::Target;
 use crate::terrain::HeightField;
+use crate::ui::input::{
+    ActionEvents, ActionId, ActionTag, TriggerState, completed, fired, started,
+};
 use crate::util::within_rect;
 use bevy::ecs::component::{Mutable, StorageType};
 use bevy::ecs::lifecycle::{ComponentHook, HookContext};
@@ -17,10 +19,9 @@ use bevy::gizmos::config::GizmoLineConfig;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::math::{Isometry3d, Quat, Ray3d, Vec3};
 use bevy::prelude::{
-    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Entity,
-    FromWorld, Gizmo, Gizmos, GlobalTransform, Handle, KeyCode, MessageReader,
-    MouseButton, Query, Res, ResMut, Resource, Transform, Vec2, Window, With, Without, World,
-    default, info, warn,
+    Assets, ButtonInput, Camera, ChildOf, Children, Color, Commands, Component, Entity, FromWorld,
+    Gizmo, Gizmos, GlobalTransform, Handle, KeyCode, MessageReader, MouseButton, Query, Res,
+    ResMut, Resource, Transform, Vec2, Window, With, Without, World, default, info, warn,
 };
 use bevy_rts_camera::{RtsCamera, RtsCameraControls};
 use std::f32::consts::FRAC_PI_2;

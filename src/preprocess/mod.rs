@@ -182,7 +182,9 @@ impl PreprocessState {
     /// Whether the current pose's every view has landed on the CPU.
     fn pose_complete(&self) -> bool {
         let views = self.samples.len();
-        self.captured_albedo[self.pose * views..][..views].iter().all(|c| c.is_some())
+        self.captured_albedo[self.pose * views..][..views]
+            .iter()
+            .all(|c| c.is_some())
             && self.captured_normals[self.pose * views..][..views]
                 .iter()
                 .all(|c| c.is_some())
@@ -457,8 +459,7 @@ fn dispatch_next_view(
     };
     let span = state.entry().radius * atlas::FIT_MARGIN;
     for mut transform in &mut cameras {
-        *transform =
-            atlas::camera_transform(&sample, state.entry().center, span * DISTANCE_SPANS);
+        *transform = atlas::camera_transform(&sample, state.entry().center, span * DISTANCE_SPANS);
     }
 
     let slot = state.stage_slot(state.next);
@@ -513,11 +514,11 @@ fn spawn_capture(
     store: impl Fn(&mut PreprocessState, &Image) + Send + Sync + 'static,
 ) {
     let target = target.clone();
-    commands
-        .spawn(Screenshot::image(target))
-        .observe(move |event: On<ScreenshotCaptured>, mut state: ResMut<PreprocessState>| {
+    commands.spawn(Screenshot::image(target)).observe(
+        move |event: On<ScreenshotCaptured>, mut state: ResMut<PreprocessState>| {
             store(&mut state, &event.image);
-        });
+        },
+    );
 }
 
 /// Diagnostics helper: count of pixels with nonzero alpha.
@@ -542,7 +543,11 @@ fn advance_stage(
         (With<PreprocessModel>, Without<AlbedoModel>),
     >,
     mut albedo_models: Query<
-        (&mut Transform, &mut Mesh3d, &mut MeshMaterial3d<StandardMaterial>),
+        (
+            &mut Transform,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
         With<AlbedoModel>,
     >,
     mut app_exit: MessageWriter<AppExit>,
@@ -570,8 +575,11 @@ fn advance_stage(
     // Last pose of the variation: compose and save.
     let name = state.entry().name;
     let path = Path::new(OUTPUT_DIR).join(format!("{name}.png"));
-    let baked =
-        compose_atlas(&state.samples, &state.captured_albedo, &state.captured_normals);
+    let baked = compose_atlas(
+        &state.samples,
+        &state.captured_albedo,
+        &state.captured_normals,
+    );
     for (kind, captured) in [
         ("albedo", &state.captured_albedo),
         ("normals", &state.captured_normals),

@@ -433,9 +433,7 @@ pub fn pbd_contact(
                             if count >= k {
                                 break;
                             }
-                            let Some(&j) =
-                                other_entity.and_then(|e| index_of.get(&e))
-                            else {
+                            let Some(&j) = other_entity.and_then(|e| index_of.get(&e)) else {
                                 continue;
                             };
                             if j == i {
@@ -443,13 +441,8 @@ pub fn pbd_contact(
                             }
                             let pos_j = starts[j];
                             let contact_range = radii[i] + radii[j] + margin;
-                            let policy = pair_policy(
-                                &sides[i],
-                                charges[i],
-                                &sides[j],
-                                charges[j],
-                                tuning,
-                            );
+                            let policy =
+                                pair_policy(&sides[i], charges[i], &sides[j], charges[j], tuning);
                             let antic = if policy.anticipate {
                                 anticipation_correction(
                                     pos_i,
@@ -531,8 +524,7 @@ pub fn pbd_contact(
                                 let min_dist = radii[i] + radii[j];
                                 if dist < min_dist && dist > 1e-6 {
                                     let share = inv_i / (inv_i + inv_j);
-                                    let step_rel =
-                                        (read[i] - starts[i]) - (read[j] - starts[j]);
+                                    let step_rel = (read[i] - starts[i]) - (read[j] - starts[j]);
                                     corr += friction_correction(
                                         step_rel,
                                         d / dist,
@@ -568,9 +560,15 @@ pub fn pbd_contact(
                 };
                 let p = s.pos_a[i];
                 let closest = Vec3::new(
-                    p.x.clamp(center.x - OBSTACLE_HALF_EXTENT, center.x + OBSTACLE_HALF_EXTENT),
+                    p.x.clamp(
+                        center.x - OBSTACLE_HALF_EXTENT,
+                        center.x + OBSTACLE_HALF_EXTENT,
+                    ),
                     p.y,
-                    p.z.clamp(center.z - OBSTACLE_HALF_EXTENT, center.z + OBSTACLE_HALF_EXTENT),
+                    p.z.clamp(
+                        center.z - OBSTACLE_HALF_EXTENT,
+                        center.z + OBSTACLE_HALF_EXTENT,
+                    ),
                 );
                 let d = p - closest;
                 let dist = d.xz().length();
@@ -589,25 +587,27 @@ pub fn pbd_contact(
 
     // -- Write-back: positions + Δv = Δx/Δt -------------------------------
     let max_v = kin.max_velocity_mps;
-    q_boids.par_iter_mut().for_each(|(entity, mut transform, mut vel, _, _, _)| {
-        let Some(&i) = s.entity_to_idx.get(&entity) else {
-            return;
-        };
-        let delta = s.pos_a[i] - s.pos_start[i];
-        if delta == Vec3::ZERO {
-            return;
-        }
-        transform.translation += delta;
-        vel.v = (vel.v + delta / dt).clamp_length_max(max_v);
-    });
+    q_boids
+        .par_iter_mut()
+        .for_each(|(entity, mut transform, mut vel, _, _, _)| {
+            let Some(&i) = s.entity_to_idx.get(&entity) else {
+                return;
+            };
+            let delta = s.pos_a[i] - s.pos_start[i];
+            if delta == Vec3::ZERO {
+                return;
+            }
+            transform.translation += delta;
+            vel.v = (vel.v + delta / dt).clamp_length_max(max_v);
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::boid::{BoidBundle, BoidVariations};
-    use crate::target::{Target, follow_target};
     use crate::kinematics::move_step;
+    use crate::target::{Target, follow_target};
     use bevy::app::TaskPoolPlugin;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
     use bevy_spatial::{AutomaticUpdate, TransformMode};
@@ -616,25 +616,11 @@ mod tests {
     #[test]
     fn contact_correction_splits_by_inverse_mass() {
         // Equal masses: each side takes half the overlap.
-        let c = contact_correction(
-            Vec3::new(0.8, 0.0, 0.0),
-            Vec3::ZERO,
-            0.5,
-            0.5,
-            1.0,
-            1.0,
-        );
+        let c = contact_correction(Vec3::new(0.8, 0.0, 0.0), Vec3::ZERO, 0.5, 0.5, 1.0, 1.0);
         assert!((c.x - 0.1).abs() < 1e-5, "{c:?}");
 
         // A 10x heavier `i` barely moves: share 0.1/1.1.
-        let c = contact_correction(
-            Vec3::new(0.8, 0.0, 0.0),
-            Vec3::ZERO,
-            0.5,
-            0.5,
-            0.1,
-            1.0,
-        );
+        let c = contact_correction(Vec3::new(0.8, 0.0, 0.0), Vec3::ZERO, 0.5, 0.5, 0.1, 1.0);
         assert!((c.x - 0.2 * (0.1 / 1.1)).abs() < 1e-5, "{c:?}");
 
         // No overlap, no correction; identical centres are ambiguous and
@@ -687,43 +673,51 @@ mod tests {
         assert!((tau.unwrap() - 2.25).abs() < 1e-4);
 
         // Beyond the horizon: no constraint.
-        assert!(time_to_collision(
-            Vec3::new(-5.0, 0.0, 0.0),
-            Vec3::new(2.0, 0.0, 0.0),
-            Vec3::new(5.0, 0.0, 0.0),
-            Vec3::new(-2.0, 0.0, 0.0),
-            1.0,
-            1.0
-        )
-        .is_none());
+        assert!(
+            time_to_collision(
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(5.0, 0.0, 0.0),
+                Vec3::new(-2.0, 0.0, 0.0),
+                1.0,
+                1.0
+            )
+            .is_none()
+        );
         // Separating, parallel, and non-colliding courses never trigger.
-        assert!(time_to_collision(
-            Vec3::ZERO,
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(5.0, 0.0, 0.0),
-            Vec3::new(2.0, 0.0, 0.0),
-            1.0,
-            5.0
-        )
-        .is_none());
-        assert!(time_to_collision(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::new(10.0, 0.0, 0.0),
-            Vec3::X,
-            1.0,
-            5.0
-        )
-        .is_none());
-        assert!(time_to_collision(
-            Vec3::ZERO,
-            Vec3::Y,
-            Vec3::new(10.0, 0.0, 0.0),
-            -Vec3::Y,
-            1.0,
-            5.0
-        )
-        .is_none());
+        assert!(
+            time_to_collision(
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(5.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                1.0,
+                5.0
+            )
+            .is_none()
+        );
+        assert!(
+            time_to_collision(
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::X,
+                1.0,
+                5.0
+            )
+            .is_none()
+        );
+        assert!(
+            time_to_collision(
+                Vec3::ZERO,
+                Vec3::Y,
+                Vec3::new(10.0, 0.0, 0.0),
+                -Vec3::Y,
+                1.0,
+                5.0
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -811,9 +805,9 @@ mod tests {
     }
 
     fn tick(app: &mut App, dt: f32) {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f32(dt),
-        ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            dt,
+        )));
         app.update();
     }
 
@@ -905,7 +899,9 @@ mod tests {
             "friends must not interpenetrate, min {min_dist}"
         );
         // Both travellers completed the pass.
-        assert!(positions[0].1.x > 20.0, "{:?}",
+        assert!(
+            positions[0].1.x > 20.0,
+            "{:?}",
             positions.iter().map(|p| p.1).collect::<Vec<_>>()
         );
         assert!(positions[1].1.x < -20.0);
@@ -950,10 +946,7 @@ mod tests {
         assert!(touched, "enemies must run into contact");
         // Still engaged at the end: the contact constraint holds them at
         // disk distance, grinding, not passing.
-        assert!(
-            final_gap < 2.5,
-            "clash must hold contact, gap {final_gap}"
-        );
+        assert!(final_gap < 2.5, "clash must hold contact, gap {final_gap}");
     }
 
     /// Mass decides the clash (the paper's bears vs rabbits): a 10x heavier
@@ -1007,7 +1000,15 @@ mod tests {
                     let base = dir * 18.0;
                     let side = Vec3::new(-dir.z, 0.0, dir.x);
                     let pos = base + side * (col as f32 - 1.0) * 2.0 + dir * row as f32 * 2.0;
-                    spawn_boid(&mut app, id, pos + Vec3::Y * 0.5, Vec3::ZERO, Vec3::Y * 0.5, faction, Body::default());
+                    spawn_boid(
+                        &mut app,
+                        id,
+                        pos + Vec3::Y * 0.5,
+                        Vec3::ZERO,
+                        Vec3::Y * 0.5,
+                        faction,
+                        Body::default(),
+                    );
                     id += 1;
                 }
             }
@@ -1066,9 +1067,9 @@ mod tests {
         app.update(); // tree refresh picks the boids up
 
         let start = Instant::now();
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f32(1.0 / 60.0),
-        ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            1.0 / 60.0,
+        )));
         app.update();
         let elapsed = start.elapsed();
         println!("pbd_contact at 10k boids: {elapsed:?}");
