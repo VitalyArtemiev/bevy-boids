@@ -1,5 +1,5 @@
 //! Free-fly camera: the debug alternative to the RTS camera, toggled from
-//! the F3 panel.
+//! the F1 debug panel's Camera section.
 //!
 //! [`CameraMode`] is the selection resource; [`apply_camera_mode`] performs
 //! the swap whenever it changes. Freecam activation is *component
@@ -22,8 +22,8 @@ use bevy::prelude::*;
 use bevy_rts_camera::{RtsCamera, RtsCameraControls};
 
 /// Which controller drives the camera: the `bevy_rts_camera` setup spawned
-/// in `main::setup` (default), or the freecam. Toggled from the F3 panel;
-/// [`apply_camera_mode`] performs the component swap.
+/// in `main::setup` (default), or the freecam. Toggled from the F1 debug
+/// panel's Camera section; [`apply_camera_mode`] performs the component swap.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CameraMode {
     #[default]
@@ -39,8 +39,9 @@ pub struct Freecam {
     /// The RTS camera and controls as they were when freecam took over;
     /// `apply_camera_mode` restores them when switching back.
     saved: Option<(RtsCamera, RtsCameraControls)>,
-    /// Base fly speed in m/s; the scroll wheel retunes it.
-    speed_mps: f32,
+    /// Base fly speed in m/s; the scroll wheel retunes it live, and the F1
+    /// debug panel's Camera section exposes it as a slider.
+    pub speed_mps: f32,
 }
 
 impl Default for Freecam {
@@ -55,9 +56,10 @@ impl Default for Freecam {
 /// Base fly speed, m/s — quick enough to cross the boid field, with the
 /// wheel growing it to continental scales.
 const FREECAM_BASE_SPEED_MPS: f32 = 50.0;
-/// Wheel speed clamp: walking pace to a hypersonic continental sweep.
-const FREECAM_MIN_SPEED_MPS: f32 = 1.0;
-const FREECAM_MAX_SPEED_MPS: f32 = 200_000.0;
+/// Wheel speed clamp: walking pace to a hypersonic continental sweep. Also
+/// the F1 fly-speed slider's range.
+pub const FREECAM_MIN_SPEED_MPS: f32 = 1.0;
+pub const FREECAM_MAX_SPEED_MPS: f32 = 200_000.0;
 /// Speed multiplier per wheel line notch.
 const FREECAM_WHEEL_SPEED_STEP: f32 = 1.5;
 /// Shift multiplies the base speed.

@@ -10,6 +10,7 @@ use crate::billboard::BillboardTuning;
 use crate::boid::BoidTuning;
 use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
+use crate::freecam::{CameraMode, Freecam, FREECAM_MAX_SPEED_MPS, FREECAM_MIN_SPEED_MPS};
 use crate::kinematics::KinematicsTuning;
 use crate::pbd::PbdTuning;
 use crate::sky::SkyTuning;
@@ -89,7 +90,9 @@ fn debug_panel(
     mut crowd: ResMut<CrowdTuning>,
     mut billboard: ResMut<BillboardTuning>,
     mut lod: ResMut<LODGuard>,
+    mut camera_mode: ResMut<CameraMode>,
     mut q_controls: Query<&mut RtsCameraControls>,
+    mut q_freecam: Query<&mut Freecam>,
     time: Res<Time>,
     mut fps: Local<f32>,
 ) -> Result {
@@ -485,10 +488,47 @@ fn debug_panel(
             // `setup`) — its constant-units step stacks on top of
             // `height_scaled_zoom`; the Options "zoom speed" knob scales
             // our step instead.
+            let mut mode_changed = false;
+            let mut freecam_changed = false;
             let mut controls_changed = false;
             egui::CollapsingHeader::new("Camera")
                 .default_open(false)
                 .show(ui, |ui| {
+                    let camera_mode = camera_mode.bypass_change_detection();
+                    let mut free = *camera_mode == CameraMode::Free;
+                    if ui
+                        .checkbox(
+                            &mut free,
+                            "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
+                        )
+                        .on_hover_text("Swap the RTS rig for a free-fly camera; focus and zoom survive the round trip.")
+                        .changed()
+                    {
+                        *camera_mode = if free {
+                            CameraMode::Free
+                        } else {
+                            CameraMode::Rts
+                        };
+                        mode_changed = true;
+                    }
+                    // The fly-speed slider only exists while freecam is
+                    // active (the component is the state; the wheel retunes
+                    // the same field). Logarithmic: the clamp range spans
+                    // walking pace to continental sweeps.
+                    if let Ok(mut freecam) = q_freecam.single_mut() {
+                        let freecam: &mut Freecam = freecam.bypass_change_detection();
+                        freecam_changed |= ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut freecam.speed_mps,
+                                    FREECAM_MIN_SPEED_MPS..=FREECAM_MAX_SPEED_MPS,
+                                )
+                                .text("fly speed (m/s)")
+                                .logarithmic(true),
+                            )
+                            .on_hover_text("Base freecam speed; Shift sprints ×5.")
+                            .changed();
+                    }
                     if let Ok(mut controls) = q_controls.single_mut() {
                         let controls: &mut RtsCameraControls = controls.bypass_change_detection();
                         controls_changed |= slider(
@@ -501,6 +541,14 @@ fn debug_panel(
                         .changed();
                     }
                 });
+            if mode_changed {
+                camera_mode.set_changed();
+            }
+            if freecam_changed {
+                if let Ok(mut freecam) = q_freecam.single_mut() {
+                    freecam.set_changed();
+                }
+            }
             if controls_changed {
                 if let Ok(mut controls) = q_controls.single_mut() {
                     controls.set_changed();

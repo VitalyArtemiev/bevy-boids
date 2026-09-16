@@ -21,7 +21,6 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 
 use bevy_rts_camera::RtsCameraControls;
 
-use crate::freecam::CameraMode;
 use crate::scene::{ActiveScene, LoadWorld};
 use crate::sky::SkyTuning;
 use crate::terrain::{DemoTerrain, ViewMode};
@@ -329,9 +328,9 @@ fn root_ui(ctx: &egui::Context) -> egui::Ui {
 }
 
 /// The F3 panel: the erosion-demo controls (the `bevy_erosion_filter`
-/// example's panel — filter params, terrain scales, view modes) plus the
-/// freecam toggle. Edits mark the terrain dirty; the mesh rebuilds when
-/// the drag releases (see `terrain::demo::rebuild_terrain`).
+/// example's panel — filter params, terrain scales, view modes). Edits mark
+/// the terrain dirty; the mesh rebuilds when the drag releases (see
+/// `terrain::demo::rebuild_terrain`).
 fn debug_panel_ui(
     mut contexts: EguiContexts,
     actions: Query<(
@@ -340,7 +339,6 @@ fn debug_panel_ui(
         &crate::ui::input::ActionEvents,
     )>,
     mut shown: Local<bool>,
-    mut camera_mode: ResMut<CameraMode>,
     mut demo: ResMut<DemoTerrain>,
 ) -> Result {
     if crate::ui::input::started(&actions, crate::ui::input::ActionId::ToggleTerrain) {
@@ -350,13 +348,11 @@ fn debug_panel_ui(
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
-    let mut mode_changed = false;
     let mut dirty = false;
     egui::Window::new("Erosion terrain")
         .open(&mut *shown)
         .show(ctx, |ui| {
             // Bypass the change flags and re-arm only for real edits.
-            let camera_mode = camera_mode.bypass_change_detection();
             let demo = demo.bypass_change_detection();
 
             ui.horizontal(|ui| {
@@ -389,24 +385,6 @@ fn debug_panel_ui(
                         .changed();
                 }
             });
-            ui.add_space(6.0);
-
-            let mut free = *camera_mode == CameraMode::Free;
-            if ui
-                .checkbox(
-                    &mut free,
-                    "Freecam (WASD fly, Q/E down/up, RMB-drag look, wheel = speed)",
-                )
-                .on_hover_text("Swap the RTS rig for a free-fly camera; focus and zoom survive the round trip.")
-                .changed()
-            {
-                *camera_mode = if free {
-                    CameraMode::Free
-                } else {
-                    CameraMode::Rts
-                };
-                mode_changed = true;
-            }
             ui.add_space(6.0);
 
             dirty |= section(ui, "Filter", |ui| {
@@ -562,9 +540,6 @@ fn debug_panel_ui(
     if dirty {
         demo.set_changed();
         demo.bypass_change_detection().dirty = true;
-    }
-    if mode_changed {
-        camera_mode.set_changed();
     }
     Ok(())
 }

@@ -204,9 +204,9 @@ fn main() {
             swap_boid_lod.after(RtsCameraSystemSet),
             update_billboard_yaw,
             force_render,
-            // Freecam (F3 toggle) takes the camera over by component
-            // swap when the mode resource changes; the move system is
-            // inert without a Freecam camera.
+            // Freecam (F1 debug panel toggle) takes the camera over by
+            // component swap when the mode resource changes; the move
+            // system is inert without a Freecam camera.
             apply_camera_mode.run_if(resource_changed::<CameraMode>),
             freecam_move.run_if(
                 not(egui_wants_any_pointer_input).and_then(not(egui_wants_any_keyboard_input)),
