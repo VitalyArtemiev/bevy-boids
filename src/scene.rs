@@ -209,6 +209,29 @@ pub fn normal_world(active: Res<ActiveScene>) -> bool {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadWorld(pub Option<TestScene>);
 
+/// The historical 4×3 marching block — the default [`SceneUnits`] and the
+/// anchor every formation scene's stage geometry is expressed against.
+const DEFAULT_UNITS_PER_FORMATION: usize = 12;
+
+/// Units per marching block in the formation scenes (cross, braid, clash),
+/// set from the F4 scene picker's slider. The default lands on the
+/// historical 4×3 blocks and stages; bigger counts spawn near-square
+/// blocks and scale each stage by [`stage_scale`] so the scene's relative
+/// layout (gaps and course lengths against the block's size) holds at any
+/// count.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneUnits {
+    pub per_formation: usize,
+}
+
+impl Default for SceneUnits {
+    fn default() -> Self {
+        SceneUnits {
+            per_formation: DEFAULT_UNITS_PER_FORMATION,
+        }
+    }
+}
+
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
@@ -226,6 +249,7 @@ impl Plugin for ScenePlugin {
             .init_resource::<HeightField>()
             .init_resource::<DebugConfig>()
             .init_resource::<GlobalAmbientLight>()
+            .init_resource::<SceneUnits>()
             .add_systems(
                 Update,
                 (
@@ -337,6 +361,7 @@ fn assemble_scene(world: &mut World, scene: TestScene) {
     // (`id = faction + 3·seq`), so a reload is bit-identical to the first
     // load.
     let mut ids = BoidIds::default();
+    let units = world.resource::<SceneUnits>().per_formation;
 
     crate::strip_camera_dressing(world);
 
@@ -356,9 +381,15 @@ fn assemble_scene(world: &mut World, scene: TestScene) {
         TestScene::Clash => spawn_clash_scene(world, &variations, &mut ids),
         TestScene::Shove => spawn_shove_scene(world, &variations, &mut ids),
         TestScene::Melee => spawn_melee_scene(world, &variations, &mut ids),
-        TestScene::FormationCross => spawn_formation_cross_scene(world, &variations, &mut ids),
-        TestScene::FormationBraid => spawn_formation_braid_scene(world, &variations, &mut ids),
-        TestScene::FormationClash => spawn_formation_clash_scene(world, &variations, &mut ids),
+        TestScene::FormationCross => {
+            spawn_formation_cross_scene(world, &variations, &mut ids, units)
+        }
+        TestScene::FormationBraid => {
+            spawn_formation_braid_scene(world, &variations, &mut ids, units)
+        }
+        TestScene::FormationClash => {
+            spawn_formation_clash_scene(world, &variations, &mut ids, units)
+        }
     }
     world.insert_resource(ids);
 }
@@ -526,10 +557,14 @@ fn spawn_scene_boid(
         .id()
 }
 
-/// Spawns a rectangular marching block under one formation with a `Move`
-/// order. `colour` decouples looks from allegiance (friendly blocks in a
-/// crossing still want distinguishing colours). Members spawn in their
-/// facing-frame grid around `origin`; `assign_slots` refines the mapping.
+/// Spawns a marching block of `count` units under one formation with a
+/// `Move` order. The block is near-square — the default 12 lands on
+/// exactly the historical 4×3 (4 columns, 3 rows) — and spawns exactly
+/// `count` units; a tail count that doesn't tile the grid closes up ragged
+/// at the rear rank. `colour` decouples looks from allegiance (friendly
+/// blocks in a crossing still want distinguishing colours). Members spawn
+/// in their facing-frame grid around `origin`; `assign_slots` refines the
+/// mapping.
 fn spawn_marching_block(
     world: &mut World,
     ids: &mut BoidIds,
@@ -538,9 +573,13 @@ fn spawn_marching_block(
     colour: u8,
     origin: Vec3,
     move_to: Vec3,
-    columns: usize,
-    rows: usize,
+    count: usize,
 ) {
+    if count == 0 {
+        return;
+    }
+    let columns = ((count as f32).sqrt().ceil() as usize).max(1);
+    let rows = count.div_ceil(columns);
     let facing = (move_to - origin).normalize_or_zero();
     let formation = world
         .spawn((
@@ -558,8 +597,13 @@ fn spawn_marching_block(
         ))
         .id();
     let side = Vec3::new(-facing.z, 0.0, facing.x);
-    for row in 0..rows {
+    let mut spawned = 0;
+    'block: for row in 0..rows {
         for col in 0..columns {
+            if spawned >= count {
+                break 'block;
+            }
+            spawned += 1;
             let offset = side * (col as f32 - (columns - 1) as f32 / 2.0) * FormationKind::SPACING
                 - facing * row as f32 * FormationKind::SPACING;
             let id = colour as u32 + 3 * ids.next();
@@ -571,6 +615,20 @@ fn spawn_marching_block(
                 .insert(Body::default());
         }
     }
+}
+
+/// Stage-side scale for a formation scene loaded with `count` units per
+/// block: the block's side grows as √count, so course lengths and camera
+/// heights grow the same way — every count keeps the scene's relative
+/// layout, and the default count is exactly the historical stage (1.0).
+fn stage_scale(count: usize) -> f32 {
+    (count as f32 / DEFAULT_UNITS_PER_FORMATION as f32).sqrt()
+}
+
+/// Scales a formation scene's stage point on x/z (y is the 0.5 ground
+/// offset, not a stage distance).
+fn stage_point(p: Vec3, k: f32) -> Vec3 {
+    Vec3::new(p.x * k, p.y, p.z * k)
 }
 
 /// Points the app camera at the stage as a fresh RTS camera, pinned
@@ -672,20 +730,25 @@ fn spawn_melee_scene(world: &mut World, variations: &BoidVariations, ids: &mut B
     scene_camera(world, Vec3::ZERO, 60.0);
 }
 
-fn spawn_formation_cross_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
+fn spawn_formation_cross_scene(
+    world: &mut World,
+    variations: &BoidVariations,
+    ids: &mut BoidIds,
+    count: usize,
+) {
     // One army, two blocks with distinguishing colours, courses crossing
     // at the centre — friendly throughout, so members of different blocks
     // anticipate while slot-keeping holds each block together.
+    let k = stage_scale(count);
     spawn_marching_block(
         world,
         ids,
         variations,
         0,
         0,
-        Vec3::new(-45.0, 0.5, 0.0),
-        Vec3::new(45.0, 0.5, 0.0),
-        4,
-        3,
+        stage_point(Vec3::new(-45.0, 0.5, 0.0), k),
+        stage_point(Vec3::new(45.0, 0.5, 0.0), k),
+        count,
     );
     spawn_marching_block(
         world,
@@ -693,29 +756,35 @@ fn spawn_formation_cross_scene(world: &mut World, variations: &BoidVariations, i
         variations,
         0,
         1,
-        Vec3::new(0.0, 0.5, 45.0),
-        Vec3::new(0.0, 0.5, -45.0),
-        4,
-        3,
+        stage_point(Vec3::new(0.0, 0.5, 45.0), k),
+        stage_point(Vec3::new(0.0, 0.5, -45.0), k),
+        count,
     );
-    scene_camera(world, Vec3::ZERO, 75.0);
+    scene_camera(world, Vec3::ZERO, 75.0 * k);
 }
 
-fn spawn_formation_braid_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
-    // One army, head-on, starting CLOSE (20 m between origins): the blocks
-    // meet within a couple of seconds, before they have spooled up — the
-    // low-speed braid regime (short anticipation lookahead in metres,
-    // contact and slot-keeping relatively stronger).
+fn spawn_formation_braid_scene(
+    world: &mut World,
+    variations: &BoidVariations,
+    ids: &mut BoidIds,
+    count: usize,
+) {
+    // One army, head-on, starting CLOSE (20 m between origins at the
+    // default count): the blocks meet within a couple of seconds, before
+    // they have spooled up — the low-speed braid regime (short
+    // anticipation lookahead in metres, contact and slot-keeping
+    // relatively stronger). The gap scales with the blocks so bigger
+    // counts keep that regime instead of spawning pre-interpenetrated.
+    let k = stage_scale(count);
     spawn_marching_block(
         world,
         ids,
         variations,
         0,
         0,
-        Vec3::new(-10.0, 0.5, 0.0),
-        Vec3::new(10.0, 0.5, 0.0),
-        4,
-        3,
+        stage_point(Vec3::new(-10.0, 0.5, 0.0), k),
+        stage_point(Vec3::new(10.0, 0.5, 0.0), k),
+        count,
     );
     spawn_marching_block(
         world,
@@ -723,28 +792,32 @@ fn spawn_formation_braid_scene(world: &mut World, variations: &BoidVariations, i
         variations,
         0,
         1,
-        Vec3::new(10.0, 0.5, 0.0),
-        Vec3::new(-10.0, 0.5, 0.0),
-        4,
-        3,
+        stage_point(Vec3::new(10.0, 0.5, 0.0), k),
+        stage_point(Vec3::new(-10.0, 0.5, 0.0), k),
+        count,
     );
-    scene_camera(world, Vec3::ZERO, 40.0);
+    scene_camera(world, Vec3::ZERO, 40.0 * k);
 }
 
-fn spawn_formation_clash_scene(world: &mut World, variations: &BoidVariations, ids: &mut BoidIds) {
+fn spawn_formation_clash_scene(
+    world: &mut World,
+    variations: &BoidVariations,
+    ids: &mut BoidIds,
+    count: usize,
+) {
     // Hostile blocks on the same lane, marching straight through each
     // other: no anticipation between armies, contact only — the melee at
     // formation scale.
+    let k = stage_scale(count);
     spawn_marching_block(
         world,
         ids,
         variations,
         0,
         0,
-        Vec3::new(-40.0, 0.5, 0.0),
-        Vec3::new(40.0, 0.5, 0.0),
-        4,
-        3,
+        stage_point(Vec3::new(-40.0, 0.5, 0.0), k),
+        stage_point(Vec3::new(40.0, 0.5, 0.0), k),
+        count,
     );
     spawn_marching_block(
         world,
@@ -752,12 +825,11 @@ fn spawn_formation_clash_scene(world: &mut World, variations: &BoidVariations, i
         variations,
         2,
         2,
-        Vec3::new(40.0, 0.5, 0.0),
-        Vec3::new(-40.0, 0.5, 0.0),
-        4,
-        3,
+        stage_point(Vec3::new(40.0, 0.5, 0.0), k),
+        stage_point(Vec3::new(-40.0, 0.5, 0.0), k),
+        count,
     );
-    scene_camera(world, Vec3::ZERO, 75.0);
+    scene_camera(world, Vec3::ZERO, 75.0 * k);
 }
 
 /// The flat-plane stand-in ground for `--flat` render-path benches and
@@ -985,6 +1057,45 @@ mod tests {
         assert_eq!(count::<Obstacle>(world), 99);
         assert_eq!(count::<FlatGround>(world), 0, "scene ground survived");
         assert!(world.resource::<DebugConfig>().impostor_lod);
+    }
+
+    /// The formation scenes take their per-block unit count from
+    /// [`SceneUnits`]: the default keeps the historical 4×3 blocks (24
+    /// units across two), bigger counts spawn exactly that many units per
+    /// block (near-square, ragged tail ranks close up short), and the
+    /// stage scales with the block so bigger counts don't spawn
+    /// pre-interpenetrated.
+    #[test]
+    fn formation_scenes_take_their_unit_count_from_scene_units() {
+        let mut app = world_app(LaunchConfig::default());
+
+        assemble_world(app.world_mut(), Some(TestScene::FormationClash));
+        assert_eq!(
+            count::<Boid>(app.world_mut()),
+            24,
+            "the default must keep the historical two 4×3 blocks"
+        );
+
+        // 100 per block: two 10×10 blocks on a stage scaled by √(100/12).
+        app.world_mut()
+            .insert_resource(SceneUnits { per_formation: 100 });
+        assemble_world(app.world_mut(), Some(TestScene::FormationClash));
+        let world = app.world_mut();
+        assert_eq!(count::<Boid>(world), 200);
+        assert_eq!(count::<Formation>(world), 2);
+        let k = (100.0_f32 / 12.0).sqrt();
+        let mut formations = world.query_filtered::<&Transform, With<Formation>>();
+        let mut xs: Vec<f32> = formations.iter(world).map(|t| t.translation.x).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        assert!((xs[0] + 40.0 * k).abs() < 1e-4, "left origin not stage-scaled");
+        assert!((xs[1] - 40.0 * k).abs() < 1e-4, "right origin not stage-scaled");
+
+        // A count that doesn't tile the near-square grid still spawns
+        // exactly (13 = a 4-wide grid with a ragged tail rank).
+        app.world_mut()
+            .insert_resource(SceneUnits { per_formation: 13 });
+        assemble_world(app.world_mut(), Some(TestScene::FormationCross));
+        assert_eq!(count::<Boid>(app.world_mut()), 26);
     }
 
     /// A live selection must survive a world switch: `Selected`'s

@@ -2,14 +2,15 @@
 //! "Scenes" button on the main menu. Lists every [`TestScene`] plus a
 //! reset of the currently loaded world; each pick sends a
 //! [`LoadWorld`] request, and `scene::assemble_world` tears the old world
-//! down before the new one spawns.
+//! down before the new one spawns. A units-per-formation slider (see
+//! [`SceneUnits`]) sizes the formation scenes' marching blocks.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 
-use crate::scene::{ActiveScene, LoadWorld, TestScene};
+use crate::scene::{ActiveScene, LoadWorld, SceneUnits, TestScene};
 use crate::ui::GameState;
 use crate::ui::input::{ActionEvents, ActionId, ActionTag, TriggerState};
 
@@ -62,6 +63,7 @@ fn scenes_menu_ui(
     active: Res<ActiveScene>,
     state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
+    mut units: ResMut<SceneUnits>,
     mut commands: Commands,
 ) -> Result {
     if !open.0 {
@@ -69,6 +71,7 @@ fn scenes_menu_ui(
     }
     let ctx = contexts.ctx_mut()?;
     let mut clicked = false;
+    let mut units_changed = false;
     egui::Window::new("Scenes")
         .open(&mut open.0)
         .min_width(220.0)
@@ -90,6 +93,19 @@ fn scenes_menu_ui(
                 }
             }
             ui.separator();
+            // Sizes the marching blocks in the formation scenes; read once
+            // at the next scene load. Bypass-then-re-arm like every panel:
+            // the raw `&mut` through `ResMut` would flag the resource
+            // changed every frame the window is open.
+            let units: &mut SceneUnits = units.bypass_change_detection();
+            units_changed |= ui
+                .add(
+                    egui::Slider::new(&mut units.per_formation, 1..=10_000)
+                        .text("units per formation"),
+                )
+                .on_hover_text("Units per marching block in the formation scenes (cross, braid, clash; default 12 = the historical 4×3). The stage scales with the block. Applies when a scene loads.")
+                .changed();
+            ui.separator();
             if ui
                 .button("Reset current scene")
                 .on_hover_text("Reload the current world from scratch — the sandbox included.")
@@ -99,6 +115,9 @@ fn scenes_menu_ui(
                 commands.insert_resource(LoadWorld(active.0));
             }
         });
+    if units_changed {
+        units.set_changed();
+    }
     if clicked {
         // Surrender whichever widget took focus with the click (there is
         // at most one — the clicked button).
