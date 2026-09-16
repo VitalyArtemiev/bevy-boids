@@ -84,6 +84,27 @@ pub const IDLE_POSE: u32 = 0;
 #[derive(Component)]
 pub struct Billboard;
 
+/// Marker: this billboard was placed by the distance auto-swap, not by a
+/// manual placement (see [`BillboardOwner`]). [`swap_boid_lod`] restores
+/// only what it placed — the distance band and the F1 kill-switch touch
+/// swap-managed billboards alone, so manual placements survive the swap
+/// being stood down.
+#[derive(Component)]
+pub(crate) struct SwapManaged;
+
+/// Who a billboard belongs to. The distance swap owns its placements end
+/// to end (restoring them when the camera returns or the F1 kill-switch
+/// turns it off); manual placements belong to their callers and the swap
+/// never touches them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BillboardOwner {
+    /// Placed by the distance swap — carries [`SwapManaged`].
+    Swap,
+    /// Placed by the `--force-billboards` bench override or the
+    /// `--scene billboard` twin — owner-managed.
+    Manual,
+}
+
 /// Runtime-tunable swap distances; exposed as sliders by the debug UI.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub struct BillboardTuning {
@@ -278,7 +299,12 @@ impl Plugin for BillboardPlugin {
             .init_resource::<BoidVariations>()
             .add_plugins(MaterialPlugin::<BillboardMaterial>::default())
             .init_resource::<BillboardAssets>()
-            .add_systems(Update, (swap_boid_lod, update_billboard_yaw).chain())
+            // The swap pair (swap_boid_lod, update_billboard_yaw) is
+            // registered ONLY by main.rs's Playing-gated Update tuple,
+            // which also carries the `.before(load_world)` ordering the
+            // world-switch fix needs. A second copy here would run
+            // ungated, unordered, and twice per frame in Playing.
+            //
             // The brightness slider's push into the shared materials. Runs
             // on any BillboardTuning edit (the swap sliders share the
             // resource — re-pushing a scalar is free).
@@ -312,9 +338,21 @@ fn sync_billboard_brightness(
 /// Detaches/reattaches meshes by camera distance. Runs after the RTS
 /// camera settles so the distance is measured against the smoothed view
 /// position, not the pre-smooth one.
+///
+/// The kill-switch (`DebugConfig::impostor_lod` off, which scenes and
+/// force bench flags also set) restores everything the swap billboarded
+/// whatever the camera distance — but only [`SwapManaged`] billboards:
+/// manual placements (see [`BillboardOwner`]) are not this system's to
+/// touch.
 pub fn swap_boid_lod(
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    boids: Query<(Entity, &Boid, &Transform, Option<&Billboard>)>,
+    boids: Query<(
+        Entity,
+        &Boid,
+        &Transform,
+        Option<&Billboard>,
+        Has<SwapManaged>,
+    )>,
     facing: Query<(&Target, &Velocity)>,
     variations: Res<BoidVariations>,
     assets: Res<BillboardAssets>,
@@ -323,6 +361,11 @@ pub fn swap_boid_lod(
     mut commands: Commands,
 ) {
     if !debug.impostor_lod {
+        for (entity, boid, _, billboard, managed) in &boids {
+            if billboard.is_some() && managed {
+                restore_mesh(&mut commands, entity, boid.id, &variations);
+            }
+        }
         return;
     }
     let Ok((_, camera)) = cameras.single() else {
@@ -330,11 +373,13 @@ pub fn swap_boid_lod(
     };
     let camera_pos = camera.translation();
     let swap_at = tuning.swap_distance_m * tuning.swap_distance_m;
-    let restore_at = (tuning.swap_distance_m - tuning.hysteresis_m)
-        .max(0.0)
-        .powi(2);
+    // The sliders allow hysteresis >= swap distance, which would pin the
+    // restore threshold at zero and billboard far boids forever — the band
+    // never eats more than 90% of the swap distance.
+    let hysteresis = tuning.hysteresis_m.min(tuning.swap_distance_m * 0.9);
+    let restore_at = (tuning.swap_distance_m - hysteresis).max(0.0).powi(2);
 
-    for (entity, boid, transform, billboard) in &boids {
+    for (entity, boid, transform, billboard, managed) in &boids {
         let distance_sq = camera_pos.distance_squared(transform.translation);
         match billboard {
             // Meshed and far: detach the mesh, attach the billboard quad
@@ -345,28 +390,23 @@ pub fn swap_boid_lod(
                     .ok()
                     .and_then(|(target, vel)| facing_yaw(target, vel))
                     .unwrap_or(0.0);
-                attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
+                attach_billboard(
+                    &mut commands,
+                    entity,
+                    boid.id,
+                    yaw,
+                    &assets,
+                    BillboardOwner::Swap,
+                );
             }
             // Billboarded and near: restore the exact mesh/material handles
             // the spawn attached (identity is the id — see variation_for).
-            Some(_) if distance_sq < restore_at => {
-                let variation = &variations.0[variation_for(boid.id)];
-                let mesh = variation.mesh.clone();
-                let material = variation.material.clone();
-                // Application-time validity check, see attach_billboard.
-                commands.queue(move |world: &mut World| {
-                    if let Ok(mut boid) = world.get_entity_mut(entity) {
-                        boid.remove::<(
-                            Billboard,
-                            MeshTag,
-                            Mesh3d,
-                            MeshMaterial3d<BillboardMaterial>,
-                        )>()
-                        .insert((Mesh3d(mesh), MeshMaterial3d(material)));
-                    }
-                });
+            // Manual billboards are not ours to restore.
+            Some(_) if managed && distance_sq < restore_at => {
+                restore_mesh(&mut commands, entity, boid.id, &variations);
             }
-            // Inside the hysteresis band: hold the current state.
+            // Inside the hysteresis band (or a manual placement): hold the
+            // current state.
             _ => {}
         }
     }
@@ -375,7 +415,9 @@ pub fn swap_boid_lod(
 /// Detaches the mesh and attaches the billboard render components for
 /// `boid_id`'s variation — the one conversion the distance swap, the
 /// manual `--force-billboards` bench override and the `--scene billboard`
-/// twin all go through.
+/// twin all go through. `owner` records who placed it: only the swap's
+/// own placements ([`BillboardOwner::Swap`] → [`SwapManaged`]) are ever
+/// restored by [`swap_boid_lod`].
 ///
 /// Entity validity is checked at buffer-APPLICATION time, not queue time:
 /// a pending world switch (the F4 menu load) can despawn the boid between
@@ -387,6 +429,7 @@ pub(crate) fn attach_billboard(
     boid_id: u32,
     yaw: f32,
     assets: &BillboardAssets,
+    owner: BillboardOwner,
 ) {
     let quad = assets.quad.clone();
     let material = assets.materials[variation_for(boid_id)].clone();
@@ -399,14 +442,46 @@ pub(crate) fn attach_billboard(
                     MeshTag(pack_tag(yaw, IDLE_POSE)),
                     Billboard,
                 ));
+            if owner == BillboardOwner::Swap {
+                boid.insert(SwapManaged);
+            }
+        }
+    });
+}
+
+/// Reattaches the exact catalog mesh/material the spawn attached for
+/// `boid_id`'s variation (identity is the id — see `variation_for`) and
+/// drops every billboard component — the shared restore for the distance
+/// band and the kill-switch pass. Application-time validity check, see
+/// [`attach_billboard`].
+pub(crate) fn restore_mesh(
+    commands: &mut Commands,
+    entity: Entity,
+    boid_id: u32,
+    variations: &BoidVariations,
+) {
+    let variation = &variations.0[variation_for(boid_id)];
+    let mesh = variation.mesh.clone();
+    let material = variation.material.clone();
+    commands.queue(move |world: &mut World| {
+        if let Ok(mut boid) = world.get_entity_mut(entity) {
+            boid.remove::<(
+                Billboard,
+                SwapManaged,
+                MeshTag,
+                Mesh3d,
+                MeshMaterial3d<BillboardMaterial>,
+            )>()
+            .insert((Mesh3d(mesh), MeshMaterial3d(material)));
         }
     });
 }
 
 /// One-shot `--force-billboards` bench override: converts every boid once
-/// (the `Local` guard) and leaves them there — `main.rs` stands the
-/// distance swap down while either force flag is set, so the render path
-/// stays under manual control for clean A/B benches.
+/// (the `Local` guard) and leaves them there — force flags stand the
+/// distance swap down at world assembly (`scene::assemble_world`), and
+/// the manual [`BillboardOwner::Manual`] placement keeps the conversion
+/// out of the kill-switch's restore pass regardless.
 pub fn force_render(
     launch: Res<LaunchConfig>,
     boids: Query<(Entity, &Boid, &Target, &Velocity), Without<Billboard>>,
@@ -420,7 +495,14 @@ pub fn force_render(
     *done = true;
     for (entity, boid, target, vel) in &boids {
         let yaw = facing_yaw(target, vel).unwrap_or(0.0);
-        attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
+        attach_billboard(
+            &mut commands,
+            entity,
+            boid.id,
+            yaw,
+            &assets,
+            BillboardOwner::Manual,
+        );
     }
     info!(
         "billboard: --force-billboards converted {} boid(s) for benching",
@@ -632,6 +714,135 @@ mod tests {
         assert!(
             app.world().get::<Billboard>(far).is_none(),
             "kill-switch holds meshes"
+        );
+    }
+
+    /// The F1 toggle's documented promise: turning the swap off RETURNS
+    /// every auto-swapped boid to its mesh — camera notwithstanding. (The
+    /// old code gated the restore branch behind the same flag, freezing
+    /// billboards on instead.)
+    #[test]
+    fn kill_switch_restores_billboarded_boids() {
+        let (mut app, _near, far) = lod_app();
+        let catalog = app.world().resource::<BoidVariations>().0.clone();
+        app.update();
+        assert!(app.world().get::<Billboard>(far).is_some());
+        assert!(app.world().get::<SwapManaged>(far).is_some());
+
+        app.world_mut()
+            .resource_mut::<DebugConfig>()
+            .bypass_change_detection()
+            .impostor_lod = false;
+        app.update();
+
+        let world = app.world();
+        assert!(
+            world.get::<Billboard>(far).is_none(),
+            "kill-switch restores, camera still 500 m away"
+        );
+        assert!(world.get::<SwapManaged>(far).is_none());
+        let restored = world
+            .get::<MeshMaterial3d<StandardMaterial>>(far)
+            .expect("mesh material restored");
+        assert_eq!(
+            restored.0,
+            catalog[variation_for(1)].material,
+            "back to its own variation's mesh"
+        );
+    }
+
+    /// The `--force-billboards` override and the `--scene billboard` twin
+    /// place their billboards manually while the swap is stood down
+    /// (force flags and scenes force `impostor_lod` off) — the
+    /// kill-switch restore pass must leave those alone.
+    #[test]
+    fn manual_billboards_survive_the_kill_switch() {
+        let (mut app, near, _far) = lod_app();
+        app.insert_resource(LaunchConfig {
+            force_billboards: true,
+            ..default()
+        })
+        .add_systems(Update, force_render);
+        app.world_mut()
+            .resource_mut::<DebugConfig>()
+            .bypass_change_detection()
+            .impostor_lod = false;
+        app.update();
+        assert!(
+            app.world().get::<Billboard>(near).is_some(),
+            "the force override converted the boid"
+        );
+        app.update();
+        assert!(
+            app.world().get::<Billboard>(near).is_some(),
+            "the kill-switch restore pass leaves manual placements alone"
+        );
+    }
+
+    /// Flipping the toggle back on with the camera inside the restore
+    /// band still doesn't restore a manual billboard — the `--scene
+    /// billboard` twin sits ~7 m from its camera precisely so both render
+    /// paths show side by side.
+    #[test]
+    fn manual_billboards_are_not_distance_restored() {
+        let (mut app, near, _far) = lod_app();
+        app.insert_resource(LaunchConfig {
+            force_billboards: true,
+            ..default()
+        })
+        .add_systems(Update, force_render);
+        app.update();
+        assert!(app.world().get::<Billboard>(near).is_some());
+        assert!(app.world().get::<SwapManaged>(near).is_none());
+
+        // Toggle on, camera 5 m away — deep inside the 45 m restore band.
+        app.world_mut()
+            .resource_mut::<DebugConfig>()
+            .bypass_change_detection()
+            .impostor_lod = true;
+        app.update();
+        assert!(
+            app.world().get::<Billboard>(near).is_some(),
+            "manual billboards are not distance-restored"
+        );
+    }
+
+    /// The sliders allow hysteresis >= swap distance; uncapped that pins
+    /// the restore threshold at zero and billboards far boids forever.
+    /// The band is capped at 90% of the swap distance (restore < 5 m at
+    /// the default 50 m swap).
+    #[test]
+    fn fat_hysteresis_still_restores() {
+        let (mut app, _near, far) = lod_app();
+        app.world_mut()
+            .resource_mut::<BillboardTuning>()
+            .bypass_change_detection()
+            .hysteresis_m = 50.0;
+        app.update();
+        assert!(app.world().get::<Billboard>(far).is_some());
+
+        app.world_mut()
+            .entity_mut(far)
+            .insert(Transform::from_xyz(0.0, 0.0, 4.0));
+        app.update();
+        assert!(
+            app.world().get::<Billboard>(far).is_none(),
+            "inside the capped band: restored"
+        );
+
+        // Mid distances still hold — the band is wide, not gone.
+        app.world_mut()
+            .entity_mut(far)
+            .insert(Transform::from_xyz(0.0, 0.0, 500.0));
+        app.update();
+        assert!(app.world().get::<Billboard>(far).is_some());
+        app.world_mut()
+            .entity_mut(far)
+            .insert(Transform::from_xyz(0.0, 0.0, 20.0));
+        app.update();
+        assert!(
+            app.world().get::<Billboard>(far).is_some(),
+            "20 m is inside the band: holds"
         );
     }
 

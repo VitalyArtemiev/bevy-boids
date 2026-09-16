@@ -200,10 +200,15 @@ fn main() {
             camera_terrain_clearance.after(RtsCameraSystemSet),
             // Impostor LOD rides the settled camera position; yaw
             // refresh follows any fresh billboards; the one-shot
-            // --force-billboards conversion trails both.
-            swap_boid_lod.after(RtsCameraSystemSet),
-            update_billboard_yaw,
-            force_render,
+            // --force-billboards conversion trails both. Registered here
+            // ONLY (BillboardPlugin doesn't carry the pair) so exactly
+            // one gated, load_world-ordered copy runs.
+            (
+                swap_boid_lod.after(RtsCameraSystemSet),
+                update_billboard_yaw,
+                force_render,
+            )
+                .chain(),
             // Freecam (F1 debug panel toggle) takes the camera over by
             // component swap when the mode resource changes; the move
             // system is inert without a Freecam camera.

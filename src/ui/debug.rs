@@ -35,7 +35,9 @@ pub struct DebugConfig {
     /// Formation steering lines (`dispatch_formation_goals`).
     pub show_formation_goals: bool,
     /// Kill-switch for the per-boid impostor LOD (`swap_boid_lod`): off
-    /// holds every boid on its mesh regardless of distance.
+    /// returns every auto-swapped boid to its mesh regardless of
+    /// distance. Manual placements (force bench flags, the billboard
+    /// scene twin) keep their billboards.
     pub impostor_lod: bool,
 }
 
@@ -570,7 +572,7 @@ fn debug_panel(
                         .changed();
                     toggles_changed |= ui
                         .checkbox(&mut config.impostor_lod, "impostor billboards by distance")
-                        .on_hover_text("Kill-switch for the distance swap — off holds every boid on its mesh.")
+                        .on_hover_text("Kill-switch for the distance swap — off returns every auto-swapped boid to its mesh.")
                         .changed();
                     let lod: &mut LODGuard = lod.bypass_change_detection();
                     toggles_changed |= ui

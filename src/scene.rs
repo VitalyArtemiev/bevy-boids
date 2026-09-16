@@ -29,7 +29,7 @@ use bevy::prelude::*;
 use bevy_rts_camera::{Ground, RtsCamera};
 use std::collections::VecDeque;
 
-use crate::billboard::{Billboard, BillboardAssets, attach_billboard, facing_yaw};
+use crate::billboard::{Billboard, BillboardAssets, BillboardOwner, attach_billboard, facing_yaw};
 use crate::boid::{Boid, BoidBundle, BoidIds, BoidVariations};
 use crate::crowd::{CrowdArmy, CrowdDust, CrowdGround};
 use crate::formations::{Formation, FormationKind, FormationOrder, MemberOf};
@@ -1064,7 +1064,10 @@ pub struct BillboardSceneMesh;
 pub struct BillboardSceneSprite;
 
 /// Converts every unconverted sprite twin through the same
-/// `attach_billboard` path as the LOD swap.
+/// `attach_billboard` path as the LOD swap — but as a MANUAL placement:
+/// the scene stands the auto-swap down, and even with the F1 toggle
+/// flipped back on the swap must leave the twin billboarded (the pair's
+/// whole point is showing both render paths side by side).
 fn billboard_scene_convert(
     sprites: Query<
         (Entity, &Boid, &Target, &Velocity),
@@ -1075,7 +1078,14 @@ fn billboard_scene_convert(
 ) {
     for (entity, boid, target, vel) in &sprites {
         let yaw = facing_yaw(target, vel).unwrap_or(0.0);
-        attach_billboard(&mut commands, entity, boid.id, yaw, &assets);
+        attach_billboard(
+            &mut commands,
+            entity,
+            boid.id,
+            yaw,
+            &assets,
+            BillboardOwner::Manual,
+        );
     }
 }
 
