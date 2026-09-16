@@ -1237,8 +1237,10 @@ mod tests {
         );
 
         // 100 per block: two 10×10 blocks on a stage scaled by √(100/12).
-        app.world_mut()
-            .insert_resource(SceneUnits { per_formation: 100, ..Default::default() });
+        app.world_mut().insert_resource(SceneUnits {
+            per_formation: 100,
+            ..Default::default()
+        });
         assemble_world(app.world_mut(), Some(TestScene::FormationClash));
         let world = app.world_mut();
         assert_eq!(count::<Boid>(world), 200);
@@ -1247,13 +1249,21 @@ mod tests {
         let mut formations = world.query_filtered::<&Transform, With<Formation>>();
         let mut xs: Vec<f32> = formations.iter(world).map(|t| t.translation.x).collect();
         xs.sort_by(|a, b| a.total_cmp(b));
-        assert!((xs[0] + 40.0 * k).abs() < 1e-4, "left origin not stage-scaled");
-        assert!((xs[1] - 40.0 * k).abs() < 1e-4, "right origin not stage-scaled");
+        assert!(
+            (xs[0] + 40.0 * k).abs() < 1e-4,
+            "left origin not stage-scaled"
+        );
+        assert!(
+            (xs[1] - 40.0 * k).abs() < 1e-4,
+            "right origin not stage-scaled"
+        );
 
         // A count that doesn't tile the near-square grid still spawns
         // exactly (13 = a 4-wide grid with a ragged tail rank).
-        app.world_mut()
-            .insert_resource(SceneUnits { per_formation: 13, ..Default::default() });
+        app.world_mut().insert_resource(SceneUnits {
+            per_formation: 13,
+            ..Default::default()
+        });
         assemble_world(app.world_mut(), Some(TestScene::FormationCross));
         assert_eq!(count::<Boid>(app.world_mut()), 26);
     }
@@ -1307,8 +1317,11 @@ mod tests {
                 corners[(leg - 1) % corners.len()]
             };
             let next = corners[(leg + 1) % corners.len()];
-            let [FormationOrder::Reform { kind, columns }, FormationOrder::Move { pos, facing_dir }, FormationOrder::Rotate { to }] =
-                chunk
+            let [
+                FormationOrder::Reform { kind, columns },
+                FormationOrder::Move { pos, facing_dir },
+                FormationOrder::Rotate { to },
+            ] = chunk
             else {
                 panic!("leg {leg} is not the reform-march-reorient triple");
             };
@@ -1366,9 +1379,6 @@ mod tests {
     /// FixedUpdate executor chain, `move_step` in Update.
     #[test]
     fn parade_queue_executes_through_the_formation_pipeline() {
-        use bevy::gizmos::AppGizmoBuilder;
-        use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
-        use bevy::time::{Fixed, Time, TimePlugin, TimeUpdateStrategy};
         use crate::formations::{
             FormationTuning, LODGuard, assign_slots, dispatch_formation_goals,
             init_formation_speed, plan_formation_goals, propagate_formation_targets,
@@ -1376,6 +1386,9 @@ mod tests {
         };
         use crate::kinematics::{KinematicsTuning, move_step};
         use crate::target::follow_target;
+        use bevy::gizmos::AppGizmoBuilder;
+        use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
+        use bevy::time::{Fixed, Time, TimePlugin, TimeUpdateStrategy};
         use std::time::Duration;
 
         let mut app = world_app(LaunchConfig {
@@ -1411,9 +1424,9 @@ mod tests {
         let corners = parade_corners(PARADE_COURSE_RADIUS_M);
         let com = |world: &mut World| -> Vec3 {
             let mut boids = world.query_filtered::<&Transform, With<Boid>>();
-            let (sum, n) = boids
-                .iter(world)
-                .fold((Vec3::ZERO, 0usize), |(sum, n), t| (sum + t.translation, n + 1));
+            let (sum, n) = boids.iter(world).fold((Vec3::ZERO, 0usize), |(sum, n), t| {
+                (sum + t.translation, n + 1)
+            });
             sum / n as f32
         };
         let formation = {
@@ -1421,18 +1434,13 @@ mod tests {
             let mut formations = world.query_filtered::<Entity, With<Formation>>();
             formations.iter(world).next().expect("the parade formation")
         };
-        let full_queue = app
-            .world()
-            .get::<Formation>(formation)
-            .unwrap()
-            .tasks
-            .len();
+        let full_queue = app.world().get::<Formation>(formation).unwrap().tasks.len();
 
         // One manual step per update (the timestep matches dt).
         let mut step = |app: &mut App| {
-            app.insert_resource(TimeUpdateStrategy::ManualDuration(
-                Duration::from_secs_f32(1.0 / 60.0),
-            ));
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+                1.0 / 60.0,
+            )));
             app.update();
         };
         let mut reached_corner = false;
