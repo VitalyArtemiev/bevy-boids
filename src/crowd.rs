@@ -34,7 +34,9 @@ use bevy::pbr::{Material, MaterialPlugin, MeshMaterial3d};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::mesh::{Indices, Mesh};
-use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
+};
 use bevy::shader::ShaderRef;
 
 use crate::scene::{TestScene, in_scene};
@@ -112,33 +114,47 @@ impl Default for CrowdTuning {
     }
 }
 
-/// The opaque formation crowd. Uniform layout mirrors the declarations
-/// at the top of `assets/shaders/crowd.wgsl`; bindings 3-6 (terrain) are
-/// shared with `CrowdDustMaterial` and declared in `crowd_common.wgsl`.
+/// Terrain mapping shared by both crowd materials (mirrors `TerrainUniforms`
+/// in `crowd_common.wgsl`): box-local xz onto the battlefield heightmap.
+#[derive(ShaderType, Debug, Clone, Copy)]
+pub struct TerrainUniforms {
+    /// (origin.x, origin.z, sin(yaw), cos(yaw)) — box-local xz → world xz.
+    pub a: Vec4,
+    /// (map_min.x, map_min.z, 1/map_span, seat) — world xz → heightmap,
+    /// and the seat height h_rel is measured from.
+    pub b: Vec4,
+    /// (h_min, h_max, trace_y_min, trace_y_max) — height decode and the
+    /// local y range the trace clips to.
+    pub c: Vec4,
+}
+
+/// The opaque formation crowd. All scalars ride ONE uniform buffer
+/// (`CrowdUniforms`, binding 0) beside the heightmap texture: browser
+/// backends — WebGL2 and in-browser WebGPU alike — cap uniform buffers per
+/// shader stage at 12, and the engine's view bindings already spend 8, so
+/// the six separate bindings this replaced overflowed the pipeline layout
+/// and killed pipeline creation on wasm (native Vulkan allows far more,
+/// so it never showed up locally).
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct CrowdMaterial {
-    /// rgb: team tunic colour; w: per-team hash seed.
     #[uniform(0)]
+    pub uniforms: CrowdUniforms,
+    /// Battlefield heightmap (R8Unorm over `HEIGHT_MAP_SPAN_M`), decoded
+    /// with `terrain.c.xy`.
+    #[texture(1)]
+    pub height_map: Handle<Image>,
+}
+
+#[derive(ShaderType, Debug, Clone, Copy)]
+pub struct CrowdUniforms {
+    /// rgb: team tunic colour; w: per-team hash seed.
     pub team: Vec4,
     /// x: density, y: glint rate (rad/s), z: glint strength, w: unused.
-    #[uniform(1)]
     pub params: Vec4,
     /// xyz: direction TO the sun in the box's local space, w: spacing (m).
-    #[uniform(2)]
     pub sun_spacing: Vec4,
-    /// Battlefield heightmap (R8Unorm over `HEIGHT_MAP_SPAN_M`), decoded
-    /// with `terrain_c.xy`.
-    #[texture(3)]
-    pub height_map: Handle<Image>,
-    /// (origin.x, origin.z, sin(yaw), cos(yaw)) — box-local xz → world.
-    #[uniform(4)]
-    pub terrain_a: Vec4,
-    /// (map_min.x, map_min.z, 1/map_span, seat) — world xz → heightmap.
-    #[uniform(5)]
-    pub terrain_b: Vec4,
-    /// (h_min, h_max, trace_y_min, trace_y_max), all box-local.
-    #[uniform(6)]
-    pub terrain_c: Vec4,
+    /// Heightmap mapping — see [`TerrainUniforms`].
+    pub terrain: TerrainUniforms,
 }
 
 impl Material for CrowdMaterial {
@@ -158,25 +174,26 @@ impl Material for CrowdMaterial {
     }
 }
 
-/// The translucent dust volume above a crowd box. Bindings 3-6 match
-/// `CrowdMaterial` — both shaders import the terrain module.
+/// The translucent dust volume above a crowd box. Same single-buffer layout
+/// as [`CrowdMaterial`] (one uniforms struct + the shared heightmap) — the
+/// packing exists for the wasm uniform-buffer limit, see its docs.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct CrowdDustMaterial {
-    /// x: density, y: box height (m), z/w: unused.
     #[uniform(0)]
+    pub uniforms: CrowdDustUniforms,
+    /// See `CrowdMaterial` — same battlefield heightmap.
+    #[texture(1)]
+    pub height_map: Handle<Image>,
+}
+
+#[derive(ShaderType, Debug, Clone, Copy)]
+pub struct CrowdDustUniforms {
+    /// x: density, y: box height (m), z/w: unused.
     pub params: Vec4,
     /// xyz: direction TO the sun in local space.
-    #[uniform(1)]
     pub sun: Vec4,
-    /// See `CrowdMaterial` — same battlefield heightmap.
-    #[texture(3)]
-    pub height_map: Handle<Image>,
-    #[uniform(4)]
-    pub terrain_a: Vec4,
-    #[uniform(5)]
-    pub terrain_b: Vec4,
-    #[uniform(6)]
-    pub terrain_c: Vec4,
+    /// Heightmap mapping — see [`TerrainUniforms`].
+    pub terrain: TerrainUniforms,
 }
 
 impl Material for CrowdDustMaterial {
@@ -309,7 +326,7 @@ pub struct CrowdGround;
 
 /// Bakes the battlefield heights into an R8Unorm heightmap texture for
 /// the crowd shaders (they cannot call the CPU `HeightField`). The decode
-/// range `(min, max)` rides to the GPU in `terrain_c.xy`.
+/// range `(min, max)` rides to the GPU in `terrain.c.xy`.
 fn bake_height_map(images: &mut Assets<Image>, field: &HeightField) -> (Handle<Image>, f32, f32) {
     let mut min = f32::MAX;
     let mut max = f32::MIN;
@@ -400,24 +417,28 @@ fn spawn_crowd(
         let seat = min_h + 0.05;
         // Lighting runs in local space, so the sun rotates with the box.
         let sun_local = rotation.inverse() * sun_world;
-        let (terrain_a, terrain_b, terrain_c) =
-            terrain_uniforms(yaw, z, seat, h_min, h_max, min_h, max_h);
+        let terrain = terrain_uniforms(yaw, z, seat, h_min, h_max, min_h, max_h);
 
         commands.spawn((
             Mesh3d(crowd_mesh.clone()),
             MeshMaterial3d(crowd_materials.add(CrowdMaterial {
-                team,
-                params: Vec4::new(
-                    tuning.density,
-                    tuning.glint_rate_hz * std::f32::consts::TAU,
-                    tuning.glint_strength,
-                    0.0,
-                ),
-                sun_spacing: Vec4::new(sun_local.x, sun_local.y, sun_local.z, SOLDIER_SPACING_M),
+                uniforms: CrowdUniforms {
+                    team,
+                    params: Vec4::new(
+                        tuning.density,
+                        tuning.glint_rate_hz * std::f32::consts::TAU,
+                        tuning.glint_strength,
+                        0.0,
+                    ),
+                    sun_spacing: Vec4::new(
+                        sun_local.x,
+                        sun_local.y,
+                        sun_local.z,
+                        SOLDIER_SPACING_M,
+                    ),
+                    terrain,
+                },
                 height_map: height_map.clone(),
-                terrain_a,
-                terrain_b,
-                terrain_c,
             })),
             Transform::from_xyz(0.0, seat, z).with_rotation(rotation),
             // The crowd's own shading handles self-occlusion; a lid-less
@@ -428,12 +449,12 @@ fn spawn_crowd(
         commands.spawn((
             Mesh3d(dust_mesh.clone()),
             MeshMaterial3d(dust_materials.add(CrowdDustMaterial {
-                params: Vec4::new(tuning.dust_density, DUST_HEIGHT_M, 0.0, 0.0),
-                sun: Vec4::new(sun_local.x, sun_local.y, sun_local.z, 0.0),
+                uniforms: CrowdDustUniforms {
+                    params: Vec4::new(tuning.dust_density, DUST_HEIGHT_M, 0.0, 0.0),
+                    sun: Vec4::new(sun_local.x, sun_local.y, sun_local.z, 0.0),
+                    terrain,
+                },
                 height_map: height_map.clone(),
-                terrain_a,
-                terrain_b,
-                terrain_c,
             })),
             Transform::from_xyz(0.0, seat, z).with_rotation(rotation),
             NotShadowCaster,
@@ -444,9 +465,9 @@ fn spawn_crowd(
 
 /// The terrain uniforms shared by both crowd materials: (origin.x,
 /// origin.z, sin(yaw), cos(yaw)), the heightmap window plus this army's
-/// seat, and `terrain_c` = the heightmap's BAKE decode range (the map
-/// spans `h_min..h_max` over the whole battlefield) followed by the
-/// trace's local y range (this box's footprint rise plus box height).
+/// seat, and `c` = the heightmap's BAKE decode range (the map spans
+/// `h_min..h_max` over the whole battlefield) followed by the trace's
+/// local y range (this box's footprint rise plus box height).
 fn terrain_uniforms(
     yaw: f32,
     z_offset: f32,
@@ -455,22 +476,22 @@ fn terrain_uniforms(
     h_max: f32,
     footprint_min_h: f32,
     footprint_max_h: f32,
-) -> (Vec4, Vec4, Vec4) {
-    (
-        Vec4::new(0.0, z_offset, yaw.sin(), yaw.cos()),
-        Vec4::new(
+) -> TerrainUniforms {
+    TerrainUniforms {
+        a: Vec4::new(0.0, z_offset, yaw.sin(), yaw.cos()),
+        b: Vec4::new(
             -HEIGHT_MAP_SPAN_M / 2.0,
             -HEIGHT_MAP_SPAN_M / 2.0,
             1.0 / HEIGHT_MAP_SPAN_M,
             seat,
         ),
-        Vec4::new(
+        c: Vec4::new(
             h_min,
             h_max,
             (footprint_min_h - seat) - TRACE_Y_PAD_M,
             (footprint_max_h - footprint_min_h) + CROWD_HEIGHT_M + TRACE_Y_PAD_M,
         ),
-    )
+    }
 }
 
 /// Local y range a box's trace must cover on this ground: heights run
@@ -507,14 +528,14 @@ fn sync_crowd_tuning(
 ) {
     for material in &armies {
         if let Some(mut m) = crowd_materials.get_mut(&material.0) {
-            m.params.x = tuning.density;
-            m.params.y = tuning.glint_rate_hz * std::f32::consts::TAU;
-            m.params.z = tuning.glint_strength;
+            m.uniforms.params.x = tuning.density;
+            m.uniforms.params.y = tuning.glint_rate_hz * std::f32::consts::TAU;
+            m.uniforms.params.z = tuning.glint_strength;
         }
     }
     for material in &clouds {
         if let Some(mut m) = dust_materials.get_mut(&material.0) {
-            m.params.x = tuning.dust_density;
+            m.uniforms.params.x = tuning.dust_density;
         }
     }
 }

@@ -23,13 +23,21 @@
 #import bevy_pbr::mesh_view_bindings::{view, globals}
 #import bevy_render::maths
 
-// Team colour (rgb) + per-team hash seed.
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> team: vec4<f32>;
-// x: occupancy density scale, y: glint rate (rad/s), z: glint strength,
-// w: unused (the trace y range moved to crowd_common::terrain_c.zw with terrain follow).
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> params: vec4<f32>;
-// xyz: direction TO the sun in local space, w: soldier spacing (m).
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> sun_spacing: vec4<f32>;
+// One uniform buffer (browser backends cap uniform buffers per fragment
+// stage at 12; the view bindings already spend 8, so the six material-side
+// bindings this replaced overflowed the pipeline layout on wasm — mirrors
+// CrowdUniforms in src/crowd.rs).
+struct CrowdUniforms {
+    // rgb: team colour, w: per-team hash seed.
+    team: vec4<f32>,
+    // x: occupancy density scale, y: glint rate (rad/s), z: glint strength,
+    // w: unused (the trace y range moved to terrain.c.zw with terrain follow).
+    params: vec4<f32>,
+    // xyz: direction TO the sun in local space, w: soldier spacing (m).
+    sun_spacing: vec4<f32>,
+    terrain: crowd_common::TerrainUniforms,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> uniforms: CrowdUniforms;
 
 @vertex
 fn vertex(v: Vertex) -> bevy_boids::crowd_common::CrowdOut {
@@ -38,7 +46,7 @@ fn vertex(v: Vertex) -> bevy_boids::crowd_common::CrowdOut {
     // The box deforms to ride the terrain (plus the swell); the same
     // displacement is re-derived per fragment for the ray anchor, so the
     // two agree to within the heightmap's texel resolution.
-    local.y += crowd_common::terrain_h_rel(local.xz)
+    local.y += crowd_common::terrain_h_rel(uniforms.terrain, local.xz)
         + crowd_common::swell_y(local.xz, globals.time);
     let world = mesh_functions::mesh_position_local_to_world(
         world_from_local,
@@ -79,6 +87,7 @@ struct FieldParams {
     y_min: f32, // local y range the trace clips to — low enough for the
     y_max: f32, // lowest ground and high enough for the highest ground
     sun_l: vec3<f32>, // direction TO the sun, local space
+    terrain: crowd_common::TerrainUniforms, // heightmap mapping for the walk
 };
 
 // Static existence: every roll is time-independent, so no soldier ever
@@ -129,7 +138,7 @@ fn make_soldier(cell: vec2<i32>, fp: FieldParams, t: f32) -> Soldier {
         c.x + jitter.x + 0.05 * sin(t * 1.1 + phase_ang),
         // Feet ride the terrain (height relative to the box's seat) under
         // the cell, plus the swell and a small step-bob on top.
-        crowd_common::terrain_h_rel(c) + crowd_common::swell_y(c, t)
+        crowd_common::terrain_h_rel(fp.terrain, c) + crowd_common::swell_y(c, t)
             + 0.03 * sin(t * 2.2 + s.phase * 12.566),
         c.y + jitter.y + 0.05 * cos(t * 0.9 + phase_ang),
     );
@@ -374,7 +383,11 @@ fn crowd_trace(ro: vec3<f32>, rd: vec3<f32>, t: f32, fp: FieldParams) -> Trace {
 
     // Exit through the terrain under the ray (approximate — exit_xz only
     // feeds the shadow floor's hash mottling).
-    let t_floor = clamp((crowd_common::terrain_h_rel(ro.xz) - ro.y) / rd.y, t0, t1);
+    let t_floor = clamp(
+        (crowd_common::terrain_h_rel(fp.terrain, ro.xz) - ro.y) / rd.y,
+        t0,
+        t1,
+    );
     best.exit_xz = (ro + rd * t_floor).xz;
     return best;
 }
@@ -383,19 +396,20 @@ fn crowd_trace(ro: vec3<f32>, rd: vec3<f32>, t: f32, fp: FieldParams) -> Trace {
 fn fragment(in: crowd_common::CrowdOut) -> @location(0) vec4<f32> {
     // Re-derive the same displacement the vertex stage applied, so the
     // ray anchors on the rendered (terrain-riding) surface.
-    let lift = crowd_common::terrain_h_rel(in.crowd_position.xz)
+    let lift = crowd_common::terrain_h_rel(uniforms.terrain, in.crowd_position.xz)
         + crowd_common::swell_y(in.crowd_position.xz, globals.time);
     let ro = in.crowd_position + vec3<f32>(0.0, lift, 0.0);
     let rd = normalize(ro - in.camera_local);
     var fp: FieldParams;
-    fp.spacing = sun_spacing.w;
-    fp.team_seed = team.w;
-    fp.density = params.x;
-    fp.glint_rate = params.y;
-    fp.glint_strength = params.z;
-    fp.y_min = crowd_common::terrain_c.z;
-    fp.y_max = crowd_common::terrain_c.w;
-    fp.sun_l = sun_spacing.xyz;
+    fp.spacing = uniforms.sun_spacing.w;
+    fp.team_seed = uniforms.team.w;
+    fp.density = uniforms.params.x;
+    fp.glint_rate = uniforms.params.y;
+    fp.glint_strength = uniforms.params.z;
+    fp.y_min = uniforms.terrain.c.z;
+    fp.y_max = uniforms.terrain.c.w;
+    fp.sun_l = uniforms.sun_spacing.xyz;
+    fp.terrain = uniforms.terrain;
     let tr = crowd_trace(ro, rd, globals.time, fp);
 
     // The box itself is invisible: rays that neither hit a soldier nor
@@ -419,7 +433,7 @@ fn fragment(in: crowd_common::CrowdOut) -> @location(0) vec4<f32> {
         // Dress: team tunic strongly varied per soldier — at pixel scales
         // shading averages out, and per-soldier albedo is the variation
         // that survives; mixed toward leather; helmets read as steel.
-        let tunic = team.rgb * (0.55 + 0.9 * s.tone);
+        let tunic = uniforms.team.rgb * (0.55 + 0.9 * s.tone);
         let leather = vec3<f32>(0.30, 0.22, 0.15) * (0.7 + 0.6 * s.tone);
         var albedo = mix(tunic, leather, 0.35 * s.metal);
         if (tr.is_head) {
@@ -463,7 +477,7 @@ fn fragment(in: crowd_common::CrowdOut) -> @location(0) vec4<f32> {
         // of men over dark interior. Faintly team-tinted, hash-textured.
         let g = crowd_common::hash21(tr.exit_xz * 3.7);
         let ground = mix(vec3<f32>(0.20, 0.16, 0.12), vec3<f32>(0.32, 0.26, 0.18), g);
-        let tinted = mix(ground, team.rgb, 0.45);
+        let tinted = mix(ground, uniforms.team.rgb, 0.45);
         color = tinted * ground_amb * (0.55 + 0.5 * g);
     }
     // The spear-tip spark survives even on gap rays (it floats above the
