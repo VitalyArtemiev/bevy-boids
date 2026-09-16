@@ -2,8 +2,9 @@
 //! "Scenes" button on the main menu. Lists every [`TestScene`] plus a
 //! reset of the currently loaded world; each pick sends a
 //! [`LoadWorld`] request, and `scene::assemble_world` tears the old world
-//! down before the new one spawns. A units-per-formation slider (see
-//! [`SceneUnits`]) sizes the formation scenes' marching blocks.
+//! down before the new one spawns. Sliders over [`SceneUnits`] size the
+//! scenes at load: units per formation (the formation scenes' marching
+//! blocks) and the formation-parade scene's unit count.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
@@ -104,6 +105,13 @@ fn scenes_menu_ui(
                         .text("units per formation"),
                 )
                 .on_hover_text("Units per marching block in the formation scenes (cross, braid, clash; default 12 = the historical 4×3). The stage scales with the block. Applies when a scene loads.")
+                .changed();
+            units_changed |= ui
+                .add(
+                    egui::Slider::new(&mut units.parade_units, 1..=10_000)
+                        .text("parade units"),
+                )
+                .on_hover_text("Units in the formation-parade scene's single formation (default 20). The course scales with the block. Applies when the scene loads.")
                 .changed();
             ui.separator();
             if ui

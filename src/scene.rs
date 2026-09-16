@@ -93,11 +93,18 @@ pub enum TestScene {
     /// Two hostile formations marching straight through each other —
     /// contact-only, the clash at formation scale.
     FormationClash,
+    /// One formation cycling through every [`FormationKind`] while
+    /// marching a triangular course: at each corner-to-corner leg it
+    /// reforms into the next kind, marches onto the corner and reorients
+    /// toward the following one. The order queue is built from
+    /// [`FormationKind::ALL`], so a new formation kind extends the parade
+    /// with no scene-code change.
+    FormationParade,
 }
 
 impl TestScene {
     /// Every scene, for listing and tests.
-    pub const ALL: [TestScene; 11] = [
+    pub const ALL: [TestScene; 12] = [
         TestScene::Billboard,
         TestScene::Crowd,
         TestScene::Arrival,
@@ -109,6 +116,7 @@ impl TestScene {
         TestScene::FormationCross,
         TestScene::FormationBraid,
         TestScene::FormationClash,
+        TestScene::FormationParade,
     ];
 
     /// The `--scene` value that selects this scene.
@@ -125,6 +133,7 @@ impl TestScene {
             TestScene::FormationCross => "formation-cross",
             TestScene::FormationBraid => "formation-braid",
             TestScene::FormationClash => "formation-clash",
+            TestScene::FormationParade => "formation-parade",
         }
     }
 
@@ -172,6 +181,9 @@ impl TestScene {
             TestScene::FormationClash => {
                 "Two hostile formations marching through each other — clash at formation scale."
             }
+            TestScene::FormationParade => {
+                "One formation cycling through every formation kind while marching a triangular course."
+            }
         }
     }
 
@@ -213,21 +225,28 @@ pub struct LoadWorld(pub Option<TestScene>);
 /// anchor every formation scene's stage geometry is expressed against.
 const DEFAULT_UNITS_PER_FORMATION: usize = 12;
 
-/// Units per marching block in the formation scenes (cross, braid, clash),
-/// set from the F4 scene picker's slider. The default lands on the
-/// historical 4×3 blocks and stages; bigger counts spawn near-square
-/// blocks and scale each stage by [`stage_scale`] so the scene's relative
-/// layout (gaps and course lengths against the block's size) holds at any
-/// count.
+/// The formation-parade scene's unit count — and the anchor its course
+/// geometry is expressed against.
+const DEFAULT_PARADE_UNITS: usize = 20;
+
+/// Unit counts the scene picker sizes its scenes with, set from the F4
+/// menu's sliders. `per_formation` sizes the formation scenes' marching
+/// blocks (cross, braid, clash): the default lands on the historical 4×3
+/// blocks and stages, bigger counts spawn near-square blocks and scale
+/// each stage by [`stage_scale`] so the scene's relative layout (gaps and
+/// course lengths against the block's size) holds at any count.
+/// `parade_units` is the formation-parade scene's single formation.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneUnits {
     pub per_formation: usize,
+    pub parade_units: usize,
 }
 
 impl Default for SceneUnits {
     fn default() -> Self {
         SceneUnits {
             per_formation: DEFAULT_UNITS_PER_FORMATION,
+            parade_units: DEFAULT_PARADE_UNITS,
         }
     }
 }
@@ -361,7 +380,7 @@ fn assemble_scene(world: &mut World, scene: TestScene) {
     // (`id = faction + 3·seq`), so a reload is bit-identical to the first
     // load.
     let mut ids = BoidIds::default();
-    let units = world.resource::<SceneUnits>().per_formation;
+    let units = world.resource::<SceneUnits>().clone();
 
     crate::strip_camera_dressing(world);
 
@@ -382,13 +401,16 @@ fn assemble_scene(world: &mut World, scene: TestScene) {
         TestScene::Shove => spawn_shove_scene(world, &variations, &mut ids),
         TestScene::Melee => spawn_melee_scene(world, &variations, &mut ids),
         TestScene::FormationCross => {
-            spawn_formation_cross_scene(world, &variations, &mut ids, units)
+            spawn_formation_cross_scene(world, &variations, &mut ids, units.per_formation)
         }
         TestScene::FormationBraid => {
-            spawn_formation_braid_scene(world, &variations, &mut ids, units)
+            spawn_formation_braid_scene(world, &variations, &mut ids, units.per_formation)
         }
         TestScene::FormationClash => {
-            spawn_formation_clash_scene(world, &variations, &mut ids, units)
+            spawn_formation_clash_scene(world, &variations, &mut ids, units.per_formation)
+        }
+        TestScene::FormationParade => {
+            spawn_formation_parade_scene(world, &variations, &mut ids, units.parade_units)
         }
     }
     world.insert_resource(ids);
@@ -578,9 +600,8 @@ fn spawn_marching_block(
     if count == 0 {
         return;
     }
-    let columns = ((count as f32).sqrt().ceil() as usize).max(1);
-    let rows = count.div_ceil(columns);
     let facing = (move_to - origin).normalize_or_zero();
+    let columns = ((count as f32).sqrt().ceil() as usize).max(1);
     let formation = world
         .spawn((
             Formation {
@@ -596,6 +617,32 @@ fn spawn_marching_block(
             Transform::from_translation(origin),
         ))
         .id();
+    spawn_block_members(
+        world, ids, variations, formation, faction, colour, origin, facing, count,
+    );
+}
+
+/// Spawns `count` boid members for `formation` in the near-square
+/// facing-frame grid around `origin` that [`spawn_marching_block`] lays
+/// out (see its docs for the tail-rank and `colour` conventions) — the
+/// shared placement half, for formations that come with their own task
+/// queue.
+fn spawn_block_members(
+    world: &mut World,
+    ids: &mut BoidIds,
+    variations: &BoidVariations,
+    formation: Entity,
+    faction: u8,
+    colour: u8,
+    origin: Vec3,
+    facing: Vec3,
+    count: usize,
+) {
+    if count == 0 {
+        return;
+    }
+    let columns = ((count as f32).sqrt().ceil() as usize).max(1);
+    let rows = count.div_ceil(columns);
     let side = Vec3::new(-facing.z, 0.0, facing.x);
     let mut spawned = 0;
     'block: for row in 0..rows {
@@ -828,6 +875,109 @@ fn spawn_formation_clash_scene(
         stage_point(Vec3::new(40.0, 0.5, 0.0), k),
         stage_point(Vec3::new(-40.0, 0.5, 0.0), k),
         count,
+    );
+    scene_camera(world, Vec3::ZERO, 75.0 * k);
+}
+
+// ---- Formation parade scene -------------------------------------------------
+//
+// One friendly formation exercising the whole order surface in sequence:
+// for every corner-to-corner leg of a triangular course it reforms into
+// the next formation kind, marches onto the corner, and reorients toward
+// the following one. The queue is derived from FormationKind::ALL and the
+// corner list — a new formation kind (one more ALL entry) lengthens the
+// parade with no change here.
+
+/// Circumradius of the parade's triangular course at the default unit
+/// count: corner-to-corner legs of R·√3 ≈ 60 m.
+const PARADE_COURSE_RADIUS_M: f32 = 35.0;
+
+/// Stage-side scale for the parade loaded with `count` units, anchored at
+/// [`DEFAULT_PARADE_UNITS`] (see [`stage_scale`]'s rationale): the block's
+/// side grows as √count, so the course and camera grow the same way.
+fn parade_scale(count: usize) -> f32 {
+    (count as f32 / DEFAULT_PARADE_UNITS as f32).sqrt()
+}
+
+/// The parade course: the corners of an equilateral triangle centred on
+/// the stage origin, corner 0 at +Z ("north"), visited 0 → 1 → 2 → 0.
+fn parade_corners(radius_m: f32) -> [Vec3; 3] {
+    [90.0f32, 210.0, 330.0].map(|deg| {
+        let a = deg.to_radians();
+        Vec3::new(a.cos() * radius_m, 0.5, a.sin() * radius_m)
+    })
+}
+
+/// The parade's task queue: one leg per (formation kind × course corner),
+/// so every kind in [`FormationKind::ALL`] gets a full circuit's worth of
+/// legs and adding a kind extends the parade. Each leg is the requested
+/// triple — change formation to the next kind, march onto this leg's
+/// corner (arriving facing along the march), then reorient toward the
+/// next corner. The first march starts from `muster` (the spawn origin);
+/// "next kind" is relative to `initial_kind`, the kind the block spawns
+/// in.
+fn parade_orders(
+    muster: Vec3,
+    corners: &[Vec3],
+    initial_kind: FormationKind,
+) -> VecDeque<FormationOrder> {
+    let kinds = FormationKind::ALL.len();
+    let start = FormationKind::ALL
+        .iter()
+        .position(|&kind| kind == initial_kind)
+        .expect("the spawn kind is an ALL member")
+        + 1;
+    let dir = |from: Vec3, to: Vec3| (to - from).normalize_or_zero();
+
+    let mut tasks = VecDeque::new();
+    for leg in 0..kinds * corners.len() {
+        let corner = corners[leg % corners.len()];
+        let from = if leg == 0 {
+            muster
+        } else {
+            corners[(leg - 1) % corners.len()]
+        };
+        tasks.push_back(FormationOrder::Reform {
+            kind: FormationKind::ALL[(start + leg) % kinds],
+            columns: None,
+        });
+        tasks.push_back(FormationOrder::Move {
+            pos: corner,
+            facing_dir: dir(from, corner),
+        });
+        tasks.push_back(FormationOrder::Rotate {
+            to: dir(corner, corners[(leg + 1) % corners.len()]),
+        });
+    }
+    tasks
+}
+
+/// Spawns the parade: one friendly formation of `count` units mustered at
+/// the course's centre facing corner 0, carrying [`parade_orders`]'s
+/// whole queue.
+fn spawn_formation_parade_scene(
+    world: &mut World,
+    variations: &BoidVariations,
+    ids: &mut BoidIds,
+    count: usize,
+) {
+    let k = parade_scale(count);
+    let corners = parade_corners(PARADE_COURSE_RADIUS_M * k);
+    let muster = Vec3::new(0.0, 0.5, 0.0);
+    let facing = (corners[0] - muster).normalize_or_zero();
+    let formation = world
+        .spawn((
+            Formation {
+                kind: FormationKind::Grid,
+                dir: facing,
+                tasks: parade_orders(muster, &corners, FormationKind::Grid),
+                ..default()
+            },
+            Transform::from_translation(muster),
+        ))
+        .id();
+    spawn_block_members(
+        world, ids, variations, formation, 0, 0, muster, facing, count,
     );
     scene_camera(world, Vec3::ZERO, 75.0 * k);
 }
@@ -1078,7 +1228,7 @@ mod tests {
 
         // 100 per block: two 10×10 blocks on a stage scaled by √(100/12).
         app.world_mut()
-            .insert_resource(SceneUnits { per_formation: 100 });
+            .insert_resource(SceneUnits { per_formation: 100, ..Default::default() });
         assemble_world(app.world_mut(), Some(TestScene::FormationClash));
         let world = app.world_mut();
         assert_eq!(count::<Boid>(world), 200);
@@ -1093,9 +1243,212 @@ mod tests {
         // A count that doesn't tile the near-square grid still spawns
         // exactly (13 = a 4-wide grid with a ragged tail rank).
         app.world_mut()
-            .insert_resource(SceneUnits { per_formation: 13 });
+            .insert_resource(SceneUnits { per_formation: 13, ..Default::default() });
         assemble_world(app.world_mut(), Some(TestScene::FormationCross));
         assert_eq!(count::<Boid>(app.world_mut()), 26);
+    }
+
+    /// The parade course is an equilateral triangle centred on the stage
+    /// origin, corner 0 at +Z ("north").
+    #[test]
+    fn parade_course_is_a_centred_equilateral_triangle() {
+        let corners = parade_corners(35.0);
+        let centre = corners.iter().sum::<Vec3>() / 3.0;
+        assert!(
+            centre.x.abs() < 1e-4 && centre.z.abs() < 1e-4,
+            "centroid drifted: {centre:?}"
+        );
+        let side = corners[0].distance(corners[1]);
+        assert!((side - corners[1].distance(corners[2])).abs() < 1e-4);
+        assert!((side - corners[2].distance(corners[0])).abs() < 1e-4);
+        assert!((side - 35.0 * 3.0_f32.sqrt()).abs() < 1e-3, "side = R·√3");
+        assert!(
+            corners[0].z > 0.0 && corners[0].x.abs() < 1e-4,
+            "corner 0 must sit on +Z: {:?}",
+            corners[0]
+        );
+    }
+
+    /// The parade queue walks the requested triple — reform into the next
+    /// kind, march onto the corner, reorient toward the next one — with
+    /// kinds and corners cycling and every kind in `ALL` getting a full
+    /// circuit's worth of legs.
+    #[test]
+    fn parade_orders_cycle_kinds_and_corners() {
+        let muster = Vec3::new(0.0, 0.5, 0.0);
+        let corners = parade_corners(35.0);
+        let tasks = parade_orders(muster, &corners, FormationKind::Grid);
+        assert_eq!(tasks.len(), 3 * FormationKind::ALL.len() * corners.len());
+
+        // "Next" is relative to the spawn kind: the cycle starts just
+        // past it in ALL.
+        let start = FormationKind::ALL
+            .iter()
+            .position(|&kind| kind == FormationKind::Grid)
+            .unwrap()
+            + 1;
+        let orders: Vec<FormationOrder> = tasks.into_iter().collect();
+        let mut reformed_kinds = Vec::new();
+        for (leg, chunk) in orders.chunks(3).enumerate() {
+            let corner = corners[leg % corners.len()];
+            let from = if leg == 0 {
+                muster
+            } else {
+                corners[(leg - 1) % corners.len()]
+            };
+            let next = corners[(leg + 1) % corners.len()];
+            let [FormationOrder::Reform { kind, columns }, FormationOrder::Move { pos, facing_dir }, FormationOrder::Rotate { to }] =
+                chunk
+            else {
+                panic!("leg {leg} is not the reform-march-reorient triple");
+            };
+            assert_eq!(
+                *kind,
+                FormationKind::ALL[(start + leg) % FormationKind::ALL.len()]
+            );
+            assert_eq!(*columns, None);
+            assert_eq!(*pos, corner);
+            assert!(facing_dir.distance((corner - from).normalize()) < 1e-5);
+            assert!(to.distance((next - corner).normalize()) < 1e-5);
+            reformed_kinds.push(*kind);
+        }
+        for kind in FormationKind::ALL {
+            assert!(
+                reformed_kinds.contains(&kind),
+                "every formation kind must parade; {kind:?} never reformed into"
+            );
+        }
+    }
+
+    /// The parade scene spawns one formation of `SceneUnits::parade_units`
+    /// units carrying the full parade queue — the picker's slider sizes it.
+    #[test]
+    fn parade_scene_spawns_parade_units_with_orders() {
+        let mut app = world_app(LaunchConfig::default());
+        assemble_world(app.world_mut(), Some(TestScene::FormationParade));
+        {
+            let world = app.world_mut();
+            assert_eq!(count::<Boid>(world), 20, "default parade unit count");
+            assert_eq!(count::<Formation>(world), 1);
+            let mut formations = world.query_filtered::<Entity, With<Formation>>();
+            let formation = formations.iter(world).next().expect("the parade formation");
+            let formation = world.get::<Formation>(formation).unwrap();
+            assert_eq!(formation.tasks.len(), 3 * FormationKind::ALL.len() * 3);
+            assert!(
+                matches!(formation.tasks.front(), Some(FormationOrder::Reform { .. })),
+                "the parade must open by changing formation"
+            );
+        }
+
+        app.world_mut().resource_mut::<SceneUnits>().parade_units = 7;
+        assemble_world(app.world_mut(), Some(TestScene::FormationParade));
+        assert_eq!(
+            count::<Boid>(app.world_mut()),
+            7,
+            "the slider count applies on load"
+        );
+    }
+
+    /// The parade executes through the real formation pipeline: the block
+    /// reforms, marches onto corner 0 of the course and the queue advances
+    /// past the opening leg (the scene assembly test above only pins the
+    /// spawn state). Mirrors formations.rs's harness: manual clocks, the
+    /// FixedUpdate executor chain, `move_step` in Update.
+    #[test]
+    fn parade_queue_executes_through_the_formation_pipeline() {
+        use bevy::gizmos::AppGizmoBuilder;
+        use bevy::gizmos::config::{DefaultGizmoConfigGroup, GizmoConfigStore};
+        use bevy::time::{Fixed, Time, TimePlugin, TimeUpdateStrategy};
+        use crate::formations::{
+            FormationTuning, LODGuard, assign_slots, dispatch_formation_goals,
+            init_formation_speed, plan_formation_goals, propagate_formation_targets,
+            transition_formation_orders,
+        };
+        use crate::kinematics::{KinematicsTuning, move_step};
+        use crate::target::follow_target;
+        use std::time::Duration;
+
+        let mut app = world_app(LaunchConfig {
+            scene: Some(TestScene::FormationParade),
+            ..Default::default()
+        });
+        app.add_plugins(TimePlugin)
+            .insert_resource(Time::<Fixed>::from_duration(Duration::from_secs_f32(
+                1.0 / 60.0,
+            )))
+            .init_resource::<LODGuard>()
+            .init_resource::<FormationTuning>()
+            .init_resource::<KinematicsTuning>()
+            .init_resource::<GizmoConfigStore>()
+            .init_gizmo_group::<DefaultGizmoConfigGroup>()
+            .init_resource::<Assets<GizmoAsset>>()
+            .add_systems(
+                FixedUpdate,
+                (
+                    init_formation_speed,
+                    propagate_formation_targets,
+                    transition_formation_orders,
+                    assign_slots,
+                    plan_formation_goals,
+                    dispatch_formation_goals,
+                    follow_target,
+                )
+                    .chain(),
+            )
+            .add_systems(Update, move_step);
+        app.update(); // builds the parade world; clocks not yet advanced
+
+        let corners = parade_corners(PARADE_COURSE_RADIUS_M);
+        let com = |world: &mut World| -> Vec3 {
+            let mut boids = world.query_filtered::<&Transform, With<Boid>>();
+            let (sum, n) = boids
+                .iter(world)
+                .fold((Vec3::ZERO, 0usize), |(sum, n), t| (sum + t.translation, n + 1));
+            sum / n as f32
+        };
+        let formation = {
+            let world = app.world_mut();
+            let mut formations = world.query_filtered::<Entity, With<Formation>>();
+            formations.iter(world).next().expect("the parade formation")
+        };
+        let full_queue = app
+            .world()
+            .get::<Formation>(formation)
+            .unwrap()
+            .tasks
+            .len();
+
+        // One manual step per update (the timestep matches dt).
+        let mut step = |app: &mut App| {
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f32(1.0 / 60.0),
+            ));
+            app.update();
+        };
+        let mut reached_corner = false;
+        for _ in 0..2400 {
+            step(&mut app);
+            if !reached_corner && com(app.world_mut()).distance(corners[0]) < 6.0 {
+                reached_corner = true;
+            }
+        }
+        assert!(
+            reached_corner,
+            "the parade never reached corner 0: center of mass {:?}",
+            com(app.world_mut())
+        );
+
+        let world = app.world_mut();
+        let f = world.get::<Formation>(formation).unwrap();
+        assert!(
+            f.tasks.len() < full_queue,
+            "the queue must have advanced past the opening leg"
+        );
+        assert_ne!(
+            f.kind,
+            FormationKind::Grid,
+            "the opening Reform must have changed the spawn kind"
+        );
     }
 
     /// A live selection must survive a world switch: `Selected`'s

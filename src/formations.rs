@@ -195,6 +195,18 @@ pub enum FormationKind {
 impl FormationKind {
     pub const SPACING: f32 = 2.0;
 
+    /// Every kind in declaration order — the catalogue other code
+    /// iterates (the formation-parade scene builds its order queue over
+    /// this list). Adding a variant means listing it here too: keep the
+    /// length annotation in sync.
+    pub const ALL: [FormationKind; 5] = [
+        FormationKind::Line,
+        FormationKind::Column,
+        FormationKind::Grid,
+        FormationKind::Wedge,
+        FormationKind::Ring,
+    ];
+
     /// Number of wedge rows needed for `total` members (rows of 1, 2, 3, ...).
     fn wedge_rows(total: usize) -> usize {
         let mut rows = 1;
