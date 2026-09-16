@@ -139,7 +139,7 @@ impl FromWorld for BillboardAssets {
         // The tuning is initialised before this resource in the plugin, so
         // freshly created materials already carry the slider value; the
         // sync system only has to cover later edits.
-        let brightness = world.resource::<BillboardTuning>().brightness;
+        let brightness = Vec4::splat(world.resource::<BillboardTuning>().brightness);
         let quad = world
             .resource_mut::<Assets<Mesh>>()
             .add(Plane3d::default().mesh().size(1.0, 1.0));
@@ -180,9 +180,12 @@ pub struct BillboardMaterial {
     /// world metres (the bake frustum width).
     #[uniform(0)]
     pub center_span: Vec4,
-    /// Multiplier on the light sum; 1.0 = PBR parity.
+    /// x: multiplier on the light sum; 1.0 = PBR parity. yzw: padding —
+    /// WebGL2 (wgpu's GL fallback) rejects uniform bindings whose size is
+    /// not a multiple of 16 bytes, so the scalar rides a vec4 (same
+    /// pattern as every crowd material uniform).
     #[uniform(1)]
-    pub brightness: f32,
+    pub brightness: Vec4,
     /// The baked atlas: per-pose albedo bands in the top half, mirrored
     /// view-space normals in the bottom half.
     #[texture(2, dimension = "2d")]
@@ -301,7 +304,7 @@ fn sync_billboard_brightness(
 ) {
     for handle in &live {
         if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.brightness = tuning.brightness;
+            material.brightness = Vec4::splat(tuning.brightness);
         }
     }
 }
@@ -645,7 +648,7 @@ mod tests {
         let mut materials = Assets::<BillboardMaterial>::default();
         let handle = materials.add(BillboardMaterial {
             center_span: Vec4::default(),
-            brightness: 1.0,
+            brightness: Vec4::splat(1.0),
             atlas: Handle::default(),
         });
         app.world_mut().insert_resource(materials);
@@ -660,6 +663,6 @@ mod tests {
             .resource::<Assets<BillboardMaterial>>()
             .get(&handle)
             .unwrap();
-        assert_eq!(material.brightness, 0.5, "slider edit pushed live");
+        assert_eq!(material.brightness.x, 0.5, "slider edit pushed live");
     }
 }

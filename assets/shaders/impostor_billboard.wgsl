@@ -42,7 +42,10 @@ const PI: f32 = 3.141592653589793;
 // w: quad side in world metres (the bake frustum width).
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> center_span: vec4<f32>;
 // Manual match knob from BillboardTuning.brightness; 1.0 = PBR parity.
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> brightness: f32;
+// x carries the value, yzw are padding: WebGL2 (wgpu's GL fallback)
+// rejects uniform bindings whose size is not a multiple of 16 bytes —
+// a bare f32 here killed pipeline creation on browsers without WebGPU.
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> brightness: vec4<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var atlas_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var atlas_sampler: sampler;
 
@@ -165,7 +168,7 @@ fn fragment(in: BillboardOut) -> @location(0) vec4<f32> {
     // (the 302 m bench view). `brightness` is the manual match knob on
     // top (1.0 = parity). Distance fog and deband dither from the
     // standard chain are skipped — neither is used by this game's views.
-    diffuse_light *= view.exposure * brightness;
+    diffuse_light *= view.exposure * brightness.x;
 
     // The same in-shader post-lighting step the PBR fragment performs on
     // non-HDR cameras: without tonemapping the raw value saturates the
