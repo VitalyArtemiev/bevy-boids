@@ -7,6 +7,7 @@
 //! registered in `main.rs`.
 
 pub mod debug;
+pub mod help;
 pub mod input;
 pub mod radial;
 pub mod scenes;
@@ -79,6 +80,12 @@ impl Default for OptionsSettings {
 #[derive(Resource, Default)]
 pub struct OptionsOpen(pub bool);
 
+/// Whether the F3 erosion-terrain panel is open. A resource (not egui
+/// `Local` state) so `toggle_pause` can close it — Esc closes the topmost
+/// open window before pausing.
+#[derive(Resource, Default)]
+pub struct TerrainPanelOpen(pub bool);
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -90,10 +97,12 @@ impl Plugin for UiPlugin {
             .register_type_data::<OptionsSettings, ReflectSettingsGroup>()
             .add_plugins(SettingsPlugin::new("com.github.VitalyArtemiev.bevy-boids"))
             .init_resource::<OptionsOpen>()
+            .init_resource::<TerrainPanelOpen>()
             .init_state::<GameState>()
-            // The scene picker (F4 / the main-menu Scenes button) rides
-            // the egui context UiPlugin sets up.
+            // The scene picker (F4 / the main-menu Scenes button) and the
+            // Help panel ride the egui context UiPlugin sets up.
             .add_plugins(scenes::ScenesUiPlugin)
+            .add_plugins(help::HelpUiPlugin)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -141,6 +150,7 @@ fn main_menu_ui(
     mut contexts: EguiContexts,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
+    mut help_open: ResMut<help::HelpOpen>,
     mut scenes_open: ResMut<scenes::ScenesOpen>,
     active: Res<ActiveScene>,
     mut commands: Commands,
@@ -163,6 +173,9 @@ fn main_menu_ui(
                 }
                 next_state.set(GameState::Playing);
             }
+            if ui.button("Help").clicked() {
+                help_open.0 = !help_open.0;
+            }
             if ui.button("Scenes").clicked() {
                 scenes_open.0 = !scenes_open.0;
             }
@@ -183,6 +196,7 @@ fn pause_menu_ui(
     mut contexts: EguiContexts,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
+    mut help_open: ResMut<help::HelpOpen>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     let mut root = root_ui(ctx);
@@ -199,6 +213,9 @@ fn pause_menu_ui(
                 ui.add_space(40.0);
                 if ui.button("Resume").clicked() {
                     next_state.set(GameState::Playing);
+                }
+                if ui.button("Help").clicked() {
+                    help_open.0 = !help_open.0;
                 }
                 if ui.button("Options").clicked() {
                     options_open.0 = !options_open.0;
@@ -338,19 +355,19 @@ fn debug_panel_ui(
         &crate::ui::input::TriggerState,
         &crate::ui::input::ActionEvents,
     )>,
-    mut shown: Local<bool>,
+    mut shown: ResMut<TerrainPanelOpen>,
     mut demo: ResMut<DemoTerrain>,
 ) -> Result {
     if crate::ui::input::started(&actions, crate::ui::input::ActionId::ToggleTerrain) {
-        *shown = !*shown;
+        shown.0 = !shown.0;
     }
-    if !*shown {
+    if !shown.0 {
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
     let mut dirty = false;
     egui::Window::new("Erosion terrain")
-        .open(&mut *shown)
+        .open(&mut shown.0)
         .show(ctx, |ui| {
             // Bypass the change flags and re-arm only for real edits.
             let demo = demo.bypass_change_detection();
@@ -603,9 +620,15 @@ fn component_sliders(
     changed
 }
 
-/// Escape pauses/resumes; with the Options window or scene picker open it
-/// closes that instead, and in the main menu it just closes the Options
-/// window.
+/// Escape closes the topmost open menu, and only pauses/resumes when
+/// nothing is open. The main menu itself is the exception — there is
+/// nothing behind it to switch to, so Esc there only closes windows.
+///
+/// Each state's cascade covers only the windows *visible* in that state:
+/// a stale flag from another state (a Help left open when the game
+/// started) can't swallow the press, and the window reappears when its
+/// state returns.
+#[allow(clippy::too_many_arguments)]
 fn toggle_pause(
     actions: Query<(
         &crate::ui::input::ActionTag,
@@ -615,29 +638,56 @@ fn toggle_pause(
     state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut options_open: ResMut<OptionsOpen>,
+    mut help_open: ResMut<help::HelpOpen>,
     mut scenes_open: ResMut<scenes::ScenesOpen>,
+    mut bindings_open: ResMut<crate::ui::input::BindingsOpen>,
+    mut terrain_open: ResMut<TerrainPanelOpen>,
+    mut debug: ResMut<crate::ui::debug::DebugConfig>,
+    radial: Option<Res<radial::RadialMenu>>,
+    mut commands: Commands,
 ) {
     if !crate::ui::input::started(&actions, crate::ui::input::ActionId::Pause) {
         return;
     }
     match state.get() {
         GameState::Playing => {
-            if options_open.0 {
-                options_open.0 = false;
+            if radial.is_some() {
+                // The radial menu owns Esc while open (radial_ui no longer
+                // reads it itself) — closing it must not also pause.
+                commands.remove_resource::<radial::RadialMenu>();
             } else if scenes_open.0 {
                 scenes_open.0 = false;
+            } else if debug.open {
+                debug.open = false;
+            } else if terrain_open.0 {
+                terrain_open.0 = false;
             } else {
                 next_state.set(GameState::Paused);
             }
         }
         GameState::Paused => {
-            if options_open.0 {
+            // Key Bindings opens from Options, so it sits on top.
+            if bindings_open.0 {
+                bindings_open.0 = false;
+            } else if options_open.0 {
                 options_open.0 = false;
+            } else if help_open.0 {
+                help_open.0 = false;
             } else {
                 next_state.set(GameState::Playing);
             }
         }
-        GameState::MainMenu => options_open.0 = false,
+        GameState::MainMenu => {
+            if bindings_open.0 {
+                bindings_open.0 = false;
+            } else if options_open.0 {
+                options_open.0 = false;
+            } else if help_open.0 {
+                help_open.0 = false;
+            } else if scenes_open.0 {
+                scenes_open.0 = false;
+            }
+        }
     }
 }
 

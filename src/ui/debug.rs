@@ -10,7 +10,7 @@ use crate::billboard::BillboardTuning;
 use crate::boid::BoidTuning;
 use crate::crowd::CrowdTuning;
 use crate::formations::{FormationTuning, LODGuard};
-use crate::freecam::{CameraMode, Freecam, FREECAM_MAX_SPEED_MPS, FREECAM_MIN_SPEED_MPS};
+use crate::freecam::{CameraMode, FREECAM_MAX_SPEED_MPS, FREECAM_MIN_SPEED_MPS, Freecam};
 use crate::kinematics::KinematicsTuning;
 use crate::pbd::PbdTuning;
 use crate::sky::SkyTuning;

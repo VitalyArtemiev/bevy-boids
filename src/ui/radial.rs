@@ -417,7 +417,6 @@ fn radial_ui(
 
     let pointer = ctx.pointer_hover_pos().map(|p| Vec2::new(p.x, p.y));
     let primary_clicked = ctx.input(|i| i.pointer.primary_clicked());
-    let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
 
     // Hover, deepest ring first: children sit on top of the parents'.
     let mut hover: Option<(usize, RingHit)> = None;
@@ -430,13 +429,15 @@ fn radial_ui(
         }
     }
 
-    // Cancel: Esc anywhere, or a click fully outside every ring.
+    // Cancel: a click fully outside every ring. Esc is fielded centrally
+    // by `ui::toggle_pause`, which closes the radial menu before pausing —
+    // reading it here too would double-fire the press (close AND pause).
     let inside_any = pointer.is_some_and(|p| {
         rings
             .iter()
             .any(|ring| (p - ring.center).length() <= OUTER_RADIUS_PX)
     });
-    if escape || (primary_clicked && !inside_any) {
+    if primary_clicked && !inside_any {
         commands.remove_resource::<RadialMenu>();
         return Ok(());
     }

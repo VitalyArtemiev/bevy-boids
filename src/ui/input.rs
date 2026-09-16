@@ -14,7 +14,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use bevy_enhanced_input::prelude::*;
 // Not re-exported at the crate root; re-exported here so the rest of the
 // codebase never touches `bevy_enhanced_input` paths directly.
-pub use bevy_enhanced_input::prelude::{ActionEvents, TriggerState};
+pub use bevy_enhanced_input::prelude::{ActionEvents, Binding, Bindings, TriggerState};
 
 /// Marker component for the single player input context entity.
 #[derive(Component)]
@@ -432,6 +432,22 @@ pub fn completed(
 
 // --- Key-bindings UI --------------------------------------------------------
 
+/// The action's current binding: its first bound input, or the default when
+/// the input context hasn't spawned. Used by the rebind list here and by the
+/// Help panel so both stay accurate across remaps.
+pub fn current_binding(
+    q_actions: &Query<(&ActionTag, &Bindings)>,
+    q_bindings: &Query<&Binding>,
+    id: ActionId,
+) -> Binding {
+    q_actions
+        .iter()
+        .find(|(tag, _)| tag.0 == id)
+        .and_then(|(_, bindings)| bindings.iter().next())
+        .and_then(|e| q_bindings.get(e).ok().copied())
+        .unwrap_or_else(|| id.default_binding())
+}
+
 /// The key-bindings window: one row per action with its current binding,
 /// a rebind button that captures the next key/mouse press, and a
 /// reset-to-defaults button. Rebinds that collide with another action
@@ -472,15 +488,6 @@ fn bindings_ui(
         return Ok(());
     }
 
-    let binding_of = |tag: ActionId| -> Binding {
-        q_actions
-            .iter()
-            .find(|(t, _)| t.0 == tag)
-            .and_then(|(_, bindings)| bindings.iter().next())
-            .and_then(|e| q_bindings.get(e).ok().copied())
-            .unwrap_or_else(|| tag.default_binding())
-    };
-
     let ctx = contexts.ctx_mut()?;
     let mut reset_all = false;
     egui::Window::new("Key Bindings")
@@ -493,15 +500,8 @@ fn bindings_ui(
                 .show(ui, |ui| {
                     for id in ActionId::ALL {
                         ui.label(id.label());
-                        let binding = binding_of(id);
-                        let text = match binding {
-                            Binding::Keyboard { key, mod_keys }
-                                if mod_keys.contains(ModKeys::CONTROL) =>
-                            {
-                                format!("Ctrl + {key:?}")
-                            }
-                            other => format!("{other}"),
-                        };
+                        // `Binding`'s Display renders modifiers ("Ctrl + Digit1").
+                        let text = current_binding(&q_actions, &q_bindings, id).to_string();
                         ui.strong(text);
                         if *capturing == Some(id) {
                             let rebind = ui.button("press a key…").on_hover_text("Click to cancel");
